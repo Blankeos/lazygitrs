@@ -108,9 +108,8 @@ impl GitCommands {
                 .args(&["commit", "--amend", "-m", message])
                 .run_expecting_success()?;
         } else {
-            // For non-HEAD commits, use rebase
-            // This is a simplified version; full interactive rebase is Phase 3
-            anyhow::bail!("Rewording non-HEAD commits requires interactive rebase (Phase 3)");
+            // For non-HEAD commits, delegate to interactive rebase
+            self.reword_commit_rebase(hash, message)?;
         }
         Ok(())
     }

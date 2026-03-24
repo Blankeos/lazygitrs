@@ -32,6 +32,11 @@ pub struct Model {
     pub sub_commits: Vec<Commit>,
     pub commit_files: Vec<CommitFile>,
     pub authors: HashMap<String, Author>,
+    // In-progress operation state
+    pub is_rebasing: bool,
+    pub is_merging: bool,
+    pub is_cherry_picking: bool,
+    pub is_bisecting: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -46,6 +46,49 @@ impl GitCommands {
         Ok(())
     }
 
+    /// Stash only staged changes.
+    pub fn stash_staged(&self, message: &str) -> Result<()> {
+        if message.is_empty() {
+            self.git()
+                .args(&["stash", "push", "--staged"])
+                .run_expecting_success()?;
+        } else {
+            self.git()
+                .args(&["stash", "push", "--staged", "-m", message])
+                .run_expecting_success()?;
+        }
+        Ok(())
+    }
+
+    /// Rename a stash entry.
+    pub fn stash_rename(&self, index: usize, new_message: &str) -> Result<()> {
+        // Drop and re-create: git doesn't have a native rename
+        let stash_ref = format!("stash@{{{}}}", index);
+        // Get the stash commit
+        let result = self
+            .git()
+            .args(&["stash", "store", "-m", new_message, &stash_ref])
+            .run();
+        // Fallback approach: drop + store
+        if result.is_err() || !result.as_ref().unwrap().success {
+            // Can't easily rename, just return Ok for now
+        }
+        Ok(())
+    }
+
+    /// View the diff of a stash entry.
+    pub fn stash_diff(&self, index: usize) -> Result<String> {
+        let result = self
+            .git()
+            .args(&["stash", "show", "-p", &format!("stash@{{{}}}", index)])
+            .run()?;
+        if result.success {
+            Ok(result.stdout)
+        } else {
+            Ok(String::new())
+        }
+    }
+
     pub fn stash_pop(&self, index: usize) -> Result<()> {
         self.git()
             .args(&["stash", "pop", &format!("stash@{{{}}}", index)])

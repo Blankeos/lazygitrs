@@ -22,6 +22,11 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return drop_stash(gui);
     }
 
+    // Rename stash
+    if matches_key(key, &keybindings.stash.rename_stash) {
+        return rename_stash(gui);
+    }
+
     Ok(())
 }
 
@@ -72,6 +77,29 @@ fn drop_stash(gui: &mut Gui) -> Result<()> {
             on_confirm: Box::new(move |gui| {
                 gui.git.stash_drop(index)?;
                 gui.needs_refresh = true;
+                Ok(())
+            }),
+        };
+    }
+    Ok(())
+}
+
+fn rename_stash(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let model = gui.model.lock().unwrap();
+    if let Some(entry) = model.stash_entries.get(selected) {
+        let index = entry.index;
+        let current_name = entry.name.clone();
+        drop(model);
+
+        gui.popup = PopupState::Input {
+            title: "Rename stash".to_string(),
+            buffer: current_name,
+            on_confirm: Box::new(move |gui, new_name| {
+                if !new_name.is_empty() {
+                    gui.git.stash_rename(index, new_name)?;
+                    gui.needs_refresh = true;
+                }
                 Ok(())
             }),
         };

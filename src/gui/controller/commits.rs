@@ -3,7 +3,7 @@ use crossterm::event::KeyEvent;
 
 use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
-use crate::gui::popup::{PopupState, MenuItem};
+use crate::gui::popup::{MenuItem, PopupState};
 use crate::gui::Gui;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
@@ -25,6 +25,51 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
 
     if matches_key(key, &keybindings.commits.tag_commit) {
         return tag_commit(gui);
+    }
+
+    // Squash down
+    if matches_key(key, &keybindings.commits.squash_down) {
+        return squash_commit(gui);
+    }
+
+    // Fixup
+    if matches_key(key, &keybindings.commits.mark_commit_as_fixup) {
+        return fixup_commit(gui);
+    }
+
+    // Drop commit
+    if matches_key(key, &keybindings.commits.pick_commit) {
+        return drop_commit(gui);
+    }
+
+    // Move commit up
+    if matches_key(key, &keybindings.commits.move_up_commit) {
+        return move_commit_up(gui);
+    }
+
+    // Move commit down
+    if matches_key(key, &keybindings.commits.move_down_commit) {
+        return move_commit_down(gui);
+    }
+
+    // Create fixup commit
+    if matches_key(key, &keybindings.commits.create_fixup_commit) {
+        return create_fixup_commit(gui);
+    }
+
+    // Amend to commit
+    if matches_key(key, &keybindings.commits.amend_to_commit) {
+        return amend_to_commit(gui);
+    }
+
+    // Bisect options
+    if matches_key(key, &keybindings.commits.view_bisect_options) {
+        return super::bisect::show_bisect_menu(gui);
+    }
+
+    // Checkout commit
+    if matches_key(key, &keybindings.commits.checkout_commit) {
+        return checkout_commit(gui);
     }
 
     Ok(())
@@ -57,6 +102,7 @@ fn reword_commit(gui: &mut Gui) -> Result<()> {
     if let Some(commit) = model.commits.get(selected) {
         let hash = commit.hash.clone();
         let current_msg = commit.name.clone();
+        let is_head = selected == 0;
         drop(model);
 
         gui.popup = PopupState::Input {
@@ -64,7 +110,11 @@ fn reword_commit(gui: &mut Gui) -> Result<()> {
             buffer: current_msg,
             on_confirm: Box::new(move |gui, message| {
                 if !message.is_empty() {
-                    gui.git.reword_commit(&hash, message)?;
+                    if is_head {
+                        gui.git.reword_commit(&hash, message)?;
+                    } else {
+                        gui.git.reword_commit_rebase(&hash, message)?;
+                    }
                     gui.needs_refresh = true;
                 }
                 Ok(())
@@ -126,8 +176,6 @@ fn show_reset_menu(gui: &mut Gui) -> Result<()> {
 }
 
 fn cherry_pick_copy(gui: &mut Gui) -> Result<()> {
-    // Phase 3: full cherry-pick mode with multi-select
-    // For now, just cherry-pick the selected commit
     let selected = gui.context_mgr.selected_active();
     let model = gui.model.lock().unwrap();
     if let Some(commit) = model.commits.get(selected) {
@@ -163,6 +211,186 @@ fn tag_commit(gui: &mut Gui) -> Result<()> {
                     gui.git.create_tag(name, "")?;
                     gui.needs_refresh = true;
                 }
+                Ok(())
+            }),
+        };
+    }
+    Ok(())
+}
+
+fn squash_commit(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    if selected == 0 {
+        return Ok(()); // Can't squash HEAD into nothing
+    }
+    let model = gui.model.lock().unwrap();
+    if let Some(commit) = model.commits.get(selected) {
+        let hash = commit.hash.clone();
+        let short = commit.short_hash().to_string();
+        drop(model);
+
+        gui.popup = PopupState::Confirm {
+            title: "Squash".to_string(),
+            message: format!("Squash commit {} into its parent?", short),
+            on_confirm: Box::new(move |gui| {
+                gui.git.squash_commit(&hash)?;
+                gui.needs_refresh = true;
+                Ok(())
+            }),
+        };
+    }
+    Ok(())
+}
+
+fn fixup_commit(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    if selected == 0 {
+        return Ok(());
+    }
+    let model = gui.model.lock().unwrap();
+    if let Some(commit) = model.commits.get(selected) {
+        let hash = commit.hash.clone();
+        let short = commit.short_hash().to_string();
+        drop(model);
+
+        gui.popup = PopupState::Confirm {
+            title: "Fixup".to_string(),
+            message: format!("Fixup commit {} into its parent?", short),
+            on_confirm: Box::new(move |gui| {
+                gui.git.fixup_commit(&hash)?;
+                gui.needs_refresh = true;
+                Ok(())
+            }),
+        };
+    }
+    Ok(())
+}
+
+fn drop_commit(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let model = gui.model.lock().unwrap();
+    if let Some(commit) = model.commits.get(selected) {
+        let hash = commit.hash.clone();
+        let short = commit.short_hash().to_string();
+        drop(model);
+
+        gui.popup = PopupState::Confirm {
+            title: "Drop commit".to_string(),
+            message: format!("Drop commit {} from history?", short),
+            on_confirm: Box::new(move |gui| {
+                gui.git.drop_commit(&hash)?;
+                gui.needs_refresh = true;
+                Ok(())
+            }),
+        };
+    }
+    Ok(())
+}
+
+fn move_commit_up(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    if selected == 0 {
+        return Ok(());
+    }
+    let model = gui.model.lock().unwrap();
+    if let Some(commit) = model.commits.get(selected) {
+        let hash = commit.hash.clone();
+        drop(model);
+        gui.git.move_commit_up(&hash)?;
+        gui.needs_refresh = true;
+    }
+    Ok(())
+}
+
+fn move_commit_down(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let model = gui.model.lock().unwrap();
+    let commits_len = model.commits.len();
+    if let Some(commit) = model.commits.get(selected) {
+        if selected >= commits_len - 1 {
+            drop(model);
+            return Ok(());
+        }
+        let hash = commit.hash.clone();
+        drop(model);
+        gui.git.move_commit_down(&hash)?;
+        gui.needs_refresh = true;
+    }
+    Ok(())
+}
+
+fn create_fixup_commit(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let model = gui.model.lock().unwrap();
+    if let Some(commit) = model.commits.get(selected) {
+        let hash = commit.hash.clone();
+        let short = commit.short_hash().to_string();
+        drop(model);
+
+        gui.popup = PopupState::Confirm {
+            title: "Create fixup commit".to_string(),
+            message: format!("Create fixup commit for {}?", short),
+            on_confirm: Box::new(move |gui| {
+                gui.git.create_fixup_commit(&hash)?;
+                gui.needs_refresh = true;
+                Ok(())
+            }),
+        };
+    }
+    Ok(())
+}
+
+fn amend_to_commit(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let model = gui.model.lock().unwrap();
+    if let Some(commit) = model.commits.get(selected) {
+        if selected == 0 {
+            // HEAD commit — just amend
+            drop(model);
+            gui.popup = PopupState::Confirm {
+                title: "Amend".to_string(),
+                message: "Amend staged changes to HEAD commit?".to_string(),
+                on_confirm: Box::new(|gui| {
+                    gui.git.amend_commit()?;
+                    gui.needs_refresh = true;
+                    Ok(())
+                }),
+            };
+        } else {
+            // Non-HEAD: create fixup commit + autosquash
+            let hash = commit.hash.clone();
+            let short = commit.short_hash().to_string();
+            drop(model);
+
+            gui.popup = PopupState::Confirm {
+                title: "Amend to commit".to_string(),
+                message: format!("Amend staged changes to commit {}?", short),
+                on_confirm: Box::new(move |gui| {
+                    gui.git.create_fixup_commit(&hash)?;
+                    gui.git.rebase_autosquash(&format!("{}^", hash))?;
+                    gui.needs_refresh = true;
+                    Ok(())
+                }),
+            };
+        }
+    }
+    Ok(())
+}
+
+fn checkout_commit(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let model = gui.model.lock().unwrap();
+    if let Some(commit) = model.commits.get(selected) {
+        let hash = commit.hash.clone();
+        let short = commit.short_hash().to_string();
+        drop(model);
+
+        gui.popup = PopupState::Confirm {
+            title: "Checkout commit".to_string(),
+            message: format!("Checkout commit {}? (detached HEAD)", short),
+            on_confirm: Box::new(move |gui| {
+                gui.git.checkout_branch(&hash)?;
+                gui.needs_refresh = true;
                 Ok(())
             }),
         };

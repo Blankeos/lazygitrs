@@ -36,6 +36,10 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return fast_forward(gui);
     }
 
+    if matches_key(key, &keybindings.branches.set_upstream) {
+        return set_upstream(gui);
+    }
+
     Ok(())
 }
 
@@ -165,6 +169,26 @@ fn fast_forward(gui: &mut Gui) -> Result<()> {
             gui.git.fetch("origin")?;
             gui.needs_refresh = true;
         }
+    }
+    Ok(())
+}
+
+fn set_upstream(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let model = gui.model.lock().unwrap();
+    if let Some(branch) = model.branches.get(selected) {
+        let name = branch.name.clone();
+        drop(model);
+
+        gui.popup = PopupState::Confirm {
+            title: "Set upstream".to_string(),
+            message: format!("Set upstream of '{}' to origin/{}?", name, name),
+            on_confirm: Box::new(move |gui| {
+                gui.git.push_with_upstream("origin", &name)?;
+                gui.needs_refresh = true;
+                Ok(())
+            }),
+        };
     }
     Ok(())
 }

@@ -21,7 +21,7 @@ use crate::git::GitCommands;
 use crate::model::Model;
 use crate::pager::side_by_side::DiffViewState;
 
-use self::context::{ContextId, ContextManager};
+use self::context::{ContextId, ContextManager, SideWindow};
 use self::layout::LayoutState;
 use self::popup::PopupState;
 
@@ -189,6 +189,23 @@ impl Gui {
                     }
                 }
             }
+            ContextId::Stash => {
+                if let Some(entry) = model.stash_entries.get(selected) {
+                    let index = entry.index;
+                    drop(model);
+
+                    if let Ok(diff) = self.git.stash_diff(index) {
+                        if diff.is_empty() {
+                            self.diff_view = DiffViewState::new();
+                        } else {
+                            let filename = format!("stash@{{{}}}", index);
+                            self.diff_view.load_from_diff_output(&filename, &diff);
+                        }
+                    }
+                } else {
+                    drop(model);
+                }
+            }
             _ => {
                 drop(model);
             }
@@ -211,23 +228,32 @@ impl Gui {
             return Ok(());
         }
 
-        // Tab to switch panels
+        // Number keys 1-5 to jump to window (press again to cycle tabs)
+        if let KeyCode::Char(c @ '1'..='5') = key.code {
+            let n = c.to_digit(10).unwrap();
+            if let Some(window) = SideWindow::from_number(n) {
+                self.context_mgr.jump_to_window(window);
+                return Ok(());
+            }
+        }
+
+        // Tab to switch windows
         if matches_key(key, &keybindings.universal.toggle_panel) {
-            self.context_mgr.next_context();
+            self.context_mgr.next_window();
             return Ok(());
         }
 
-        // Arrow keys to switch panels
+        // Arrow keys / h/l to switch windows
         if matches_key(key, &keybindings.universal.prev_block)
             || matches_key(key, &keybindings.universal.prev_block_alt)
         {
-            self.context_mgr.prev_context();
+            self.context_mgr.prev_window();
             return Ok(());
         }
         if matches_key(key, &keybindings.universal.next_block)
             || matches_key(key, &keybindings.universal.next_block_alt)
         {
-            self.context_mgr.next_context();
+            self.context_mgr.next_window();
             return Ok(());
         }
 
@@ -295,6 +321,31 @@ impl Gui {
             return Ok(());
         }
 
+        // Rebase options menu (global — when rebasing/merging)
+        if matches_key(key, &keybindings.universal.create_rebase_options_menu) {
+            let model = self.model.lock().unwrap();
+            let is_rebasing = model.is_rebasing;
+            let is_merging = model.is_merging;
+            let is_cherry_picking = model.is_cherry_picking;
+            drop(model);
+
+            if is_rebasing || is_merging || is_cherry_picking {
+                return self.show_rebase_options_menu(is_rebasing, is_merging, is_cherry_picking);
+            }
+        }
+
+        // Push (global)
+        if matches_key(key, &keybindings.universal.push_files) {
+            controller::remotes::handle_key(self, key, &self.config.user_config.keybinding.clone())?;
+            return Ok(());
+        }
+
+        // Pull (global)
+        if matches_key(key, &keybindings.universal.pull_files) {
+            controller::remotes::handle_key(self, key, &self.config.user_config.keybinding.clone())?;
+            return Ok(());
+        }
+
         // Screen mode toggle
         if key.code == KeyCode::Enter {
             self.cycle_screen_mode();
@@ -323,6 +374,12 @@ impl Gui {
             }
             ContextId::Stash => {
                 controller::stash::handle_key(self, key, &keybindings)?;
+            }
+            ContextId::Remotes => {
+                controller::remotes::handle_key(self, key, &keybindings)?;
+            }
+            ContextId::Tags => {
+                controller::tags::handle_key(self, key, &keybindings)?;
             }
             _ => {}
         }
@@ -401,6 +458,68 @@ impl Gui {
             }
             PopupState::None => {}
         }
+        Ok(())
+    }
+
+    fn show_rebase_options_menu(
+        &mut self,
+        is_rebasing: bool,
+        is_merging: bool,
+        _is_cherry_picking: bool,
+    ) -> Result<()> {
+        let mut items = Vec::new();
+
+        if is_rebasing {
+            items.push(popup::MenuItem {
+                label: "Continue rebase".to_string(),
+                description: "git rebase --continue".to_string(),
+                key: Some("c".to_string()),
+                action: Some(Box::new(|gui| {
+                    gui.git.continue_rebase()?;
+                    gui.needs_refresh = true;
+                    Ok(())
+                })),
+            });
+            items.push(popup::MenuItem {
+                label: "Abort rebase".to_string(),
+                description: "git rebase --abort".to_string(),
+                key: Some("a".to_string()),
+                action: Some(Box::new(|gui| {
+                    gui.git.abort_rebase()?;
+                    gui.needs_refresh = true;
+                    Ok(())
+                })),
+            });
+            items.push(popup::MenuItem {
+                label: "Skip this commit".to_string(),
+                description: "git rebase --skip".to_string(),
+                key: Some("s".to_string()),
+                action: Some(Box::new(|gui| {
+                    gui.git.rebase_skip()?;
+                    gui.needs_refresh = true;
+                    Ok(())
+                })),
+            });
+        }
+
+        if is_merging {
+            items.push(popup::MenuItem {
+                label: "Abort merge".to_string(),
+                description: "git merge --abort".to_string(),
+                key: Some("a".to_string()),
+                action: Some(Box::new(|gui| {
+                    gui.git.abort_merge()?;
+                    gui.needs_refresh = true;
+                    Ok(())
+                })),
+            });
+        }
+
+        self.popup = PopupState::Menu {
+            title: "Rebase/Merge options".to_string(),
+            items,
+            selected: 0,
+        };
         Ok(())
     }
 

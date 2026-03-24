@@ -1,8 +1,10 @@
+pub mod bisect;
 pub mod branch;
 pub mod commit;
 pub mod diff;
 pub mod file;
 pub mod loader;
+pub mod rebase;
 pub mod remote;
 pub mod staging;
 pub mod stash;
@@ -45,6 +47,14 @@ impl GitCommands {
         model.stash_entries = self.load_stash()?;
         model.remotes = self.load_remotes()?;
         model.tags = self.load_tags()?;
+
+        // Load in-progress operation state
+        if let Ok(status) = self.repo_status() {
+            model.is_rebasing = status.is_rebasing;
+            model.is_merging = status.is_merging;
+            model.is_cherry_picking = status.is_cherry_picking;
+            model.is_bisecting = status.is_bisecting;
+        }
 
         Ok(model)
     }

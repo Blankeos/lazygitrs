@@ -8,7 +8,7 @@ use crate::config::AppConfig;
 use crate::model::Model;
 use crate::pager::side_by_side::{self, DiffViewState};
 
-use super::context::{ContextId, ContextManager};
+use super::context::{ContextId, ContextManager, SideWindow};
 use super::layout::{self, LayoutState};
 use super::popup::PopupState;
 use super::presentation;
@@ -26,18 +26,19 @@ pub fn render(
 ) {
     let area = frame.area();
     let theme = config.user_config.theme();
-    let panel_count = ContextId::SIDEBAR_ORDER.len();
+    let panel_count = SideWindow::ALL.len();
 
     let fl = layout::compute_layout(area, layout_state.side_panel_ratio, panel_count);
 
-    // Render sidebar panels
-    for (i, ctx_id) in ContextId::SIDEBAR_ORDER.iter().enumerate() {
+    // Render sidebar panels — one per window
+    for (i, window) in SideWindow::ALL.iter().enumerate() {
         if i >= fl.side_panels.len() {
             break;
         }
         let rect = fl.side_panels[i];
-        let is_active = *ctx_id == ctx_mgr.active();
-        let selected = ctx_mgr.selected(*ctx_id);
+        let ctx_id = ctx_mgr.active_context_for_window(*window);
+        let is_active = ctx_mgr.active_window() == *window;
+        let selected = ctx_mgr.selected(ctx_id);
 
         let border_style = if is_active {
             theme.active_border
@@ -45,11 +46,8 @@ pub fn render(
             theme.inactive_border
         };
 
-        let title = format!(
-            " {} {} ",
-            ctx_id.short_key(),
-            ctx_id.title()
-        );
+        // Build title with tab indicators for multi-tab windows
+        let title = build_window_title(*window, ctx_id, ctx_mgr);
 
         let block = Block::default()
             .title(title)
@@ -66,8 +64,24 @@ pub fn render(
                 let items = presentation::files::render_file_list(model, &theme);
                 render_list(frame, rect, block, items, selected, &theme);
             }
+            ContextId::Worktrees => {
+                let items = render_worktree_list(model);
+                render_list(frame, rect, block, items, selected, &theme);
+            }
+            ContextId::Submodules => {
+                let widget = Paragraph::new(" (no submodules)").block(block);
+                frame.render_widget(widget, rect);
+            }
             ContextId::Branches => {
                 let items = presentation::branches::render_branch_list(model, &theme);
+                render_list(frame, rect, block, items, selected, &theme);
+            }
+            ContextId::Remotes => {
+                let items = presentation::remotes::render_remote_list(model, &theme);
+                render_list(frame, rect, block, items, selected, &theme);
+            }
+            ContextId::Tags => {
+                let items = presentation::tags::render_tag_list(model, &theme);
                 render_list(frame, rect, block, items, selected, &theme);
             }
             ContextId::Commits => {
@@ -109,6 +123,29 @@ pub fn render(
     }
 }
 
+/// Build a window title like " 3 Branches | Remotes | Tags " with the active tab highlighted.
+fn build_window_title(window: SideWindow, active_ctx: ContextId, _ctx_mgr: &ContextManager) -> String {
+    let tabs = window.tabs();
+    let key = window.key_label();
+
+    if tabs.len() == 1 {
+        return format!(" {} {} ", key, tabs[0].title());
+    }
+
+    let tab_parts: Vec<String> = tabs
+        .iter()
+        .map(|ctx| {
+            if *ctx == active_ctx {
+                format!("[{}]", ctx.title())
+            } else {
+                ctx.title().to_string()
+            }
+        })
+        .collect();
+
+    format!(" {} {} ", key, tab_parts.join(" | "))
+}
+
 fn render_status_panel<'a>(model: &Model, config: &AppConfig) -> Vec<Line<'a>> {
     let branch_name = model
         .branches
@@ -117,7 +154,7 @@ fn render_status_panel<'a>(model: &Model, config: &AppConfig) -> Vec<Line<'a>> {
         .map(|b| b.name.as_str())
         .unwrap_or("detached");
 
-    vec![
+    let mut lines = vec![
         Line::from(Span::styled(
             format!(" {} ", config.user_config.gui.nerd_fonts_version),
             Style::default().fg(Color::Cyan),
@@ -125,7 +162,60 @@ fn render_status_panel<'a>(model: &Model, config: &AppConfig) -> Vec<Line<'a>> {
         Line::from(format!(" Branch: {}", branch_name)),
         Line::from(format!(" Commits: {}", model.commits.len())),
         Line::from(format!(" Files: {}", model.files.len())),
-    ]
+    ];
+
+    // Show in-progress operation status
+    if model.is_rebasing {
+        lines.push(Line::from(Span::styled(
+            " REBASING (m: options)",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    if model.is_merging {
+        lines.push(Line::from(Span::styled(
+            " MERGING",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    if model.is_cherry_picking {
+        lines.push(Line::from(Span::styled(
+            " CHERRY-PICKING",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    if model.is_bisecting {
+        lines.push(Line::from(Span::styled(
+            " BISECTING",
+            Style::default().fg(Color::Magenta),
+        )));
+    }
+
+    lines
+}
+
+fn render_worktree_list<'a>(model: &Model) -> Vec<ListItem<'a>> {
+    model
+        .worktrees
+        .iter()
+        .map(|wt| {
+            let marker = if wt.is_current { "* " } else { "  " };
+            let line = Line::from(vec![
+                Span::styled(
+                    marker.to_string(),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::styled(
+                    wt.branch.clone(),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    format!(" {}", wt.path),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]);
+            ListItem::new(line)
+        })
+        .collect()
 }
 
 fn render_list(
@@ -218,6 +308,52 @@ fn get_info_content<'a>(model: &Model, ctx_mgr: &ContextManager) -> Vec<Line<'a>
                 vec![Line::from(" No stash entries")]
             }
         }
+        ContextId::Remotes => {
+            if let Some(remote) = model.remotes.get(selected) {
+                let mut lines = vec![Line::from(format!(" Remote: {}", remote.name))];
+                for url in &remote.urls {
+                    lines.push(Line::from(format!(" URL: {}", url)));
+                }
+                lines.push(Line::from(format!(
+                    " Branches: {}",
+                    remote.branches.len()
+                )));
+                for branch in &remote.branches {
+                    lines.push(Line::from(format!(
+                        "   {} ({})",
+                        branch.name, branch.hash
+                    )));
+                }
+                lines
+            } else {
+                vec![Line::from(" No remotes")]
+            }
+        }
+        ContextId::Tags => {
+            if let Some(tag) = model.tags.get(selected) {
+                let mut lines = vec![
+                    Line::from(format!(" Tag: {}", tag.name)),
+                    Line::from(format!(" Hash: {}", tag.hash)),
+                ];
+                if !tag.message.is_empty() {
+                    lines.push(Line::from(format!(" Message: {}", tag.message)));
+                }
+                lines
+            } else {
+                vec![Line::from(" No tags")]
+            }
+        }
+        ContextId::Worktrees => {
+            if let Some(wt) = model.worktrees.get(selected) {
+                vec![
+                    Line::from(format!(" Worktree: {}", wt.branch)),
+                    Line::from(format!(" Path: {}", wt.path)),
+                    Line::from(format!(" Hash: {}", wt.hash)),
+                ]
+            } else {
+                vec![Line::from(" No worktrees")]
+            }
+        }
         _ => vec![Line::from(" lazygitrs")],
     }
 }
@@ -234,6 +370,8 @@ fn render_status_bar(
         ContextId::Branches => "<space>: checkout | n: new | d: delete | M: merge | r: rebase",
         ContextId::Commits => "r: reword | g: reset | t: revert | C: cherry-pick | T: tag",
         ContextId::Stash => "g: pop | <space>: apply | d: drop",
+        ContextId::Remotes => "f: fetch | P: push | p: pull",
+        ContextId::Tags => "n: new | d: delete | P: push",
         _ => "",
     };
 
@@ -248,7 +386,10 @@ fn render_status_bar(
     };
 
     let bar = Paragraph::new(Span::styled(
-        format!(" {} | q: quit | tab: panels | j/k: nav{}", context_hints, scroll_info),
+        format!(
+            " {} | q: quit | tab/1-5: panels | j/k: nav{}",
+            context_hints, scroll_info
+        ),
         theme.status_bar,
     ));
     frame.render_widget(bar, rect);
