@@ -7,21 +7,28 @@ use crate::gui::popup::PopupState;
 use crate::gui::Gui;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
-    // Enter to toggle directory collapse in tree view
-    if key.code == KeyCode::Enter && gui.show_file_tree {
-        let selected = gui.context_mgr.selected_active();
-        if let Some(node) = gui.file_tree_nodes.get(selected) {
-            if node.is_dir {
-                let path = node.path.clone();
-                if gui.collapsed_dirs.contains(&path) {
-                    gui.collapsed_dirs.remove(&path);
-                } else {
-                    gui.collapsed_dirs.insert(path);
+    // Enter: toggle directory collapse in tree view, or focus diff for files
+    if key.code == KeyCode::Enter {
+        if gui.show_file_tree {
+            let selected = gui.context_mgr.selected_active();
+            if let Some(node) = gui.file_tree_nodes.get(selected) {
+                if node.is_dir {
+                    let path = node.path.clone();
+                    if gui.collapsed_dirs.contains(&path) {
+                        gui.collapsed_dirs.remove(&path);
+                    } else {
+                        gui.collapsed_dirs.insert(path);
+                    }
+                    gui.update_file_tree_state();
+                    return Ok(());
                 }
-                gui.update_file_tree_state();
-                return Ok(());
             }
         }
+        // Focus the diff panel for the selected file
+        if !gui.diff_view.is_empty() {
+            gui.diff_focused = true;
+        }
+        return Ok(());
     }
 
     // Stage/unstage toggle with space
@@ -114,6 +121,34 @@ fn toggle_stage_all(gui: &mut Gui) -> Result<()> {
 }
 
 fn open_commit_prompt(gui: &mut Gui) -> Result<()> {
+    let model = gui.model.lock().unwrap();
+    let any_staged = model.files.iter().any(|f| f.has_staged_changes);
+    drop(model);
+
+    if !any_staged {
+        // No files staged — ask to commit all, like lazygit
+        gui.popup = PopupState::Confirm {
+            title: "No files staged".to_string(),
+            message: "You have not staged any files. Commit all files?".to_string(),
+            on_confirm: Box::new(|gui| {
+                gui.git.stage_all()?;
+                gui.popup = PopupState::Input {
+                    title: "Commit message".to_string(),
+                    buffer: String::new(),
+                    on_confirm: Box::new(|gui, message| {
+                        if !message.is_empty() {
+                            gui.git.create_commit(message, false)?;
+                            gui.needs_refresh = true;
+                        }
+                        Ok(())
+                    }),
+                };
+                Ok(())
+            }),
+        };
+        return Ok(());
+    }
+
     gui.popup = PopupState::Input {
         title: "Commit message".to_string(),
         buffer: String::new(),

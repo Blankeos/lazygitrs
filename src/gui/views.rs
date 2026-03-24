@@ -29,6 +29,7 @@ pub fn render(
     show_file_tree: bool,
     file_tree_nodes: &[FileTreeNode],
     collapsed_dirs: &HashSet<String>,
+    diff_focused: bool,
 ) {
     let area = frame.area();
     let theme = config.user_config.theme();
@@ -43,20 +44,68 @@ pub fn render(
 
     let fl = layout::compute_layout(area, layout_state.side_panel_ratio, panel_count, active_panel_index, screen_mode);
 
-    // Full screen mode: only render the main panel
+    // Full screen mode
     if screen_mode == ScreenMode::Full {
-        if ctx_mgr.active() == ContextId::Status {
-            render_status_main(frame, fl.main_panel, model, config, &theme);
-        } else if !diff_view.is_empty() {
-            side_by_side::render_diff(frame, fl.main_panel, diff_view, &theme);
+        if diff_focused {
+            // Diff is focused: show diff fullscreen
+            if !diff_view.is_empty() {
+                side_by_side::render_diff(frame, fl.main_panel, diff_view, &theme, true);
+            } else {
+                let block = Block::default()
+                    .title(" Diff ")
+                    .borders(Borders::ALL)
+                    .border_style(theme.active_border);
+                let widget = Paragraph::new(" No changes to display").block(block);
+                frame.render_widget(widget, fl.main_panel);
+            }
         } else {
+            // Sidebar is focused: show active sidebar panel fullscreen
+            let ctx_id = ctx_mgr.active();
+            let selected = ctx_mgr.selected(ctx_id);
+            let title = build_window_title(ctx_mgr.active_window(), ctx_id, ctx_mgr);
             let block = Block::default()
-                .title(" Diff ")
+                .title(title)
                 .borders(Borders::ALL)
-                .border_style(theme.inactive_border);
-            let info = get_info_content(model, ctx_mgr);
-            let widget = Paragraph::new(info).block(block);
-            frame.render_widget(widget, fl.main_panel);
+                .border_style(theme.active_border);
+
+            match ctx_id {
+                ContextId::Status => {
+                    render_status_main(frame, fl.main_panel, model, config, &theme);
+                }
+                ContextId::Files => {
+                    if show_file_tree {
+                        let items = presentation::files::render_file_tree(model, &theme, file_tree_nodes, collapsed_dirs);
+                        render_list(frame, fl.main_panel, block, items, selected, true, &theme);
+                    } else {
+                        let items = presentation::files::render_file_list(model, &theme);
+                        render_list(frame, fl.main_panel, block, items, selected, true, &theme);
+                    }
+                }
+                ContextId::Branches => {
+                    let items = presentation::branches::render_branch_list(model, &theme);
+                    render_list(frame, fl.main_panel, block, items, selected, true, &theme);
+                }
+                ContextId::Remotes => {
+                    let items = presentation::remotes::render_remote_list(model, &theme);
+                    render_list(frame, fl.main_panel, block, items, selected, true, &theme);
+                }
+                ContextId::Tags => {
+                    let items = presentation::tags::render_tag_list(model, &theme);
+                    render_list(frame, fl.main_panel, block, items, selected, true, &theme);
+                }
+                ContextId::Commits => {
+                    let items = presentation::commits::render_commit_list(model, &theme);
+                    render_list(frame, fl.main_panel, block, items, selected, true, &theme);
+                }
+                ContextId::Stash => {
+                    let items = presentation::stash::render_stash_list(model, &theme);
+                    render_list(frame, fl.main_panel, block, items, selected, true, &theme);
+                }
+                _ => {
+                    let widget = Paragraph::new("").block(block);
+                    frame.render_widget(widget, fl.main_panel);
+                }
+            }
         }
         render_status_bar(frame, fl.status_bar, ctx_mgr, diff_view, &theme);
         if *popup != PopupState::None {
@@ -75,7 +124,7 @@ pub fn render(
         let is_active = ctx_mgr.active_window() == *window;
         let selected = ctx_mgr.selected(ctx_id);
 
-        let border_style = if is_active {
+        let border_style = if is_active && !diff_focused {
             theme.active_border
         } else {
             theme.inactive_border
@@ -145,7 +194,7 @@ pub fn render(
         // Status view: show logo + copyright in the main content area
         render_status_main(frame, fl.main_panel, model, config, &theme);
     } else if !diff_view.is_empty() {
-        side_by_side::render_diff(frame, fl.main_panel, diff_view, &theme);
+        side_by_side::render_diff(frame, fl.main_panel, diff_view, &theme, diff_focused);
     } else {
         // Fallback: show info about selected item
         let block = Block::default()

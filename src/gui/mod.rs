@@ -68,6 +68,8 @@ pub struct Gui {
     pub file_tree_nodes: Vec<FileTreeNode>,
     /// Set of collapsed directory paths in the file tree.
     pub collapsed_dirs: HashSet<String>,
+    /// Whether the diff/main panel is focused (entered via Enter on a file).
+    pub diff_focused: bool,
     /// Track what we last loaded a diff for, to avoid reloading on every frame.
     last_diff_key: String,
     /// Generation counter — incremented on each diff request, used to discard stale results.
@@ -108,6 +110,7 @@ impl Gui {
             show_file_tree,
             file_tree_nodes: Vec::new(),
             collapsed_dirs: HashSet::new(),
+            diff_focused: false,
             last_diff_key: String::new(),
             diff_generation: Arc::new(AtomicU64::new(0)),
             diff_rx,
@@ -153,6 +156,7 @@ impl Gui {
                     self.show_file_tree,
                     &self.file_tree_nodes,
                     &self.collapsed_dirs,
+                    self.diff_focused,
                 );
             })?;
 
@@ -343,6 +347,11 @@ impl Gui {
 
         let keybindings = &self.config.user_config.keybinding;
 
+        // When diff panel is focused, handle diff-specific keys
+        if self.diff_focused {
+            return self.handle_diff_focused_key(key);
+        }
+
         // Global keybindings
         if matches_key(key, &keybindings.universal.quit)
             || matches_key(key, &keybindings.universal.quit_alt1)
@@ -511,6 +520,69 @@ impl Gui {
             _ => {}
         }
 
+        Ok(())
+    }
+
+    fn handle_diff_focused_key(&mut self, key: KeyEvent) -> Result<()> {
+        let keybindings = &self.config.user_config.keybinding;
+
+        // Screen mode cycling works even when diff is focused
+        if matches_key(key, &keybindings.universal.next_screen_mode) {
+            self.next_screen_mode();
+            return Ok(());
+        }
+        if matches_key(key, &keybindings.universal.prev_screen_mode) {
+            self.prev_screen_mode();
+            return Ok(());
+        }
+
+        match key.code {
+            // Escape to unfocus diff, return to sidebar
+            KeyCode::Esc => {
+                self.diff_focused = false;
+            }
+            // q quits the app (same as global behavior)
+            KeyCode::Char('q') => {
+                self.should_quit = true;
+            }
+            // j/k/up/down scroll line by line
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.diff_view.scroll_down(1);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.diff_view.scroll_up(1);
+            }
+            // h/l/left/right scroll horizontally
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.diff_view.scroll_left(4);
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.diff_view.scroll_right(4);
+            }
+            // ] and [ jump between hunks
+            KeyCode::Char(']') => {
+                self.diff_view.next_hunk();
+            }
+            KeyCode::Char('[') => {
+                self.diff_view.prev_hunk();
+            }
+            // Page up/down for larger scrolling
+            KeyCode::PageDown => {
+                self.diff_view.scroll_down(20);
+            }
+            KeyCode::PageUp => {
+                self.diff_view.scroll_up(20);
+            }
+            // g/G for top/bottom
+            KeyCode::Char('g') => {
+                self.diff_view.scroll_offset = 0;
+            }
+            KeyCode::Char('G') => {
+                let max = self.diff_view.lines.len().saturating_sub(1);
+                self.diff_view.scroll_offset = max;
+            }
+            _ => {}
+        }
         Ok(())
     }
 

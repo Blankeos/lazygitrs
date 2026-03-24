@@ -13,6 +13,7 @@ use super::{ChangeType, DiffLine, InlineSegment};
 /// State for the diff view panel.
 pub struct DiffViewState {
     pub scroll_offset: usize,
+    pub horizontal_scroll: usize,
     pub lines: Vec<DiffLine>,
     pub hunk_starts: Vec<usize>,
     pub filename: String,
@@ -28,6 +29,7 @@ impl Default for DiffViewState {
     fn default() -> Self {
         Self {
             scroll_offset: 0,
+            horizontal_scroll: 0,
             lines: Vec::new(),
             hunk_starts: Vec::new(),
             filename: String::new(),
@@ -56,6 +58,7 @@ impl DiffViewState {
         self.lines = super::diff_algo::compute_side_by_side(old, new, self.tab_width);
         self.hunk_starts = super::diff_algo::find_hunk_starts(&self.lines);
         self.scroll_offset = 0;
+        self.horizontal_scroll = 0;
         // Pre-compute syntax highlighters once on load, not every frame
         self.cached_old_highlighter = Some(FileHighlighter::new(&self.old_content, &self.filename));
         self.cached_new_highlighter = Some(FileHighlighter::new(&self.new_content, &self.filename));
@@ -74,6 +77,14 @@ impl DiffViewState {
     pub fn scroll_down(&mut self, amount: usize) {
         let max = self.lines.len().saturating_sub(1);
         self.scroll_offset = (self.scroll_offset + amount).min(max);
+    }
+
+    pub fn scroll_left(&mut self, amount: usize) {
+        self.horizontal_scroll = self.horizontal_scroll.saturating_sub(amount);
+    }
+
+    pub fn scroll_right(&mut self, amount: usize) {
+        self.horizontal_scroll += amount;
     }
 
     pub fn next_hunk(&mut self) {
@@ -109,12 +120,19 @@ pub fn render_diff(
     area: Rect,
     state: &DiffViewState,
     theme: &Theme,
+    focused: bool,
 ) {
+    let border_style = if focused {
+        theme.active_border
+    } else {
+        theme.inactive_border
+    };
+
     if state.is_empty() {
         let block = Block::default()
             .title(" Diff ")
             .borders(Borders::ALL)
-            .border_style(theme.inactive_border);
+            .border_style(border_style);
         let widget = Paragraph::new(" No changes to display");
         frame.render_widget(widget.block(block), area);
         return;
@@ -123,7 +141,7 @@ pub fn render_diff(
     let block = Block::default()
         .title(format!(" {} ", state.filename))
         .borders(Borders::ALL)
-        .border_style(theme.inactive_border);
+        .border_style(border_style);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -182,7 +200,7 @@ pub fn render_diff(
                 theme,
                 content_width as usize,
             );
-            buf_write_spans(buf, inner.x + gutter_width, y, &spans, content_width);
+            buf_write_spans(buf, inner.x + gutter_width, y, &spans, content_width, state.horizontal_scroll);
         }
     } else {
         // Normal side-by-side diff
@@ -235,7 +253,7 @@ pub fn render_diff(
                     panel_width as usize,
                 )
             };
-            buf_write_spans(buf, inner.x + gutter_width, y, &left_spans, panel_width);
+            buf_write_spans(buf, inner.x + gutter_width, y, &left_spans, panel_width, state.horizontal_scroll);
 
             // Divider
             let div_x = inner.x + gutter_width + panel_width;
@@ -276,7 +294,7 @@ pub fn render_diff(
             let right_content_width = inner
                 .width
                 .saturating_sub(gutter_width * 2 + panel_width + divider_width);
-            buf_write_spans(buf, right_content_x, y, &right_spans, right_content_width);
+            buf_write_spans(buf, right_content_x, y, &right_spans, right_content_width, state.horizontal_scroll);
         }
     }
 }
@@ -307,14 +325,16 @@ fn buf_write_str(buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style, max
 }
 
 /// Write styled spans directly to the buffer at (x, y), clamped to max_width.
+/// `h_scroll` skips the first N display columns of content.
 #[inline]
-fn buf_write_spans(buf: &mut Buffer, x: u16, y: u16, spans: &[Span<'_>], max_width: u16) {
+fn buf_write_spans(buf: &mut Buffer, x: u16, y: u16, spans: &[Span<'_>], max_width: u16, h_scroll: usize) {
     let buf_area = buf.area();
     if y < buf_area.y || y >= buf_area.y + buf_area.height {
         return;
     }
     let mut col = x;
     let end_col = x.saturating_add(max_width).min(buf_area.x + buf_area.width);
+    let mut skipped: usize = 0;
     for span in spans {
         for ch in span.content.chars() {
             if col >= end_col {
@@ -322,6 +342,10 @@ fn buf_write_spans(buf: &mut Buffer, x: u16, y: u16, spans: &[Span<'_>], max_wid
             }
             let width = unicode_display_width(ch);
             if width == 0 {
+                continue;
+            }
+            if skipped < h_scroll {
+                skipped += width;
                 continue;
             }
             if let Some(cell) = buf.cell_mut((col, y)) {

@@ -1,16 +1,23 @@
 # lazygitrs
 
-A slopfork/port of lazygit into rust.
+A slopfork of lazygit, but in rust (🦀 rust btw).
 
-It's literally just a "something I would use" tool. I don't recommend everyone else using it. Aims to do everything lazygit can, but better + faster (🦀 rust).
-I just forked because I wanted features that were either to slow to merge or differs w/ the original authors opinions:
+This is mostly a "for me" tool — built for my own workflow. Not saying you shouldn't use it, but don't expect it to be a community project. But hey, it works for me! The goal: everything lazygit does, but faster and with opinions I actually agree with.
 
-- [x] generating ai commit messages w/ your existing agent (claude, opencode, codex, or my tool minimal tool for it [modelcli](https://github.com/blankeos/modelcli))
-- [x] side-by-side diffing w/ syntax highlighting by default (inspired by lumen), no need to add a separate pager.
-- [ ] future: better ergonomics for the [4] commits bar
-  - [ ] Better graph view (on by default)
-  - [ ] Filter by branch, etc.
-  - [ ] Filter by commit message useful if you conventionally use ticket names etc.
-- [ ] future: command palette (like OpenCode) - not sure what to do yet for this tho.
+**Why fork?** PRs were sitting too long, or the upstream direction didn't match how I wanted to work.
 
-License MIT
+### What's different
+
+- [x] **AI commit messages** — works with whatever agent you already use (claude, opencode, codex, or my minimal shim [modelcli](https://github.com/blankeos/modelcli))
+- [x] **Side-by-side diffs** with syntax highlighting by default (shoutout lumen), no pager hacks needed
+- [x] **Better diff navigation** —
+
+### Planned
+
+- [ ] commits pane overhaul
+  - [ ] Better graph view (enabled by default)
+  - [ ] Filter by branch
+  - [ ] Filter by commit message (handy if you prefix with ticket IDs)
+- [ ] Command palette (OpenCode-style) — still figuring this one out
+
+MIT
