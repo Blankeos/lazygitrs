@@ -1,7 +1,11 @@
 pub mod bisect;
 pub mod branches;
 pub mod commits;
+pub mod custom_commands;
 pub mod files;
+pub mod patch_building;
 pub mod remotes;
 pub mod stash;
+pub mod submodules;
 pub mod tags;
+pub mod worktrees;

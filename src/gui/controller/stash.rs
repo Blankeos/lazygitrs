@@ -104,6 +104,7 @@ fn rename_stash(gui: &mut Gui) -> Result<()> {
                 }
                 Ok(())
             }),
+            is_commit: false,
         };
     }
     Ok(())

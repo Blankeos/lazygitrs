@@ -11,6 +11,7 @@ This is mostly a "for me" tool — built for my own workflow. Not saying you sho
 - [x] **AI commit messages** — works with whatever agent you already use (claude, opencode, codex, or my minimal shim [modelcli](https://github.com/blankeos/modelcli))
 - [x] **Side-by-side diffs** with syntax highlighting by default (shoutout lumen), no pager hacks needed
 - [x] **Better diff navigation** — `]`/`[` for hunks, `jk⬆︎⬇︎` for line-by-line scrolling.
+- [x] **Default GitHub conveniences** — copy repo url, open repo url, copy PR create url, open PR create, copy pr url, open pr. (The 'copy' variants are useful if you use different default browsers for work/personal.)
 
 ### Planned
 

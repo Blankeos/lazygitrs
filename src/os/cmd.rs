@@ -1,7 +1,41 @@
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+
+/// Shared command log that CmdBuilder writes to when set.
+pub type CommandLog = Arc<Mutex<Vec<String>>>;
+
+/// Create a new shared command log.
+pub fn new_command_log() -> CommandLog {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+/// Thread-local command log reference.
+thread_local! {
+    static CMD_LOG: std::cell::RefCell<Option<CommandLog>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Set the shared command log for this thread.
+pub fn set_thread_command_log(log: CommandLog) {
+    CMD_LOG.with(|l| *l.borrow_mut() = Some(log));
+}
+
+fn log_command(desc: &str) {
+    CMD_LOG.with(|l| {
+        if let Some(ref log) = *l.borrow() {
+            if let Ok(mut entries) = log.lock() {
+                entries.push(desc.to_string());
+                // Keep last 100 entries
+                if entries.len() > 100 {
+                    let excess = entries.len() - 100;
+                entries.drain(..excess);
+                }
+            }
+        }
+    });
+}
 
 #[derive(Debug)]
 pub struct CmdResult {
@@ -84,6 +118,8 @@ impl CmdBuilder {
     }
 
     pub fn run(&self) -> Result<CmdResult> {
+        log_command(&self.description());
+
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.args);
 

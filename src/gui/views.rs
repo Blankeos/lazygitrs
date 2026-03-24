@@ -30,6 +30,9 @@ pub fn render(
     file_tree_nodes: &[FileTreeNode],
     collapsed_dirs: &HashSet<String>,
     diff_focused: bool,
+    search_state: Option<(&str, usize, usize)>,
+    command_log: &[String],
+    show_command_log: bool,
 ) {
     let area = frame.area();
     let theme = config.user_config.theme();
@@ -207,8 +210,54 @@ pub fn render(
         frame.render_widget(widget, fl.main_panel);
     }
 
-    // Render status bar
-    render_status_bar(frame, fl.status_bar, ctx_mgr, diff_view, &theme);
+    // Render command log overlay in bottom-right of main panel
+    if show_command_log && !command_log.is_empty() {
+        let log_height = command_log.len().min(5) as u16;
+        let log_width = fl.main_panel.width.min(50);
+        let log_x = fl.main_panel.x + fl.main_panel.width - log_width;
+        let log_y = fl.main_panel.y + fl.main_panel.height - log_height - 1;
+        let log_rect = Rect::new(log_x, log_y, log_width, log_height + 2);
+
+        let log_block = Block::default()
+            .title(" Command Log ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+
+        let log_lines: Vec<Line> = command_log
+            .iter()
+            .rev()
+            .take(log_height as usize)
+            .rev()
+            .map(|s| {
+                Line::from(Span::styled(
+                    format!(" {}", s),
+                    Style::default().fg(Color::DarkGray),
+                ))
+            })
+            .collect();
+
+        frame.render_widget(Clear, log_rect);
+        let log_widget = Paragraph::new(log_lines).block(log_block);
+        frame.render_widget(log_widget, log_rect);
+    }
+
+    // Render status bar (or search bar if search is active)
+    if let Some((query, match_count, current_match)) = search_state {
+        let match_info = if match_count > 0 {
+            format!(" {}/{}", current_match + 1, match_count)
+        } else if !query.is_empty() {
+            " (no matches)".to_string()
+        } else {
+            String::new()
+        };
+        let bar = Paragraph::new(Span::styled(
+            format!(" /{}{}", query, match_info),
+            Style::default().fg(Color::Yellow),
+        ));
+        frame.render_widget(bar, fl.status_bar);
+    } else {
+        render_status_bar(frame, fl.status_bar, ctx_mgr, diff_view, &theme);
+    }
 
     // Render popup overlay
     if *popup != PopupState::None {
@@ -618,7 +667,7 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect) {
             let widget = Paragraph::new(text).block(block);
             frame.render_widget(widget, popup_rect);
         }
-        PopupState::Input { title, textarea, .. } => {
+        PopupState::Input { title, textarea, is_commit, .. } => {
             // Textarea popup: taller to allow multiline editing
             let ta_height = 12u16;
             let ta_y = (area.height.saturating_sub(ta_height)) / 2;
@@ -641,10 +690,12 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect) {
                 frame.render_widget(textarea, ta_area);
 
                 let hint_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
-                let hint = Span::styled(
-                    " Ctrl+Enter to confirm, Esc to cancel",
-                    Style::default().fg(Color::DarkGray),
-                );
+                let hint_text = if *is_commit {
+                    " Ctrl+Enter: confirm | Ctrl+O: commit menu | Esc: cancel"
+                } else {
+                    " Ctrl+Enter to confirm, Esc to cancel"
+                };
+                let hint = Span::styled(hint_text, Style::default().fg(Color::DarkGray));
                 frame.render_widget(Paragraph::new(Line::from(hint)), hint_area);
             } else {
                 frame.render_widget(textarea, inner);
@@ -668,10 +719,15 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect) {
                 .iter()
                 .enumerate()
                 .map(|(i, item)| {
-                    let style = if i == *selected {
+                    let disabled = item.action.is_none();
+                    let mut style = if i == *selected && !disabled {
                         Style::default()
                             .bg(Color::DarkGray)
                             .add_modifier(Modifier::BOLD)
+                    } else if disabled {
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::CROSSED_OUT)
                     } else {
                         Style::default()
                     };
@@ -688,6 +744,28 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect) {
 
             let list = List::new(list_items).block(block);
             frame.render_widget(list, popup_rect);
+        }
+        PopupState::Loading { title, message } => {
+            let block = Block::default()
+                .title(format!(" {} ", title))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow));
+
+            let text = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    format!(" {} ", message),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    " Please wait...",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+
+            let widget = Paragraph::new(text).block(block);
+            frame.render_widget(widget, popup_rect);
         }
         PopupState::None => {}
     }

@@ -83,11 +83,11 @@ impl GitCommands {
         Ok(result.stdout.lines().map(String::from).collect())
     }
 
-    pub fn create_commit(&self, message: &str, skip_hooks: bool) -> Result<()> {
+    pub fn create_commit(&self, message: &str, sign_off: bool) -> Result<()> {
         let mut cmd = self.git();
         cmd = cmd.arg("commit").arg("-m").arg(message);
-        if skip_hooks {
-            cmd = cmd.arg("--no-verify");
+        if sign_off {
+            cmd = cmd.arg("--signoff");
         }
         cmd.run_expecting_success()?;
         Ok(())

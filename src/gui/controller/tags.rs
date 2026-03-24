@@ -35,6 +35,7 @@ fn create_tag(gui: &mut Gui) -> Result<()> {
             }
             Ok(())
         }),
+        is_commit: false,
     };
     Ok(())
 }

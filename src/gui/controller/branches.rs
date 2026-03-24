@@ -69,6 +69,7 @@ fn new_branch(gui: &mut Gui) -> Result<()> {
             }
             Ok(())
         }),
+        is_commit: false,
     };
     Ok(())
 }
@@ -156,6 +157,7 @@ fn rename_branch(gui: &mut Gui) -> Result<()> {
                 }
                 Ok(())
             }),
+            is_commit: false,
         };
     }
     Ok(())

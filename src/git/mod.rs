@@ -1,3 +1,4 @@
+pub mod ai_commit;
 pub mod bisect;
 pub mod branch;
 pub mod commit;
@@ -9,7 +10,9 @@ pub mod remote;
 pub mod staging;
 pub mod stash;
 pub mod status;
+pub mod submodule;
 pub mod tag;
+pub mod worktree;
 
 use std::path::{Path, PathBuf};
 
@@ -37,6 +40,11 @@ impl GitCommands {
         CmdBuilder::git().cwd_path(&self.repo_path)
     }
 
+    /// Public access to the git command builder.
+    pub fn git_cmd(&self) -> CmdBuilder {
+        CmdBuilder::git().cwd_path(&self.repo_path)
+    }
+
     /// Load all model data from the repository.
     pub fn load_model(&self) -> Result<Model> {
         let mut model = Model::default();
@@ -48,6 +56,7 @@ impl GitCommands {
         model.stash_entries = self.load_stash()?;
         model.remotes = self.load_remotes()?;
         model.tags = self.load_tags()?;
+        model.worktrees = self.load_worktrees().unwrap_or_default();
 
         // Load total line change stats
         if let Ok((added, deleted)) = self.diff_shortstat() {

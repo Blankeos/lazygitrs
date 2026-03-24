@@ -18,11 +18,19 @@ pub enum PopupState {
         title: String,
         textarea: TextArea<'static>,
         on_confirm: InputAction,
+        /// When true, this is a commit message editor — enables AI generation via <c-g>.
+        #[allow(dead_code)]
+        is_commit: bool,
     },
     Menu {
         title: String,
         items: Vec<MenuItem>,
         selected: usize,
+    },
+    /// Shown while a background operation (like AI commit generation) is running.
+    Loading {
+        title: String,
+        message: String,
     },
 }
 

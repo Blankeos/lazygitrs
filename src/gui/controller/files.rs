@@ -142,6 +142,7 @@ fn open_commit_prompt(gui: &mut Gui) -> Result<()> {
                         }
                         Ok(())
                     }),
+                    is_commit: true,
                 };
                 Ok(())
             }),
@@ -159,6 +160,7 @@ fn open_commit_prompt(gui: &mut Gui) -> Result<()> {
             }
             Ok(())
         }),
+        is_commit: true,
     };
     Ok(())
 }
@@ -172,6 +174,7 @@ fn stash_changes(gui: &mut Gui) -> Result<()> {
             gui.needs_refresh = true;
             Ok(())
         }),
+        is_commit: false,
     };
     Ok(())
 }
@@ -246,6 +249,7 @@ fn commit_with_editor(gui: &mut Gui) -> Result<()> {
             gui.needs_refresh = true;
             Ok(())
         }),
+        is_commit: false,
     };
     Ok(())
 }

@@ -160,8 +160,8 @@ pub struct CommitConfig {
     pub auto_wrap_commit_message: bool,
     #[serde(rename = "autoWrapWidth")]
     pub auto_wrap_width: usize,
-    #[serde(rename = "aiGenerateCommand")]
-    pub ai_generate_command: String,
+    #[serde(rename = "generateCommand")]
+    pub generate_command: String,
 }
 
 impl Default for CommitConfig {
@@ -170,7 +170,7 @@ impl Default for CommitConfig {
             sign_off: false,
             auto_wrap_commit_message: true,
             auto_wrap_width: 72,
-            ai_generate_command: String::new(),
+            generate_command: String::new(),
         }
     }
 }
