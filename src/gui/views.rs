@@ -618,24 +618,37 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect) {
             let widget = Paragraph::new(text).block(block);
             frame.render_widget(widget, popup_rect);
         }
-        PopupState::Input { title, buffer, .. } => {
-            let block = Block::default()
+        PopupState::Input { title, textarea, .. } => {
+            // Textarea popup: taller to allow multiline editing
+            let ta_height = 12u16;
+            let ta_y = (area.height.saturating_sub(ta_height)) / 2;
+            let ta_rect = Rect::new(x, ta_y, popup_width, ta_height);
+            frame.render_widget(Clear, ta_rect);
+
+            // Render a container block with title and hint
+            let outer = Block::default()
                 .title(format!(" {} ", title))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan));
+            frame.render_widget(outer, ta_rect);
 
-            let text = vec![
-                Line::from(""),
-                Line::from(format!(" > {}_", buffer)),
-                Line::from(""),
-                Line::from(Span::styled(
-                    " Enter to confirm, Esc to cancel",
+            // Inner area for textarea + hint
+            let inner = ta_rect.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+
+            // Reserve last line for the hint
+            if inner.height > 2 {
+                let ta_area = Rect::new(inner.x, inner.y, inner.width, inner.height - 1);
+                frame.render_widget(textarea, ta_area);
+
+                let hint_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+                let hint = Span::styled(
+                    " Ctrl+Enter to confirm, Esc to cancel",
                     Style::default().fg(Color::DarkGray),
-                )),
-            ];
-
-            let widget = Paragraph::new(text).block(block);
-            frame.render_widget(widget, popup_rect);
+                );
+                frame.render_widget(Paragraph::new(Line::from(hint)), hint_area);
+            } else {
+                frame.render_widget(textarea, inner);
+            }
         }
         PopupState::Menu {
             title,

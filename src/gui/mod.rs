@@ -628,31 +628,25 @@ impl Gui {
                     _ => {}
                 }
             }
-            PopupState::Input { buffer, .. } => {
-                let mut buf = buffer.clone();
-                match key.code {
-                    KeyCode::Char(c) => {
-                        buf.push(c);
-                        if let PopupState::Input { buffer, .. } = &mut self.popup {
-                            *buffer = buf;
-                        }
+            PopupState::Input { .. } => {
+                use crossterm::event::KeyModifiers;
+                // Ctrl+Enter or Meta+Enter to confirm
+                if key.code == KeyCode::Enter
+                    && (key.modifiers.contains(KeyModifiers::CONTROL)
+                        || key.modifiers.contains(KeyModifiers::SUPER))
+                {
+                    let popup = std::mem::replace(&mut self.popup, PopupState::None);
+                    if let PopupState::Input { textarea, on_confirm, .. } = popup {
+                        let text = textarea.lines().join("\n");
+                        on_confirm(self, &text)?;
                     }
-                    KeyCode::Backspace => {
-                        buf.pop();
-                        if let PopupState::Input { buffer, .. } = &mut self.popup {
-                            *buffer = buf;
-                        }
+                } else if key.code == KeyCode::Esc {
+                    self.popup = PopupState::None;
+                } else {
+                    // Forward all other keys to the textarea
+                    if let PopupState::Input { textarea, .. } = &mut self.popup {
+                        textarea.input(key);
                     }
-                    KeyCode::Enter => {
-                        let popup = std::mem::replace(&mut self.popup, PopupState::None);
-                        if let PopupState::Input { buffer, on_confirm, .. } = popup {
-                            on_confirm(self, &buffer)?;
-                        }
-                    }
-                    KeyCode::Esc => {
-                        self.popup = PopupState::None;
-                    }
-                    _ => {}
                 }
             }
             PopupState::None => {}

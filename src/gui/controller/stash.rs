@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
-use crate::gui::popup::PopupState;
+use crate::gui::popup::{PopupState, make_textarea};
 use crate::gui::Gui;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
@@ -92,9 +92,11 @@ fn rename_stash(gui: &mut Gui) -> Result<()> {
         let current_name = entry.name.clone();
         drop(model);
 
+        let mut ta = make_textarea("");
+        ta.insert_str(&current_name);
         gui.popup = PopupState::Input {
             title: "Rename stash".to_string(),
-            buffer: current_name,
+            textarea: ta,
             on_confirm: Box::new(move |gui, new_name| {
                 if !new_name.is_empty() {
                     gui.git.stash_rename(index, new_name)?;

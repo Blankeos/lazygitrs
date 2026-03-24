@@ -10,7 +10,7 @@ This is mostly a "for me" tool — built for my own workflow. Not saying you sho
 
 - [x] **AI commit messages** — works with whatever agent you already use (claude, opencode, codex, or my minimal shim [modelcli](https://github.com/blankeos/modelcli))
 - [x] **Side-by-side diffs** with syntax highlighting by default (shoutout lumen), no pager hacks needed
-- [x] **Better diff navigation** —
+- [x] **Better diff navigation** — `]`/`[` for hunks, `jk⬆︎⬇︎` for line-by-line scrolling.
 
 ### Planned
 
@@ -21,3 +21,5 @@ This is mostly a "for me" tool — built for my own workflow. Not saying you sho
 - [ ] Command palette (OpenCode-style) — still figuring this one out
 
 MIT
+
+Feel free to fork and give it your own spin.

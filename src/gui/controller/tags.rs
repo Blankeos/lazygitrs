@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::config::KeybindingConfig;
-use crate::gui::popup::PopupState;
+use crate::gui::popup::{PopupState, make_textarea};
 use crate::gui::Gui;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, _keybindings: &KeybindingConfig) -> Result<()> {
@@ -27,7 +27,7 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, _keybindings: &KeybindingConfig)
 fn create_tag(gui: &mut Gui) -> Result<()> {
     gui.popup = PopupState::Input {
         title: "New tag name".to_string(),
-        buffer: String::new(),
+        textarea: make_textarea(""),
         on_confirm: Box::new(|gui, name| {
             if !name.is_empty() {
                 gui.git.create_tag(name, "")?;

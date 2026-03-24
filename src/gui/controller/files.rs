@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
-use crate::gui::popup::PopupState;
+use crate::gui::popup::{PopupState, make_textarea};
 use crate::gui::Gui;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
@@ -134,7 +134,7 @@ fn open_commit_prompt(gui: &mut Gui) -> Result<()> {
                 gui.git.stage_all()?;
                 gui.popup = PopupState::Input {
                     title: "Commit message".to_string(),
-                    buffer: String::new(),
+                    textarea: make_textarea("Enter commit message..."),
                     on_confirm: Box::new(|gui, message| {
                         if !message.is_empty() {
                             gui.git.create_commit(message, false)?;
@@ -151,7 +151,7 @@ fn open_commit_prompt(gui: &mut Gui) -> Result<()> {
 
     gui.popup = PopupState::Input {
         title: "Commit message".to_string(),
-        buffer: String::new(),
+        textarea: make_textarea("Enter commit message..."),
         on_confirm: Box::new(|gui, message| {
             if !message.is_empty() {
                 gui.git.create_commit(message, false)?;
@@ -166,7 +166,7 @@ fn open_commit_prompt(gui: &mut Gui) -> Result<()> {
 fn stash_changes(gui: &mut Gui) -> Result<()> {
     gui.popup = PopupState::Input {
         title: "Stash message (leave empty for default)".to_string(),
-        buffer: String::new(),
+        textarea: make_textarea(""),
         on_confirm: Box::new(|gui, message| {
             gui.git.stash_save(message)?;
             gui.needs_refresh = true;
@@ -235,7 +235,7 @@ fn commit_with_editor(gui: &mut Gui) -> Result<()> {
     // This requires suspending the TUI temporarily
     gui.popup = PopupState::Input {
         title: "Commit message (or leave empty to open editor)".to_string(),
-        buffer: String::new(),
+        textarea: make_textarea("Enter commit message..."),
         on_confirm: Box::new(|gui, message| {
             if message.is_empty() {
                 // For now, just create an empty commit message prompt

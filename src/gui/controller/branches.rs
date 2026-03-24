@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
-use crate::gui::popup::PopupState;
+use crate::gui::popup::{PopupState, make_textarea};
 use crate::gui::Gui;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
@@ -61,7 +61,7 @@ fn checkout_branch(gui: &mut Gui) -> Result<()> {
 fn new_branch(gui: &mut Gui) -> Result<()> {
     gui.popup = PopupState::Input {
         title: "New branch name".to_string(),
-        buffer: String::new(),
+        textarea: make_textarea(""),
         on_confirm: Box::new(|gui, name| {
             if !name.is_empty() {
                 gui.git.create_branch(name)?;
@@ -144,9 +144,11 @@ fn rename_branch(gui: &mut Gui) -> Result<()> {
         let old_name = branch.name.clone();
         drop(model);
 
+        let mut ta = make_textarea("");
+        ta.insert_str(&old_name);
         gui.popup = PopupState::Input {
             title: format!("Rename branch '{}'", old_name),
-            buffer: old_name.clone(),
+            textarea: ta,
             on_confirm: Box::new(move |gui, new_name| {
                 if !new_name.is_empty() && new_name != old_name {
                     gui.git.rename_branch(&old_name, new_name)?;

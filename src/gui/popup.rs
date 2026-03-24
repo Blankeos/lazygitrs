@@ -1,4 +1,5 @@
 use anyhow::Result;
+use tui_textarea::TextArea;
 
 use super::Gui;
 
@@ -15,7 +16,7 @@ pub enum PopupState {
     },
     Input {
         title: String,
-        buffer: String,
+        textarea: TextArea<'static>,
         on_confirm: InputAction,
     },
     Menu {
@@ -32,6 +33,16 @@ impl PartialEq for PopupState {
             (PopupState::None, PopupState::None)
         )
     }
+}
+
+pub fn make_textarea(placeholder: &str) -> TextArea<'static> {
+    use ratatui::style::{Color, Style};
+
+    let mut ta = TextArea::default();
+    ta.set_placeholder_text(placeholder);
+    ta.set_cursor_line_style(Style::default());
+    ta.set_placeholder_style(Style::default().fg(Color::DarkGray));
+    ta
 }
 
 pub struct MenuItem {

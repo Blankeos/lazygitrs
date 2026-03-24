@@ -3,7 +3,7 @@ use crossterm::event::KeyEvent;
 
 use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
-use crate::gui::popup::{MenuItem, PopupState};
+use crate::gui::popup::{MenuItem, PopupState, make_textarea};
 use crate::gui::Gui;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
@@ -105,9 +105,11 @@ fn reword_commit(gui: &mut Gui) -> Result<()> {
         let is_head = selected == 0;
         drop(model);
 
+        let mut ta = make_textarea("");
+        ta.insert_str(&current_msg);
         gui.popup = PopupState::Input {
             title: "Reword commit".to_string(),
-            buffer: current_msg,
+            textarea: ta,
             on_confirm: Box::new(move |gui, message| {
                 if !message.is_empty() {
                     if is_head {
@@ -205,7 +207,7 @@ fn tag_commit(gui: &mut Gui) -> Result<()> {
 
         gui.popup = PopupState::Input {
             title: "Tag name".to_string(),
-            buffer: String::new(),
+            textarea: make_textarea(""),
             on_confirm: Box::new(|gui, name| {
                 if !name.is_empty() {
                     gui.git.create_tag(name, "")?;
