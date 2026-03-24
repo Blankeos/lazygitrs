@@ -2,6 +2,7 @@ pub mod author;
 pub mod branch;
 pub mod commit;
 pub mod file;
+pub mod file_tree;
 pub mod remote;
 pub mod stash;
 pub mod tag;

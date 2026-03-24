@@ -7,6 +7,23 @@ use crate::gui::popup::PopupState;
 use crate::gui::Gui;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
+    // Enter to toggle directory collapse in tree view
+    if key.code == KeyCode::Enter && gui.show_file_tree {
+        let selected = gui.context_mgr.selected_active();
+        if let Some(node) = gui.file_tree_nodes.get(selected) {
+            if node.is_dir {
+                let path = node.path.clone();
+                if gui.collapsed_dirs.contains(&path) {
+                    gui.collapsed_dirs.remove(&path);
+                } else {
+                    gui.collapsed_dirs.insert(path);
+                }
+                gui.update_file_tree_state();
+                return Ok(());
+            }
+        }
+    }
+
     // Stage/unstage toggle with space
     if key.code == KeyCode::Char(' ') {
         return toggle_stage(gui);
@@ -42,6 +59,15 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return commit_with_editor(gui);
     }
 
+    // Toggle file tree view
+    if matches_key(key, &keybindings.files.toggle_tree_view) {
+        gui.show_file_tree = !gui.show_file_tree;
+        gui.update_file_tree_state();
+        // Reset selection when toggling view modes
+        gui.context_mgr.set_selection(0);
+        return Ok(());
+    }
+
     // Fetch
     if matches_key(key, &keybindings.files.fetch) {
         gui.git.fetch_all()?;
@@ -53,9 +79,11 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
 }
 
 fn toggle_stage(gui: &mut Gui) -> Result<()> {
-    let selected = gui.context_mgr.selected_active();
+    let Some(file_idx) = gui.selected_file_index() else {
+        return Ok(()); // Directory node selected, nothing to do
+    };
     let model = gui.model.lock().unwrap();
-    if let Some(file) = model.files.get(selected) {
+    if let Some(file) = model.files.get(file_idx) {
         let name = file.name.clone();
         let has_staged = file.has_staged_changes;
         let has_unstaged = file.has_unstaged_changes;
@@ -114,9 +142,11 @@ fn stash_changes(gui: &mut Gui) -> Result<()> {
 }
 
 fn discard_file(gui: &mut Gui) -> Result<()> {
-    let selected = gui.context_mgr.selected_active();
+    let Some(file_idx) = gui.selected_file_index() else {
+        return Ok(());
+    };
     let model = gui.model.lock().unwrap();
-    if let Some(file) = model.files.get(selected) {
+    if let Some(file) = model.files.get(file_idx) {
         let name = file.name.clone();
         drop(model);
 
@@ -139,9 +169,11 @@ fn discard_file(gui: &mut Gui) -> Result<()> {
 }
 
 fn ignore_file(gui: &mut Gui) -> Result<()> {
-    let selected = gui.context_mgr.selected_active();
+    let Some(file_idx) = gui.selected_file_index() else {
+        return Ok(());
+    };
     let model = gui.model.lock().unwrap();
-    if let Some(file) = model.files.get(selected) {
+    if let Some(file) = model.files.get(file_idx) {
         let name = file.name.clone();
         drop(model);
         gui.git.ignore_file(&name)?;

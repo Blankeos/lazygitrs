@@ -5,6 +5,7 @@ pub mod popup;
 pub mod presentation;
 pub mod views;
 
+use std::collections::HashSet;
 use std::io::{self, Stdout};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -20,6 +21,7 @@ use crate::config::AppConfig;
 use crate::config::keybindings::parse_key;
 use crate::git::GitCommands;
 use crate::model::Model;
+use crate::model::file_tree::{build_file_tree, FileTreeNode};
 use crate::pager::side_by_side::DiffViewState;
 
 use self::context::{ContextId, ContextManager, SideWindow};
@@ -61,6 +63,11 @@ pub struct Gui {
     pub needs_diff_refresh: bool,
     pub search_query: String,
     pub screen_mode: ScreenMode,
+    pub show_file_tree: bool,
+    /// Cached file tree nodes — rebuilt on refresh when tree view is active.
+    pub file_tree_nodes: Vec<FileTreeNode>,
+    /// Set of collapsed directory paths in the file tree.
+    pub collapsed_dirs: HashSet<String>,
     /// Track what we last loaded a diff for, to avoid reloading on every frame.
     last_diff_key: String,
     /// Generation counter — incremented on each diff request, used to discard stale results.
@@ -82,6 +89,7 @@ impl Gui {
     pub fn new(config: AppConfig, git: GitCommands) -> Result<Self> {
         let model = git.load_model()?;
         let (diff_tx, diff_rx) = mpsc::channel();
+        let show_file_tree = config.user_config.gui.show_file_tree;
 
         Ok(Self {
             config: Arc::new(config),
@@ -97,6 +105,9 @@ impl Gui {
             needs_diff_refresh: true,
             search_query: String::new(),
             screen_mode: ScreenMode::Normal,
+            show_file_tree,
+            file_tree_nodes: Vec::new(),
+            collapsed_dirs: HashSet::new(),
             last_diff_key: String::new(),
             diff_generation: Arc::new(AtomicU64::new(0)),
             diff_rx,
@@ -105,6 +116,12 @@ impl Gui {
     }
 
     pub fn run(&mut self) -> Result<()> {
+        // Build initial file tree if tree view is enabled
+        if self.show_file_tree {
+            let model = self.model.lock().unwrap();
+            self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
+            self.context_mgr.files_list_len_override = Some(self.file_tree_nodes.len());
+        }
         let mut terminal = setup_terminal()?;
 
         let result = self.main_loop(&mut terminal);
@@ -133,6 +150,9 @@ impl Gui {
                     &self.config,
                     &self.diff_view,
                     self.screen_mode,
+                    self.show_file_tree,
+                    &self.file_tree_nodes,
+                    &self.collapsed_dirs,
                 );
             })?;
 
@@ -205,7 +225,12 @@ impl Gui {
         match active {
             ContextId::Files => {
                 // Files panel: load synchronously (usually fast, small diffs)
-                if let Some(file) = model.files.get(selected) {
+                let file_idx = if self.show_file_tree {
+                    self.file_tree_nodes.get(selected).and_then(|n| n.file_index)
+                } else {
+                    Some(selected)
+                };
+                if let Some(file) = file_idx.and_then(|i| model.files.get(i)) {
                     let name = file.name.clone();
                     let has_staged = file.has_staged_changes;
                     let has_unstaged = file.has_unstaged_changes;
@@ -235,6 +260,10 @@ impl Gui {
                             self.diff_view.load_from_diff_output(&name, &diff);
                         }
                     }
+                } else {
+                    // Directory node or no file selected — clear diff
+                    drop(model);
+                    self.diff_view = DiffViewState::new();
                 }
             }
             ContextId::Commits => {
@@ -440,9 +469,13 @@ impl Gui {
             return Ok(());
         }
 
-        // Screen mode toggle
-        if key.code == KeyCode::Enter {
-            self.cycle_screen_mode();
+        // Screen mode toggle (+ to enlarge, _ to shrink, matching lazygit)
+        if matches_key(key, &keybindings.universal.next_screen_mode) {
+            self.next_screen_mode();
+            return Ok(());
+        }
+        if matches_key(key, &keybindings.universal.prev_screen_mode) {
+            self.prev_screen_mode();
             return Ok(());
         }
 
@@ -625,14 +658,55 @@ impl Gui {
         let new_model = self.git.load_model()?;
         let mut model = self.model.lock().unwrap();
         *model = new_model;
+        // Rebuild file tree inline to avoid borrow issues
+        if self.show_file_tree {
+            self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
+            self.context_mgr.files_list_len_override = Some(self.file_tree_nodes.len());
+        } else {
+            self.file_tree_nodes.clear();
+            self.context_mgr.files_list_len_override = None;
+        }
         Ok(())
     }
 
-    fn cycle_screen_mode(&mut self) {
+    /// Resolve the currently selected file index in the files panel.
+    /// In tree view, maps the tree node selection to the actual file index.
+    /// Returns None if a directory node is selected (no file to operate on).
+    pub fn selected_file_index(&self) -> Option<usize> {
+        let selected = self.context_mgr.selected_active();
+        if self.show_file_tree {
+            self.file_tree_nodes
+                .get(selected)
+                .and_then(|node| node.file_index)
+        } else {
+            Some(selected)
+        }
+    }
+
+    pub fn update_file_tree_state(&mut self) {
+        if self.show_file_tree {
+            let model = self.model.lock().unwrap();
+            self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
+            self.context_mgr.files_list_len_override = Some(self.file_tree_nodes.len());
+        } else {
+            self.file_tree_nodes.clear();
+            self.context_mgr.files_list_len_override = None;
+        }
+    }
+
+    fn next_screen_mode(&mut self) {
         self.screen_mode = match self.screen_mode {
             ScreenMode::Normal => ScreenMode::Half,
             ScreenMode::Half => ScreenMode::Full,
             ScreenMode::Full => ScreenMode::Normal,
+        };
+    }
+
+    fn prev_screen_mode(&mut self) {
+        self.screen_mode = match self.screen_mode {
+            ScreenMode::Normal => ScreenMode::Full,
+            ScreenMode::Half => ScreenMode::Normal,
+            ScreenMode::Full => ScreenMode::Half,
         };
     }
 }

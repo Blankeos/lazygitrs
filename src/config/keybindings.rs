@@ -102,6 +102,10 @@ pub struct UniversalKeybinding {
     pub push_files: String,
     #[serde(rename = "pullFiles")]
     pub pull_files: String,
+    #[serde(rename = "nextScreenMode")]
+    pub next_screen_mode: String,
+    #[serde(rename = "prevScreenMode")]
+    pub prev_screen_mode: String,
     #[serde(rename = "createPatchOptionsMenu")]
     pub create_patch_options_menu: String,
 }
@@ -147,6 +151,8 @@ impl Default for UniversalKeybinding {
             create_rebase_options_menu: "m".into(),
             push_files: "P".into(),
             pull_files: "p".into(),
+            next_screen_mode: "+".into(),
+            prev_screen_mode: "_".into(),
             create_patch_options_menu: "<c-p>".into(),
         }
     }

@@ -107,6 +107,8 @@ pub struct ContextManager {
     window_tabs: std::collections::HashMap<SideWindow, usize>,
     selections: std::collections::HashMap<ContextId, usize>,
     scroll_offsets: std::collections::HashMap<ContextId, usize>,
+    /// Override for files list length when tree view is active.
+    pub files_list_len_override: Option<usize>,
 }
 
 impl ContextManager {
@@ -127,6 +129,7 @@ impl ContextManager {
             window_tabs,
             selections,
             scroll_offsets: std::collections::HashMap::new(),
+            files_list_len_override: None,
         }
     }
 
@@ -250,7 +253,7 @@ impl ContextManager {
     pub fn list_len(&self, model: &Model) -> usize {
         match self.active {
             ContextId::Status => 1,
-            ContextId::Files => model.files.len(),
+            ContextId::Files => self.files_list_len_override.unwrap_or(model.files.len()),
             ContextId::Branches => model.branches.len(),
             ContextId::Commits => model.commits.len(),
             ContextId::Stash => model.stash_entries.len(),
@@ -267,7 +270,7 @@ impl ContextManager {
             for ctx in window.tabs() {
                 let len = match ctx {
                     ContextId::Status => 1,
-                    ContextId::Files => model.files.len(),
+                    ContextId::Files => self.files_list_len_override.unwrap_or(model.files.len()),
                     ContextId::Branches => model.branches.len(),
                     ContextId::Commits => model.commits.len(),
                     ContextId::Stash => model.stash_entries.len(),

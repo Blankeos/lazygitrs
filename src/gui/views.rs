@@ -4,7 +4,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
+use std::collections::HashSet;
+
 use crate::config::AppConfig;
+use crate::model::file_tree::FileTreeNode;
 use crate::model::Model;
 use crate::pager::side_by_side::{self, DiffViewState};
 
@@ -22,7 +25,10 @@ pub fn render(
     popup: &PopupState,
     config: &AppConfig,
     diff_view: &DiffViewState,
-    _screen_mode: ScreenMode,
+    screen_mode: ScreenMode,
+    show_file_tree: bool,
+    file_tree_nodes: &[FileTreeNode],
+    collapsed_dirs: &HashSet<String>,
 ) {
     let area = frame.area();
     let theme = config.user_config.theme();
@@ -35,7 +41,29 @@ pub fn render(
         .position(|w| *w == active_window)
         .unwrap_or(1); // default to Files
 
-    let fl = layout::compute_layout(area, layout_state.side_panel_ratio, panel_count, active_panel_index);
+    let fl = layout::compute_layout(area, layout_state.side_panel_ratio, panel_count, active_panel_index, screen_mode);
+
+    // Full screen mode: only render the main panel
+    if screen_mode == ScreenMode::Full {
+        if ctx_mgr.active() == ContextId::Status {
+            render_status_main(frame, fl.main_panel, model, config, &theme);
+        } else if !diff_view.is_empty() {
+            side_by_side::render_diff(frame, fl.main_panel, diff_view, &theme);
+        } else {
+            let block = Block::default()
+                .title(" Diff ")
+                .borders(Borders::ALL)
+                .border_style(theme.inactive_border);
+            let info = get_info_content(model, ctx_mgr);
+            let widget = Paragraph::new(info).block(block);
+            frame.render_widget(widget, fl.main_panel);
+        }
+        render_status_bar(frame, fl.status_bar, ctx_mgr, diff_view, &theme);
+        if *popup != PopupState::None {
+            render_popup(frame, popup, area);
+        }
+        return;
+    }
 
     // Render sidebar panels — one per window
     for (i, window) in SideWindow::ALL.iter().enumerate() {
@@ -69,8 +97,13 @@ pub fn render(
                 frame.render_widget(widget, rect);
             }
             ContextId::Files => {
-                let items = presentation::files::render_file_list(model, &theme);
-                render_list(frame, rect, block, items, selected, is_active, &theme);
+                if show_file_tree {
+                    let items = presentation::files::render_file_tree(model, &theme, file_tree_nodes, collapsed_dirs);
+                    render_list(frame, rect, block, items, selected, is_active, &theme);
+                } else {
+                    let items = presentation::files::render_file_list(model, &theme);
+                    render_list(frame, rect, block, items, selected, is_active, &theme);
+                }
             }
             ContextId::Worktrees => {
                 let items = render_worktree_list(model);

@@ -1,5 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
+use super::ScreenMode;
+
 /// Tracks the terminal size and computes panel rects.
 #[derive(Debug)]
 pub struct LayoutState {
@@ -42,6 +44,7 @@ pub fn compute_layout(
     side_ratio: f64,
     panel_count: usize,
     active_panel_index: usize,
+    screen_mode: ScreenMode,
 ) -> FrameLayout {
     // Top-level: main area + status bar at bottom
     let outer = Layout::default()
@@ -55,9 +58,30 @@ pub fn compute_layout(
     let main_area = outer[0];
     let status_bar = outer[1];
 
+    // Full screen mode: no side panel, main takes everything
+    if screen_mode == ScreenMode::Full {
+        return FrameLayout {
+            side_panels: Vec::new(),
+            main_panel: main_area,
+            status_bar,
+        };
+    }
+
+    // Half mode: side panel enlarges to 50/50 split
+    // Normal mode: use the configured ratio
+    let effective_ratio = match screen_mode {
+        ScreenMode::Half => 0.5,
+        _ => side_ratio,
+    };
+
     // Split main area into side panel and main content
-    let side_width = ((main_area.width as f64) * side_ratio) as u16;
-    let side_width = side_width.max(20).min(main_area.width / 2);
+    let side_width = ((main_area.width as f64) * effective_ratio) as u16;
+    let max_side = if screen_mode == ScreenMode::Half {
+        main_area.width.saturating_sub(20) // leave at least 20 cols for main
+    } else {
+        main_area.width / 2
+    };
+    let side_width = side_width.max(20).min(max_side);
 
     let horizontal = Layout::default()
         .direction(Direction::Horizontal)
