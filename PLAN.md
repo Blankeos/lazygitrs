@@ -302,11 +302,15 @@ src/
 **Goal:** Feature parity with lazygit + the extras.
 
 1. **AI Commit Messages** (`git/ai_commit.rs`) — PR #5395
-   - Config: `git.commit.aiGenerateCommand` (string, CLI command)
-   - Pipes `git diff --cached` to the configured command
+   - Config: `git.commit.generateCommand` (string, shell command)
+   - Pipes `git diff --cached` via **stdin** to the configured command
+   - Parses stdout, stripping markdown code fences if present
    - Populates commit message editor with AI output
-   - Keybinding in commit message popup (e.g., `<c-g>`)
+   - Triggered from commit menu (`<c-o>` then `g`)
+   - Shows "Generating commit message..." state, blocks editing while running
+   - Disabled with hint message when `generateCommand` is empty
    - Provider-agnostic: works with any CLI (claude, opencode, ollama, etc.)
+   - Example: `generateCommand: "claude -p 'Generate a conventional commit message for this diff:'"`
 
 2. **Patch Building Mode**
    - Select lines/hunks from commits to build custom patches
@@ -401,7 +405,7 @@ src/
 
 2. **Lumen-style pager over lazygit's pager**: The diff view defaults to side-by-side with tree-sitter syntax highlighting and word-level diffs, matching lumen's approach. This is a strict improvement — no need to port lazygit's simpler pager.
 
-3. **Config compatibility**: Read lazygit's existing `~/.config/lazygit/config.yml` format so users can migrate without reconfiguring. Add `aiGenerateCommand` as a new field.
+3. **Config compatibility**: Read lazygit's existing `~/.config/lazygit/config.yml` format so users can migrate without reconfiguring. Add `generateCommand` as a new field under `git.commit`.
 
 4. **Async-first**: Use tokio for all git operations that might block. The TUI render loop runs on the main thread; git operations happen on background tasks with channel-based result delivery.
 
