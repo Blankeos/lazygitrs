@@ -43,6 +43,8 @@ pub fn render(
     commit_files_message: &str,
     branch_commits_name: &str,
     spinner_frame: usize,
+    remote_op_label: Option<&str>,
+    remote_op_success: bool,
 ) {
     let area = frame.area();
     let theme = config.user_config.theme();
@@ -124,7 +126,7 @@ pub fn render(
                     }
                 }
                 ContextId::Branches => {
-                    let items = presentation::branches::render_branch_list(model, &theme);
+                    let items = presentation::branches::render_branch_list(model, &theme, remote_op_label, spinner_frame, remote_op_success);
                     render_list(frame, fl.main_panel, block, items, selected, true, &theme);
                 }
                 ContextId::Remotes => {
@@ -281,7 +283,7 @@ pub fn render(
                     let items = presentation::commits::render_sub_commit_list(model, &theme);
                     render_list(frame, rect, bc_block, items, bc_selected, is_active, &theme);
                 } else {
-                    let items = presentation::branches::render_branch_list(model, &theme);
+                    let items = presentation::branches::render_branch_list(model, &theme, remote_op_label, spinner_frame, remote_op_success);
                     render_list(frame, rect, block, items, selected, is_active, &theme);
                 }
             }

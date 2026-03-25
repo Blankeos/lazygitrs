@@ -5,7 +5,15 @@ use ratatui::widgets::ListItem;
 use crate::config::Theme;
 use crate::model::Model;
 
-pub fn render_branch_list<'a>(model: &Model, theme: &Theme) -> Vec<ListItem<'a>> {
+const SPINNER_CHARS: &[char] = &['·', '✻', '✽', '✶', '✳', '✢'];
+
+pub fn render_branch_list<'a>(
+    model: &Model,
+    theme: &Theme,
+    remote_op_label: Option<&str>,
+    spinner_frame: usize,
+    remote_op_success: bool,
+) -> Vec<ListItem<'a>> {
     model
         .branches
         .iter()
@@ -34,19 +42,37 @@ pub fn render_branch_list<'a>(model: &Model, theme: &Theme) -> Vec<ListItem<'a>>
                 );
             }
 
-            // Ahead/behind indicator
-            if let Some((ahead, behind)) = branch.ahead_behind() {
-                let indicator = match (ahead > 0, behind > 0) {
-                    (true, true) => format!(" ↑{}↓{}", ahead, behind),
-                    (true, false) => format!(" ↑{}", ahead),
-                    (false, true) => format!(" ↓{}", behind),
-                    _ => String::new(),
-                };
-                if !indicator.is_empty() {
+            // Remote operation indicator on head branch (e.g. "Pushing ✻" or "✓" on success)
+            if branch.head {
+                if let Some(label) = remote_op_label {
+                    let spinner = SPINNER_CHARS[(spinner_frame / 8) % SPINNER_CHARS.len()];
                     spans.push(Span::styled(
-                        indicator,
+                        format!(" {} {}", label, spinner),
                         Style::default().fg(Color::Yellow),
                     ));
+                } else if remote_op_success {
+                    spans.push(Span::styled(
+                        " ✓".to_string(),
+                        Style::default().fg(Color::Green),
+                    ));
+                }
+            }
+
+            // Ahead/behind indicator (skip when remote op is active on head branch)
+            if !(branch.head && remote_op_label.is_some()) {
+                if let Some((ahead, behind)) = branch.ahead_behind() {
+                    let indicator = match (ahead > 0, behind > 0) {
+                        (true, true) => format!(" ↑{}↓{}", ahead, behind),
+                        (true, false) => format!(" ↑{}", ahead),
+                        (false, true) => format!(" ↓{}", behind),
+                        _ => String::new(),
+                    };
+                    if !indicator.is_empty() {
+                        spans.push(Span::styled(
+                            indicator,
+                            Style::default().fg(Color::Yellow),
+                        ));
+                    }
                 }
             }
 

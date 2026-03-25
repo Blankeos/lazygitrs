@@ -127,6 +127,10 @@ pub struct Gui {
     pub commit_files_parent_context: Option<context::ContextId>,
     /// Frame counter for the loading spinner animation.
     spinner_frame: usize,
+    /// Label shown on the head branch during a remote operation (e.g. "Pushing", "Pulling").
+    remote_op_label: Option<String>,
+    /// Timestamp when the last remote operation succeeded (for showing a temporary ✓).
+    remote_op_success_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +196,8 @@ impl Gui {
             sub_commits_parent_context: context::ContextId::Branches,
             commit_files_parent_context: None,
             spinner_frame: 0,
+            remote_op_label: None,
+            remote_op_success_at: None,
         })
     }
 
@@ -270,6 +276,10 @@ impl Gui {
                     &self.commit_files_message,
                     &self.branch_commits_name,
                     self.spinner_frame,
+                    self.remote_op_label.as_deref(),
+                    self.remote_op_success_at
+                        .map(|t| t.elapsed() < std::time::Duration::from_secs(5))
+                        .unwrap_or(false),
                 );
             })?;
 
@@ -397,10 +407,12 @@ impl Gui {
     /// Check for completed background remote operations (push, pull, fetch).
     fn receive_remote_op_results(&mut self) {
         if let Ok(result) = self.remote_op_rx.try_recv() {
+            self.remote_op_label = None;
             match result {
                 Ok(()) => {
                     self.popup = PopupState::None;
                     self.needs_refresh = true;
+                    self.remote_op_success_at = Some(Instant::now());
                 }
                 Err(e) => {
                     self.popup = PopupState::Confirm {
@@ -422,6 +434,15 @@ impl Gui {
             title: title.to_string(),
             message: message.to_string(),
         };
+        // Show operation label on the head branch in the sidebar (e.g. "Pushing", "Pulling").
+        let label = match title {
+            "Push" => "Pushing",
+            "Pull" => "Pulling",
+            "Fetch" => "Fetching",
+            other => other,
+        };
+        self.remote_op_label = Some(label.to_string());
+        self.remote_op_success_at = None;
         let git = Arc::clone(&self.git);
         let tx = self.remote_op_tx.clone();
         std::thread::spawn(move || {
