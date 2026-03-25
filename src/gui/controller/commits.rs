@@ -503,7 +503,7 @@ fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
                 },
                 MenuItem {
                     label: "Commit message body".to_string(),
-                    description: String::new(),
+                    description: if has_body { String::new() } else { "Commit has no message body".to_string() },
                     key: Some("b".to_string()),
                     action: if has_body {
                         Some(Box::new(move |gui| {
@@ -547,7 +547,7 @@ fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
                 },
                 MenuItem {
                     label: "Commit tags".to_string(),
-                    description: String::new(),
+                    description: if has_tags { String::new() } else { "Commit has no tags".to_string() },
                     key: Some("t".to_string()),
                     action: if has_tags {
                         Some(Box::new(move |_gui| {

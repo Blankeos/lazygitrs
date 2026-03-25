@@ -1111,16 +1111,32 @@ impl Gui {
                 self.popup = PopupState::None;
             }
             PopupState::Menu { items, selected, .. } => {
-                let items_len = items.len();
+                let _items_len = items.len();
                 match key.code {
                     KeyCode::Char('j') | KeyCode::Down => {
-                        if let PopupState::Menu { selected, .. } = &mut self.popup {
-                            *selected = (*selected + 1).min(items_len - 1);
+                        if let PopupState::Menu { items, selected, .. } = &mut self.popup {
+                            // Skip disabled items
+                            let mut next = *selected + 1;
+                            while next < items.len() && items[next].action.is_none() {
+                                next += 1;
+                            }
+                            if next < items.len() {
+                                *selected = next;
+                            }
                         }
                     }
                     KeyCode::Char('k') | KeyCode::Up => {
-                        if let PopupState::Menu { selected, .. } = &mut self.popup {
-                            *selected = selected.saturating_sub(1);
+                        if let PopupState::Menu { items, selected, .. } = &mut self.popup {
+                            // Skip disabled items
+                            if *selected > 0 {
+                                let mut prev = *selected - 1;
+                                while prev > 0 && items[prev].action.is_none() {
+                                    prev -= 1;
+                                }
+                                if items[prev].action.is_some() {
+                                    *selected = prev;
+                                }
+                            }
                         }
                     }
                     KeyCode::Enter => {

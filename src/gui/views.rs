@@ -1142,17 +1142,6 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
                 .enumerate()
                 .map(|(i, item)| {
                     let disabled = item.action.is_none();
-                    let style = if i == *selected && !disabled {
-                        Style::default()
-                            .bg(Color::DarkGray)
-                            .add_modifier(Modifier::BOLD)
-                    } else if disabled {
-                        Style::default()
-                            .fg(Color::DarkGray)
-                            .add_modifier(Modifier::CROSSED_OUT)
-                    } else {
-                        Style::default()
-                    };
 
                     let label = if let Some(ref key) = item.key {
                         format!(" {} {}", key, item.label)
@@ -1160,21 +1149,61 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
                         format!("  {}", item.label)
                     };
 
-                    if !item.description.is_empty() {
+                    if disabled {
+                        let text_style = Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::CROSSED_OUT);
+                        ListItem::new(Line::from(Span::styled(label, text_style)))
+                    } else if !item.description.is_empty() {
+                        let item_style = if i == *selected {
+                            Style::default()
+                                .bg(Color::DarkGray)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                        };
                         let spans = vec![
-                            Span::styled(label, style),
+                            Span::styled(label, item_style),
                             Span::raw(" "),
                             Span::styled(&item.description, Style::default().fg(Color::Yellow)),
                         ];
                         ListItem::new(Line::from(spans))
                     } else {
-                        ListItem::new(label).style(style)
+                        let item_style = if i == *selected {
+                            Style::default()
+                                .bg(Color::DarkGray)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                        };
+                        ListItem::new(Line::from(Span::styled(label, item_style)))
                     }
                 })
                 .collect();
 
             let list = List::new(list_items).block(block);
             frame.render_widget(list, popup_rect);
+
+            // Show disabled item info bar below the menu
+            let disabled_descriptions: Vec<&str> = items.iter()
+                .filter(|item| item.action.is_none() && !item.description.is_empty())
+                .map(|item| item.description.as_str())
+                .collect();
+            if !disabled_descriptions.is_empty() {
+                let hint_y = popup_rect.y + popup_rect.height;
+                if hint_y < area.height {
+                    let hint_text = format!("Disabled: {}", disabled_descriptions.join(", "));
+                    let hint_rect = Rect::new(popup_rect.x, hint_y, popup_rect.width, 1);
+                    frame.render_widget(Clear, hint_rect);
+                    frame.render_widget(
+                        Paragraph::new(Span::styled(
+                            hint_text,
+                            Style::default().fg(Color::DarkGray),
+                        )),
+                        hint_rect,
+                    );
+                }
+            }
         }
         PopupState::Loading { title, message } => {
             const SPINNER_CHARS: &[char] = &['·', '✻', '✽', '✶', '✳', '✢'];
