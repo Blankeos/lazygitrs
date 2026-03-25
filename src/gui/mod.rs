@@ -24,7 +24,7 @@ use crate::config::keybindings::parse_key;
 use crate::git::GitCommands;
 use crate::model::Model;
 use crate::model::file_tree::{build_file_tree, CommitFileTreeNode, FileTreeNode};
-use crate::pager::side_by_side::DiffViewState;
+use crate::pager::side_by_side::{DiffPanel, DiffPanelLayout, DiffViewState, TextSelection};
 
 use self::context::{ContextId, ContextManager, SideWindow};
 use self::layout::LayoutState;
@@ -235,7 +235,7 @@ impl Gui {
                     &self.layout,
                     &self.popup,
                     &self.config,
-                    &self.diff_view,
+                    &mut self.diff_view,
                     self.screen_mode,
                     self.show_file_tree,
                     &self.file_tree_nodes,
@@ -916,6 +916,28 @@ impl Gui {
     }
 
     fn handle_diff_focused_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Handle text selection keys first (y to copy, Esc to dismiss)
+        if self.diff_view.selection.is_some() {
+            match key.code {
+                KeyCode::Char('y') => {
+                    let text = self.diff_view.selection.as_ref().unwrap().text.clone();
+                    self.diff_view.selection = None;
+                    if !text.is_empty() {
+                        crate::os::platform::Platform::copy_to_clipboard(&text)?;
+                    }
+                    return Ok(());
+                }
+                KeyCode::Esc => {
+                    self.diff_view.selection = None;
+                    return Ok(());
+                }
+                _ => {
+                    // Any other key clears the selection and is handled normally
+                    self.diff_view.selection = None;
+                }
+            }
+        }
+
         let keybindings = &self.config.user_config.keybinding;
 
         // Screen mode cycling works even when diff is focused
@@ -1904,11 +1926,62 @@ impl Gui {
             return;
         }
 
+        let main_panel = self.compute_main_panel_rect();
+        let pl = DiffPanelLayout::compute(main_panel, &self.diff_view);
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                self.handle_mouse_click(mouse.column, mouse.row);
+                let in_main = main_panel.x <= mouse.column
+                    && mouse.column < main_panel.x + main_panel.width
+                    && main_panel.y <= mouse.row
+                    && mouse.row < main_panel.y + main_panel.height;
+
+                if in_main && !self.diff_view.is_empty() {
+                    if let Some(panel) = pl.panel_at_x(mouse.column) {
+                        self.diff_view.selection = Some(TextSelection {
+                            panel,
+                            start_col: mouse.column,
+                            start_row: mouse.row,
+                            end_col: mouse.column,
+                            end_row: mouse.row,
+                            dragging: true,
+                            text: String::new(),
+                        });
+                    } else {
+                        self.diff_view.selection = None;
+                    }
+                    self.diff_focused = true;
+                } else {
+                    // Click outside diff — clear selection and handle normally
+                    self.diff_view.selection = None;
+                    self.handle_mouse_click(mouse.column, mouse.row);
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(ref mut sel) = self.diff_view.selection {
+                    if sel.dragging {
+                        let (cmin, cmax) = pl.content_range(sel.panel);
+                        // Allow dragging into gutter area of same panel (5 cols before content)
+                        let col_min = cmin.saturating_sub(5);
+                        sel.end_col = mouse.column.max(col_min).min(cmax.saturating_sub(1));
+                        sel.end_row = mouse.row
+                            .max(pl.inner_y)
+                            .min(pl.inner_end_y.saturating_sub(1));
+                    }
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                // Finalize the selection
+                if let Some(ref mut sel) = self.diff_view.selection {
+                    sel.dragging = false;
+                    // If start == end (just a click, no drag), clear the selection
+                    if sel.start_col == sel.end_col && sel.start_row == sel.end_row {
+                        self.diff_view.selection = None;
+                    }
+                }
             }
             MouseEventKind::ScrollUp => {
+                self.diff_view.selection = None;
                 if self.diff_focused || self.is_in_main_panel(mouse.column) {
                     self.diff_view.scroll_up(3);
                 } else {
@@ -1917,6 +1990,7 @@ impl Gui {
                 }
             }
             MouseEventKind::ScrollDown => {
+                self.diff_view.selection = None;
                 if self.diff_focused || self.is_in_main_panel(mouse.column) {
                     self.diff_view.scroll_down(3);
                 } else {
@@ -1997,6 +2071,25 @@ impl Gui {
         let side_width = ((self.layout.width as f64)
             * self.config.user_config.gui.side_panel_width) as u16;
         col >= side_width
+    }
+
+    /// Compute the exact main panel Rect using the real layout engine.
+    fn compute_main_panel_rect(&self) -> ratatui::layout::Rect {
+        let area = ratatui::layout::Rect::new(0, 0, self.layout.width, self.layout.height);
+        let panel_count = SideWindow::ALL.len();
+        let active_window = self.context_mgr.active_window();
+        let active_panel_index = SideWindow::ALL
+            .iter()
+            .position(|w| *w == active_window)
+            .unwrap_or(1);
+        let fl = layout::compute_layout(
+            area,
+            self.layout.side_panel_ratio,
+            panel_count,
+            active_panel_index,
+            self.screen_mode,
+        );
+        fl.main_panel
     }
 
     fn refresh(&mut self) -> Result<()> {

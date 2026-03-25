@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use crate::config::AppConfig;
 use crate::model::file_tree::{CommitFileTreeNode, FileTreeNode};
 use crate::model::Model;
-use crate::pager::side_by_side::{self, DiffViewState};
+use crate::pager::side_by_side::{self, DiffPanel, DiffPanelLayout, DiffViewState};
 
 use super::context::{ContextId, ContextManager, SideWindow};
 use super::layout::{self, LayoutState};
@@ -24,7 +24,7 @@ pub fn render(
     layout_state: &LayoutState,
     popup: &PopupState,
     config: &AppConfig,
-    diff_view: &DiffViewState,
+    diff_view: &mut DiffViewState,
     screen_mode: ScreenMode,
     show_file_tree: bool,
     file_tree_nodes: &[FileTreeNode],
@@ -391,6 +391,9 @@ pub fn render(
     } else {
         render_status_bar(frame, fl.status_bar, ctx_mgr, diff_view, &theme);
     }
+
+    // Render text selection highlight overlay and tooltip
+    render_selection_overlay(frame, diff_view, fl.main_panel);
 
     // Render popup overlay
     if *popup != PopupState::None {
@@ -816,6 +819,140 @@ fn render_status_bar(
         theme.status_bar,
     ));
     frame.render_widget(bar, rect);
+}
+
+/// Render mouse text selection highlight overlay and copy tooltip on the diff view.
+/// `panel_rect` is the main diff panel Rect — selection is rendered only within the selected side.
+fn render_selection_overlay(frame: &mut Frame, diff_view: &mut DiffViewState, panel_rect: Rect) {
+    use crate::pager::ChangeType;
+
+    let selection = match &diff_view.selection {
+        Some(sel) => sel.clone(),
+        None => return,
+    };
+
+    let (top_row, top_col, bot_row, bot_col) = selection.normalized();
+
+    // Don't render if selection is empty (single point)
+    if top_row == bot_row && top_col == bot_col {
+        return;
+    }
+
+    // Use the same centralized layout that render_diff and the mouse handler use.
+    let pl = DiffPanelLayout::compute(panel_rect, diff_view);
+    let (content_start, content_end) = pl.content_range(selection.panel);
+
+    let buf = frame.buffer_mut();
+    let buf_area = *buf.area();
+    let mut extracted_text = String::new();
+
+    let row_start = top_row.max(pl.inner_y);
+    let row_end = bot_row.min(pl.inner_end_y.saturating_sub(1));
+
+    let highlight_style = Style::default()
+        .bg(Color::Rgb(100, 140, 200))
+        .fg(Color::Rgb(20, 20, 30));
+
+    for (i, row) in (row_start..=row_end).enumerate() {
+        if row >= buf_area.y + buf_area.height {
+            break;
+        }
+
+        // Map terminal row to diff line index.
+        let line_idx = diff_view.scroll_offset + (row - pl.inner_y) as usize;
+        if let Some(diff_line) = diff_view.lines.get(line_idx) {
+            // Skip file header separator lines.
+            if diff_line.file_header.is_some() {
+                continue;
+            }
+            // Skip slash-fill rows (the empty side for Insert/Delete lines).
+            let is_slash_fill = match selection.panel {
+                DiffPanel::Old => diff_line.change_type == ChangeType::Insert,
+                DiffPanel::New => diff_line.change_type == ChangeType::Delete,
+            };
+            if is_slash_fill {
+                continue;
+            }
+        }
+
+        // Column range: intersection of mouse selection cols with panel content cols.
+        let sel_col_start = if row == top_row { top_col } else { 0 };
+        let sel_col_end = if row == bot_row { bot_col } else { u16::MAX };
+        let hl_start = sel_col_start.max(content_start);
+        let hl_end = sel_col_end.min(content_end);
+
+        if hl_start >= hl_end {
+            continue;
+        }
+
+        let mut row_text = String::new();
+        for col in hl_start..hl_end {
+            if col >= buf_area.x + buf_area.width {
+                break;
+            }
+            if let Some(cell) = buf.cell_mut((col, row)) {
+                row_text.push_str(cell.symbol());
+                cell.set_style(highlight_style);
+            }
+        }
+
+        let trimmed = row_text.trim_end();
+        if !trimmed.is_empty() {
+            if !extracted_text.is_empty() {
+                extracted_text.push('\n');
+            }
+            extracted_text.push_str(trimmed);
+        } else if i > 0 && i < (row_end - row_start) as usize {
+            // Preserve blank lines in the middle of the selection.
+            extracted_text.push('\n');
+        }
+    }
+
+    // Store extracted text for the copy action.
+    if let Some(ref mut sel) = diff_view.selection {
+        sel.text = extracted_text;
+    }
+
+    // Tooltip below the selection (only after drag finishes).
+    if !selection.dragging {
+        let tooltip_width: u16 = 13; // " y copy  esc "
+        let tooltip_x = bot_col.saturating_sub(tooltip_width / 2)
+            .max(content_start)
+            .min(content_end.saturating_sub(tooltip_width));
+        let tooltip_y = (bot_row + 1).min(pl.inner_end_y.saturating_sub(1));
+
+        if tooltip_y < buf_area.y + buf_area.height {
+            let tooltip_style = Style::default()
+                .bg(Color::Rgb(60, 60, 70))
+                .fg(Color::Rgb(200, 200, 210));
+            let key_style = Style::default()
+                .bg(Color::Rgb(60, 60, 70))
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD);
+
+            let parts: &[(&str, Style)] = &[
+                (" ", tooltip_style),
+                ("y", key_style),
+                (" copy  ", tooltip_style),
+                ("esc", key_style),
+                (" ", tooltip_style),
+            ];
+
+            let mut col = tooltip_x;
+            for (text, style) in parts {
+                for ch in text.chars() {
+                    if col >= content_end {
+                        break;
+                    }
+                    if let Some(cell) = buf.cell_mut((col, tooltip_y)) {
+                        cell.set_char(ch);
+                        cell.set_style(*style);
+                    }
+                    col += 1;
+                }
+            }
+        }
+    }
 }
 
 fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect) {

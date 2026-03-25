@@ -16,6 +16,145 @@ struct FileSection {
     new_highlighter: FileHighlighter,
 }
 
+/// Which panel of the side-by-side diff the selection is in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffPanel {
+    Old, // Left panel (deleted / original code)
+    New, // Right panel (added / new code)
+}
+
+/// Mouse text selection state in the diff view.
+#[derive(Clone, Debug)]
+pub struct TextSelection {
+    /// Which panel (left/right) the selection lives in.
+    pub panel: DiffPanel,
+    /// Terminal column where the selection started.
+    pub start_col: u16,
+    /// Terminal row where the selection started.
+    pub start_row: u16,
+    /// Terminal column where the selection currently ends.
+    pub end_col: u16,
+    /// Terminal row where the selection currently ends.
+    pub end_row: u16,
+    /// Whether the user is still dragging (selection in progress).
+    pub dragging: bool,
+    /// The extracted selected text (populated after rendering).
+    pub text: String,
+}
+
+impl TextSelection {
+    /// Returns (top_row, top_col, bottom_row, bottom_col) in normalized order.
+    pub fn normalized(&self) -> (u16, u16, u16, u16) {
+        if self.start_row < self.end_row
+            || (self.start_row == self.end_row && self.start_col <= self.end_col)
+        {
+            (self.start_row, self.start_col, self.end_row, self.end_col)
+        } else {
+            (self.end_row, self.end_col, self.start_row, self.start_col)
+        }
+    }
+}
+
+/// Computed column layout for the diff panel's left/right content areas.
+/// All coordinates are absolute terminal X positions.
+#[derive(Clone, Copy, Debug)]
+pub struct DiffPanelLayout {
+    /// Whether this is a new-file diff (only right panel visible).
+    pub is_new_file: bool,
+    /// Left panel content start X (after gutter).
+    pub old_content_x: u16,
+    /// Left panel content end X (exclusive, up to divider).
+    pub old_content_end_x: u16,
+    /// Right panel content start X (after right gutter).
+    pub new_content_x: u16,
+    /// Right panel content end X (exclusive).
+    pub new_content_end_x: u16,
+    /// Inner area Y start (after top border).
+    pub inner_y: u16,
+    /// Inner area Y end (exclusive, before bottom border).
+    pub inner_end_y: u16,
+}
+
+impl DiffPanelLayout {
+    /// Compute the panel layout from a main panel Rect and diff state.
+    pub fn compute(panel_rect: Rect, state: &DiffViewState) -> Self {
+        let inner_x = panel_rect.x + 1; // border
+        let inner_y = panel_rect.y + 1;
+        let inner_w = panel_rect.width.saturating_sub(2);
+        let inner_end_y = inner_y + panel_rect.height.saturating_sub(2);
+
+        let gutter: u16 = 5;
+        let divider: u16 = 1;
+
+        let is_new_file = state.old_content.is_empty() && state.sections.len() <= 1;
+
+        if is_new_file {
+            // New file: single panel — gutter(5) + content(rest)
+            let content_x = inner_x + gutter;
+            let content_end_x = inner_x + inner_w;
+            Self {
+                is_new_file: true,
+                old_content_x: 0,
+                old_content_end_x: 0,
+                new_content_x: content_x,
+                new_content_end_x: content_end_x,
+                inner_y,
+                inner_end_y,
+            }
+        } else {
+            let total_chrome = gutter * 2 + divider;
+            let content_w = if inner_w > total_chrome { inner_w - total_chrome } else { 0 };
+            let panel_w = content_w / 2;
+
+            let old_content_x = inner_x + gutter;
+            let old_content_end_x = old_content_x + panel_w;
+            // divider is at old_content_end_x, right gutter starts at old_content_end_x + 1
+            let new_content_x = old_content_end_x + divider + gutter;
+            let new_content_end_x = inner_x + inner_w;
+
+            Self {
+                is_new_file: false,
+                old_content_x,
+                old_content_end_x,
+                new_content_x,
+                new_content_end_x,
+                inner_y,
+                inner_end_y,
+            }
+        }
+    }
+
+    /// Determine which panel an X coordinate falls in, if any.
+    pub fn panel_at_x(&self, x: u16) -> Option<DiffPanel> {
+        if self.is_new_file {
+            if x >= self.new_content_x && x < self.new_content_end_x {
+                return Some(DiffPanel::New);
+            }
+            // Also count gutter clicks as panel clicks
+            if x >= self.new_content_x.saturating_sub(5) && x < self.new_content_end_x {
+                return Some(DiffPanel::New);
+            }
+            return None;
+        }
+        // Include gutter in the clickable zone for each panel
+        if x >= self.old_content_x.saturating_sub(5) && x < self.old_content_end_x {
+            Some(DiffPanel::Old)
+        } else if x >= self.new_content_x.saturating_sub(5) && x < self.new_content_end_x {
+            Some(DiffPanel::New)
+        } else {
+            None
+        }
+    }
+
+    /// Get the content column range for a given panel.
+    pub fn content_range(&self, panel: DiffPanel) -> (u16, u16) {
+        match panel {
+            DiffPanel::Old => (self.old_content_x, self.old_content_end_x),
+            DiffPanel::New => (self.new_content_x, self.new_content_end_x),
+        }
+    }
+}
+
 /// State for the diff view panel.
 pub struct DiffViewState {
     pub scroll_offset: usize,
@@ -28,6 +167,8 @@ pub struct DiffViewState {
     pub tab_width: usize,
     /// Per-file-section highlighters for multi-file diffs.
     sections: Vec<FileSection>,
+    /// Active mouse text selection, if any.
+    pub selection: Option<TextSelection>,
 }
 
 impl Default for DiffViewState {
@@ -42,6 +183,7 @@ impl Default for DiffViewState {
             new_content: String::new(),
             tab_width: 4,
             sections: Vec::new(),
+            selection: None,
         }
     }
 }
@@ -63,6 +205,7 @@ impl DiffViewState {
         self.hunk_starts = super::diff_algo::find_hunk_starts(&self.lines);
         self.scroll_offset = 0;
         self.horizontal_scroll = 0;
+        self.selection = None;
         // Single section with index 0
         self.sections = vec![FileSection {
             old_highlighter: FileHighlighter::new(old, filename),
@@ -94,6 +237,7 @@ impl DiffViewState {
             self.sections = Vec::new();
             self.scroll_offset = 0;
             self.horizontal_scroll = 0;
+            self.selection = None;
 
             for (section_idx, (file_name, file_diff)) in file_diffs.iter().enumerate() {
                 let (old, new) = parse_unified_diff(file_diff);
