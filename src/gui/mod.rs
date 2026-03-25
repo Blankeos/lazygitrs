@@ -1430,6 +1430,8 @@ impl Gui {
                     HelpEntry { key: kb.branches.rename_branch.clone(), description: "Rename branch".into() },
                     HelpEntry { key: kb.branches.fast_forward.clone(), description: "Fast-forward".into() },
                     HelpEntry { key: kb.branches.set_upstream.clone(), description: "Set upstream".into() },
+                    HelpEntry { key: "y".into(), description: "Copy to clipboard menu".into() },
+                    HelpEntry { key: kb.branches.create_pull_request.clone(), description: "Open in browser menu".into() },
                 ],
             },
             ContextId::Commits | ContextId::CommitFiles => HelpSection {
