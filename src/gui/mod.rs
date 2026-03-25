@@ -23,7 +23,7 @@ use crate::config::AppConfig;
 use crate::config::keybindings::parse_key;
 use crate::git::GitCommands;
 use crate::model::Model;
-use crate::model::file_tree::{build_file_tree, FileTreeNode};
+use crate::model::file_tree::{build_file_tree, CommitFileTreeNode, FileTreeNode};
 use crate::pager::side_by_side::DiffViewState;
 
 use self::context::{ContextId, ContextManager, SideWindow};
@@ -108,6 +108,16 @@ pub struct Gui {
     last_refresh_at: Instant,
     /// Active branch filter for commits panel. When non-empty, only commits from these branches are shown.
     pub commit_branch_filter: Vec<String>,
+    /// Hash of the commit whose files are being viewed in CommitFiles context.
+    pub commit_files_hash: String,
+    /// First line of the commit message for the commit being viewed.
+    pub commit_files_message: String,
+    /// Cached commit file tree nodes for the CommitFiles view.
+    pub commit_file_tree_nodes: Vec<CommitFileTreeNode>,
+    /// Set of collapsed directory paths in the commit file tree.
+    pub commit_files_collapsed_dirs: HashSet<String>,
+    /// Whether to show tree view for commit files (mirrors show_file_tree).
+    pub show_commit_file_tree: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +174,11 @@ impl Gui {
             search_textarea: None,
             last_refresh_at: Instant::now(),
             commit_branch_filter: Vec::new(),
+            commit_files_hash: String::new(),
+            commit_files_message: String::new(),
+            commit_file_tree_nodes: Vec::new(),
+            commit_files_collapsed_dirs: HashSet::new(),
+            show_commit_file_tree: show_file_tree,
         })
     }
 
@@ -227,6 +242,11 @@ impl Gui {
                     &cmd_log,
                     self.show_command_log,
                     &self.commit_branch_filter,
+                    self.show_commit_file_tree,
+                    &self.commit_file_tree_nodes,
+                    &self.commit_files_collapsed_dirs,
+                    &self.commit_files_hash,
+                    &self.commit_files_message,
                 );
             })?;
 
@@ -522,6 +542,47 @@ impl Gui {
                     drop(model);
                 }
             }
+            ContextId::CommitFiles => {
+                // CommitFiles: load diff for the selected file within the commit
+                let file_idx = if self.show_commit_file_tree {
+                    self.commit_file_tree_nodes.get(selected).and_then(|n| n.file_index)
+                } else {
+                    Some(selected)
+                };
+                if let Some(commit_file) = file_idx.and_then(|i| model.commit_files.get(i)) {
+                    let name = commit_file.name.clone();
+                    let hash = self.commit_files_hash.clone();
+                    drop(model);
+
+                    let git = Arc::clone(&self.git);
+                    let tx = self.diff_tx.clone();
+                    let gen_counter = Arc::clone(&self.diff_generation);
+
+                    std::thread::spawn(move || {
+                        if gen_counter.load(Ordering::Relaxed) != generation {
+                            return;
+                        }
+                        let payload = if let Ok(diff) = git.diff_commit_file(&hash, &name) {
+                            if diff.is_empty() {
+                                DiffPayload::Empty
+                            } else {
+                                DiffPayload::UnifiedDiff { filename: name, diff_output: diff }
+                            }
+                        } else {
+                            DiffPayload::Empty
+                        };
+                        let _ = tx.send(DiffResult {
+                            generation,
+                            diff_key,
+                            payload,
+                        });
+                    });
+                } else {
+                    // Directory node or no file selected — clear diff
+                    drop(model);
+                    self.diff_view = DiffViewState::new();
+                }
+            }
             _ => {
                 drop(model);
             }
@@ -558,6 +619,14 @@ impl Gui {
         if let KeyCode::Char(c @ '1'..='5') = key.code {
             let n = c.to_digit(10).unwrap();
             if let Some(window) = SideWindow::from_number(n) {
+                // If we're in a sub-context (CommitFiles), pressing the parent window's
+                // number key should exit the sub-context first.
+                if self.context_mgr.active() == ContextId::CommitFiles
+                    && window == SideWindow::Commits
+                {
+                    self.context_mgr.set_active(ContextId::Commits);
+                    return Ok(());
+                }
                 self.context_mgr.jump_to_window(window);
                 return Ok(());
             }
@@ -565,6 +634,7 @@ impl Gui {
 
         // Tab to switch windows
         if matches_key(key, &keybindings.universal.toggle_panel) {
+            self.exit_sub_contexts();
             self.context_mgr.next_window();
             return Ok(());
         }
@@ -573,12 +643,14 @@ impl Gui {
         if matches_key(key, &keybindings.universal.prev_block)
             || matches_key(key, &keybindings.universal.prev_block_alt)
         {
+            self.exit_sub_contexts();
             self.context_mgr.prev_window();
             return Ok(());
         }
         if matches_key(key, &keybindings.universal.next_block)
             || matches_key(key, &keybindings.universal.next_block_alt)
         {
+            self.exit_sub_contexts();
             self.context_mgr.next_window();
             return Ok(());
         }
@@ -772,6 +844,9 @@ impl Gui {
             }
             ContextId::Submodules => {
                 controller::submodules::handle_key(self, key, &keybindings)?;
+            }
+            ContextId::CommitFiles => {
+                controller::commit_files::handle_key(self, key, &keybindings)?;
             }
             _ => {}
         }
@@ -1435,6 +1510,23 @@ impl Gui {
                     }
                 }
             }
+            ContextId::CommitFiles => {
+                if self.show_commit_file_tree {
+                    for (i, node) in self.commit_file_tree_nodes.iter().enumerate() {
+                        if node.path.to_lowercase().contains(&query)
+                            || node.name.to_lowercase().contains(&query)
+                        {
+                            self.search_matches.push(i);
+                        }
+                    }
+                } else {
+                    for (i, file) in model.commit_files.iter().enumerate() {
+                        if file.name.to_lowercase().contains(&query) {
+                            self.search_matches.push(i);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
 
@@ -1590,6 +1682,22 @@ impl Gui {
             self.file_tree_nodes.clear();
             self.context_mgr.files_list_len_override = None;
         }
+
+        // If we're viewing commit files, re-load them (refresh wipes the model)
+        if self.context_mgr.active() == ContextId::CommitFiles && !self.commit_files_hash.is_empty() {
+            if let Ok(cf) = self.git.commit_files(&self.commit_files_hash) {
+                model.commit_files = cf;
+            }
+            if self.show_commit_file_tree {
+                self.commit_file_tree_nodes = crate::model::file_tree::build_commit_file_tree(
+                    &model.commit_files,
+                    &self.commit_files_collapsed_dirs,
+                );
+                self.context_mgr.commit_files_list_len_override =
+                    Some(self.commit_file_tree_nodes.len());
+            }
+        }
+
         Ok(())
     }
 
@@ -1615,6 +1723,14 @@ impl Gui {
         } else {
             self.file_tree_nodes.clear();
             self.context_mgr.files_list_len_override = None;
+        }
+    }
+
+    /// Exit sub-contexts (like CommitFiles) back to their parent context
+    /// before navigating away to another window.
+    fn exit_sub_contexts(&mut self) {
+        if self.context_mgr.active() == ContextId::CommitFiles {
+            self.context_mgr.set_active(ContextId::Commits);
         }
     }
 

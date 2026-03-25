@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use super::File;
+use super::CommitFile;
 
 /// A node in the flattened file tree for display.
 #[derive(Debug, Clone)]
@@ -107,6 +108,96 @@ pub fn build_file_tree(files: &[File], collapsed_dirs: &HashSet<String>) -> Vec<
                 file_index: Some(*file_idx),
                 is_dir: false,
                 child_file_indices: Vec::new(),
+            });
+        }
+
+        last_dirs = dir_parts.iter().map(|s| s.to_string()).collect();
+    }
+
+    nodes
+}
+
+/// A node in the flattened commit file tree for display.
+#[derive(Debug, Clone)]
+pub struct CommitFileTreeNode {
+    pub depth: usize,
+    pub name: String,
+    pub path: String,
+    /// If this is a file node, the index into `Model.commit_files`.
+    pub file_index: Option<usize>,
+    pub is_dir: bool,
+}
+
+/// Build a flat list of tree nodes from the commit file list.
+pub fn build_commit_file_tree(
+    files: &[CommitFile],
+    collapsed_dirs: &HashSet<String>,
+) -> Vec<CommitFileTreeNode> {
+    if files.is_empty() {
+        return Vec::new();
+    }
+
+    let mut entries: Vec<(Vec<&str>, usize)> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let parts: Vec<&str> = f.name.split('/').collect();
+            (parts, i)
+        })
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut nodes = Vec::new();
+    let mut last_dirs: Vec<String> = Vec::new();
+
+    for (parts, file_idx) in &entries {
+        let dir_parts = &parts[..parts.len() - 1];
+        let file_name = parts[parts.len() - 1];
+
+        let mut hidden = false;
+        for depth in 0..dir_parts.len() {
+            let ancestor_path = parts[..=depth].join("/");
+            if collapsed_dirs.contains(&ancestor_path) {
+                hidden = true;
+                break;
+            }
+        }
+
+        let common_prefix = last_dirs
+            .iter()
+            .zip(dir_parts.iter())
+            .take_while(|(a, b)| a.as_str() == **b)
+            .count();
+
+        for (depth, dir) in dir_parts.iter().enumerate().skip(common_prefix) {
+            let dir_path = parts[..=depth].join("/");
+            let dir_hidden = (0..depth).any(|d| {
+                let ancestor = parts[..=d].join("/");
+                collapsed_dirs.contains(&ancestor)
+            });
+
+            if !dir_hidden {
+                nodes.push(CommitFileTreeNode {
+                    depth,
+                    name: dir.to_string(),
+                    path: dir_path.clone(),
+                    file_index: None,
+                    is_dir: true,
+                });
+            }
+
+            if collapsed_dirs.contains(&dir_path) {
+                break;
+            }
+        }
+
+        if !hidden {
+            nodes.push(CommitFileTreeNode {
+                depth: dir_parts.len(),
+                name: file_name.to_string(),
+                path: parts.join("/"),
+                file_index: Some(*file_idx),
+                is_dir: false,
             });
         }
 

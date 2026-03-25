@@ -7,7 +7,7 @@ use ratatui::Frame;
 use std::collections::HashSet;
 
 use crate::config::AppConfig;
-use crate::model::file_tree::FileTreeNode;
+use crate::model::file_tree::{CommitFileTreeNode, FileTreeNode};
 use crate::model::Model;
 use crate::pager::side_by_side::{self, DiffViewState};
 
@@ -35,6 +35,11 @@ pub fn render(
     command_log: &[String],
     show_command_log: bool,
     commit_branch_filter: &[String],
+    show_commit_file_tree: bool,
+    commit_file_tree_nodes: &[CommitFileTreeNode],
+    commit_files_collapsed_dirs: &HashSet<String>,
+    commit_files_hash: &str,
+    commit_files_message: &str,
 ) {
     let area = frame.area();
     let theme = config.user_config.theme();
@@ -67,7 +72,9 @@ pub fn render(
             // Sidebar is focused: show active sidebar panel fullscreen
             let ctx_id = ctx_mgr.active();
             let selected = ctx_mgr.selected(ctx_id);
-            let title = if ctx_id == ContextId::Commits && !commit_branch_filter.is_empty() {
+            let title = if ctx_id == ContextId::CommitFiles {
+                build_commit_files_title(commit_files_hash, commit_files_message)
+            } else if ctx_id == ContextId::Commits && !commit_branch_filter.is_empty() {
                 let filter_label = commit_branch_filter.join(", ");
                 Line::from(vec![
                     Span::raw(" Commits "),
@@ -116,6 +123,15 @@ pub fn render(
                 ContextId::Stash => {
                     let items = presentation::stash::render_stash_list(model, &theme);
                     render_list(frame, fl.main_panel, block, items, selected, true, &theme);
+                }
+                ContextId::CommitFiles => {
+                    if show_commit_file_tree {
+                        let items = presentation::commit_files::render_commit_file_tree(model, &theme, commit_file_tree_nodes, commit_files_collapsed_dirs);
+                        render_list(frame, fl.main_panel, block, items, selected, true, &theme);
+                    } else {
+                        let items = presentation::commit_files::render_commit_file_list(model, &theme);
+                        render_list(frame, fl.main_panel, block, items, selected, true, &theme);
+                    }
                 }
                 _ => {
                     let widget = Paragraph::new("").block(block);
@@ -202,8 +218,25 @@ pub fn render(
                 render_list(frame, rect, block, items, selected, is_active, &theme);
             }
             ContextId::Commits => {
-                let items = presentation::commits::render_commit_list(model, &theme);
-                render_list(frame, rect, block, items, selected, is_active, &theme);
+                // If CommitFiles is active within this window, render that instead
+                if ctx_mgr.active() == ContextId::CommitFiles {
+                    let cf_selected = ctx_mgr.selected(ContextId::CommitFiles);
+                    let cf_title = build_commit_files_title(commit_files_hash, commit_files_message);
+                    let cf_block = Block::default()
+                        .title(cf_title)
+                        .borders(Borders::ALL)
+                        .border_style(border_style);
+                    if show_commit_file_tree {
+                        let items = presentation::commit_files::render_commit_file_tree(model, &theme, commit_file_tree_nodes, commit_files_collapsed_dirs);
+                        render_list(frame, rect, cf_block, items, cf_selected, is_active, &theme);
+                    } else {
+                        let items = presentation::commit_files::render_commit_file_list(model, &theme);
+                        render_list(frame, rect, cf_block, items, cf_selected, is_active, &theme);
+                    }
+                } else {
+                    let items = presentation::commits::render_commit_list(model, &theme);
+                    render_list(frame, rect, block, items, selected, is_active, &theme);
+                }
             }
             ContextId::Stash => {
                 let items = presentation::stash::render_stash_list(model, &theme);
@@ -315,7 +348,27 @@ pub fn render(
     }
 }
 
-/// Build a window title like " 3 Branches | Remotes | Tags " with the active tab in a highlight color.
+/// Build a window title like " 4 Commit Files (abc1234 feat: some change) ".
+fn build_commit_files_title<'a>(commit_hash: &str, commit_message: &str) -> Line<'a> {
+    let short = if commit_hash.len() > 7 { &commit_hash[..7] } else { commit_hash };
+    let mut spans = vec![
+        Span::raw(" 4 Commit Files "),
+        Span::styled(
+            format!("({}", short),
+            Style::default().fg(Color::Yellow),
+        ),
+    ];
+    if !commit_message.is_empty() {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            commit_message.to_string(),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    spans.push(Span::styled(") ", Style::default().fg(Color::Yellow)));
+    Line::from(spans)
+}
+
 fn build_window_title<'a>(window: SideWindow, active_ctx: ContextId, _ctx_mgr: &ContextManager) -> Line<'a> {
     let tabs = window.tabs();
     let key = window.key_label();
@@ -349,12 +402,11 @@ fn build_window_title<'a>(window: SideWindow, active_ctx: ContextId, _ctx_mgr: &
 
 /// Compact 1-line status for the sidebar: "reponame → branch          +N -N"
 fn render_status_sidebar<'a>(model: &Model, _config: &AppConfig, inner_width: usize) -> Line<'a> {
-    let branch_name = model
-        .branches
-        .iter()
-        .find(|b| b.head)
+    let head_branch = model.branches.iter().find(|b| b.head);
+    let branch_name = head_branch
         .map(|b| b.name.clone())
         .unwrap_or_else(|| "detached".to_string());
+    let ahead_behind = head_branch.and_then(|b| b.ahead_behind());
 
     let repo_name = model.repo_name.clone();
 
@@ -379,21 +431,35 @@ fn render_status_sidebar<'a>(model: &Model, _config: &AppConfig, inner_width: us
         String::new()
     };
 
-    // Left side: " reponame → branch"
-    // We need +1 for leading space, +repo, +1 space, +2 "→ ", +branch
-    let left_len = 1 + repo_name.len() + 1 + 2 + branch_name.len();
+    // Build ahead/behind prefix
+    let ab_text = match ahead_behind {
+        Some((ahead, behind)) if ahead > 0 && behind > 0 => format!("↑{}↓{} ", ahead, behind),
+        Some((ahead, _)) if ahead > 0 => format!("↑{} ", ahead),
+        Some((_, behind)) if behind > 0 => format!("↓{} ", behind),
+        _ => String::new(),
+    };
+
+    // Left side: " ↑N reponame → branch"
+    let left_len = 1 + ab_text.len() + repo_name.len() + 1 + 2 + branch_name.len();
     // Right side: stats + trailing space
     let right_len = if has_changes { stats_text.len() + 1 } else { 0 };
     let padding = inner_width.saturating_sub(left_len + right_len);
 
-    let mut spans = vec![
-        Span::styled(
-            format!(" {} ", repo_name),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("→ ", Style::default().fg(Color::DarkGray)),
-        Span::styled(branch_name, Style::default().fg(Color::Green)),
-    ];
+    let mut spans = Vec::new();
+    if !ab_text.is_empty() {
+        spans.push(Span::styled(
+            format!(" {}", ab_text),
+            Style::default().fg(Color::Green),
+        ));
+    } else {
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(
+        format!("{} ", repo_name),
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled("→ ", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled(branch_name, Style::default().fg(Color::Green)));
 
     if has_changes {
         spans.push(Span::raw(" ".repeat(padding)));

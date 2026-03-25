@@ -125,6 +125,50 @@ impl GitCommands {
         Ok(total)
     }
 
+    /// Get the list of files changed in a commit with their change status.
+    pub fn commit_files(&self, hash: &str) -> Result<Vec<crate::model::CommitFile>> {
+        let result = self
+            .git()
+            .args(&["diff-tree", "--no-commit-id", "--name-status", "-r", hash])
+            .run_expecting_success()?;
+
+        let mut files = Vec::new();
+        for line in result.stdout.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            // Format: "M\tpath/to/file" or "R100\told\tnew"
+            let mut parts = line.splitn(2, '\t');
+            let status_str = parts.next().unwrap_or("");
+            let name = parts.next().unwrap_or("").to_string();
+            if name.is_empty() {
+                continue;
+            }
+
+            let status = match status_str.chars().next() {
+                Some('A') => crate::model::FileChangeStatus::Added,
+                Some('D') => crate::model::FileChangeStatus::Deleted,
+                Some('R') => crate::model::FileChangeStatus::Renamed,
+                Some('C') => crate::model::FileChangeStatus::Copied,
+                Some('U') => crate::model::FileChangeStatus::Unmerged,
+                _ => crate::model::FileChangeStatus::Modified,
+            };
+
+            files.push(crate::model::CommitFile { name, status });
+        }
+        Ok(files)
+    }
+
+    /// Get the diff of a single file within a commit.
+    pub fn diff_commit_file(&self, hash: &str, path: &str) -> Result<String> {
+        let result = self
+            .git()
+            .args(&["show", "--color=never", "--format=", hash, "--", path])
+            .run_expecting_success()?;
+        Ok(result.stdout)
+    }
+
     /// Get the staged content of a file.
     pub fn file_content_staged(&self, path: &str) -> Result<String> {
         let result = self

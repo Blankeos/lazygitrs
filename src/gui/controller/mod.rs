@@ -1,5 +1,6 @@
 pub mod bisect;
 pub mod branches;
+pub mod commit_files;
 pub mod commits;
 pub mod custom_commands;
 pub mod files;

@@ -109,6 +109,8 @@ pub struct ContextManager {
     scroll_offsets: std::collections::HashMap<ContextId, usize>,
     /// Override for files list length when tree view is active.
     pub files_list_len_override: Option<usize>,
+    /// Override for commit files list length when tree view is active.
+    pub commit_files_list_len_override: Option<usize>,
 }
 
 impl ContextManager {
@@ -124,12 +126,16 @@ impl ContextManager {
             }
         }
 
+        // CommitFiles is a dynamic context, initialize its selection
+        selections.insert(ContextId::CommitFiles, 0);
+
         Self {
             active: ContextId::Files,
             window_tabs,
             selections,
             scroll_offsets: std::collections::HashMap::new(),
             files_list_len_override: None,
+            commit_files_list_len_override: None,
         }
     }
 
@@ -265,6 +271,7 @@ impl ContextManager {
             ContextId::Remotes => model.remotes.len(),
             ContextId::Tags => model.tags.len(),
             ContextId::Worktrees => model.worktrees.len(),
+            ContextId::CommitFiles => self.commit_files_list_len_override.unwrap_or(model.commit_files.len()),
             _ => 0,
         }
     }

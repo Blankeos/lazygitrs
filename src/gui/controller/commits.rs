@@ -8,6 +8,11 @@ use crate::gui::Gui;
 use crate::os::platform::Platform;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
+    // Enter: open commit files subview
+    if key.code == crossterm::event::KeyCode::Enter {
+        return enter_commit_files(gui);
+    }
+
     if matches_key(key, &keybindings.commits.revert_commit) {
         return revert_commit(gui);
     }
@@ -553,6 +558,47 @@ fn show_branch_filter_menu(gui: &mut Gui) -> Result<()> {
         }),
     };
 
+    Ok(())
+}
+
+fn enter_commit_files(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let model = gui.model.lock().unwrap();
+    if let Some(commit) = model.commits.get(selected) {
+        let hash = commit.hash.clone();
+        let message = commit.name.clone();
+        drop(model);
+
+        // Load commit files
+        let commit_files = gui.git.commit_files(&hash)?;
+        {
+            let mut model = gui.model.lock().unwrap();
+            model.commit_files = commit_files;
+        }
+        gui.commit_files_hash = hash;
+        gui.commit_files_message = message;
+
+        // Build commit file tree
+        if gui.show_commit_file_tree {
+            let model = gui.model.lock().unwrap();
+            gui.commit_file_tree_nodes = crate::model::file_tree::build_commit_file_tree(
+                &model.commit_files,
+                &gui.commit_files_collapsed_dirs,
+            );
+            gui.context_mgr.commit_files_list_len_override =
+                Some(gui.commit_file_tree_nodes.len());
+        } else {
+            gui.commit_file_tree_nodes.clear();
+            let model = gui.model.lock().unwrap();
+            gui.context_mgr.commit_files_list_len_override = None;
+            let _ = model.commit_files.len(); // just ensure it compiles
+        }
+
+        // Switch to CommitFiles context
+        gui.context_mgr.set_active(crate::gui::context::ContextId::CommitFiles);
+        gui.context_mgr.set_selection(0);
+        gui.needs_diff_refresh = true;
+    }
     Ok(())
 }
 
