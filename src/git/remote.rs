@@ -130,6 +130,35 @@ impl GitCommands {
         let base = remote_url_to_https(&remote_url);
         Ok(format!("{}/commit/{}", base, hash))
     }
+
+    /// Get the HTTPS URL for the origin remote repository.
+    pub fn get_repo_url(&self) -> Result<String> {
+        let result = self
+            .git()
+            .args(&["remote", "get-url", "origin"])
+            .run_expecting_success()?;
+        let remote_url = result.stdout.trim().to_string();
+        Ok(remote_url_to_https(&remote_url))
+    }
+
+    /// Build a PR creation URL for a branch (GitHub compare URL).
+    pub fn get_pr_create_url(&self, branch: &str) -> Result<String> {
+        let base = self.get_repo_url()?;
+        Ok(format!("{}/compare/{}?expand=1", base, branch))
+    }
+
+    /// Get the PR URL for a branch using `gh pr view`.
+    pub fn get_pr_url(&self, branch: &str) -> Result<String> {
+        let result = crate::os::cmd::CmdBuilder::new("gh")
+            .args(&["pr", "view", branch, "--json", "url", "-q", ".url"])
+            .cwd_path(self.repo_path())
+            .run()?;
+        if result.success && !result.stdout.trim().is_empty() {
+            Ok(result.stdout.trim().to_string())
+        } else {
+            anyhow::bail!("No PR found for branch '{}'", branch)
+        }
+    }
 }
 
 /// Convert a git remote URL (SSH or HTTPS) to a plain HTTPS base URL.

@@ -3,8 +3,9 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
-use crate::gui::popup::{PopupState, make_textarea};
+use crate::gui::popup::{MenuItem, PopupState, make_textarea};
 use crate::gui::Gui;
+use crate::os::platform::Platform;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
     // Enter: view branch commits
@@ -43,6 +44,16 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
 
     if matches_key(key, &keybindings.branches.set_upstream) {
         return set_upstream(gui);
+    }
+
+    // y: Copy to clipboard menu (repo url, PR create url, PR url)
+    if key.code == KeyCode::Char('y') {
+        return copy_to_clipboard_menu(gui);
+    }
+
+    // o: Open in browser menu (repo url, PR create url, PR url)
+    if matches_key(key, &keybindings.branches.create_pull_request) {
+        return open_in_browser_menu(gui);
     }
 
     Ok(())
@@ -197,7 +208,7 @@ fn fast_forward(gui: &mut Gui) -> Result<()> {
     let model = gui.model.lock().unwrap();
     if let Some(branch) = model.branches.get(selected) {
         if branch.upstream.is_some() {
-            let name = branch.name.clone();
+            let _name = branch.name.clone();
             drop(model);
             gui.git.fetch("origin")?;
             gui.needs_refresh = true;
@@ -221,6 +232,133 @@ fn set_upstream(gui: &mut Gui) -> Result<()> {
                 gui.needs_refresh = true;
                 Ok(())
             }),
+        };
+    }
+    Ok(())
+}
+
+fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let model = gui.model.lock().unwrap();
+    if let Some(branch) = model.branches.get(selected) {
+        let branch_name = branch.name.clone();
+        let branch_for_pr_create = branch_name.clone();
+        let branch_for_pr = branch_name.clone();
+        drop(model);
+
+        let mut items = vec![
+            MenuItem {
+                label: "Copy repo URL".to_string(),
+                description: String::new(),
+                key: Some("r".to_string()),
+                action: Some(Box::new(move |gui| {
+                    let url = gui.git.get_repo_url()?;
+                    Platform::copy_to_clipboard(&url)?;
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Copy PR create URL".to_string(),
+                description: String::new(),
+                key: Some("c".to_string()),
+                action: Some(Box::new(move |gui| {
+                    let url = gui.git.get_pr_create_url(&branch_for_pr_create)?;
+                    Platform::copy_to_clipboard(&url)?;
+                    Ok(())
+                })),
+            },
+        ];
+
+        // PR URL may not be available — try to detect if branch has a PR
+        let pr_branch = branch_for_pr.clone();
+        items.push(MenuItem {
+            label: "Copy PR URL".to_string(),
+            description: "(requires existing PR)".to_string(),
+            key: Some("p".to_string()),
+            action: Some(Box::new(move |gui| {
+                match gui.git.get_pr_url(&pr_branch) {
+                    Ok(url) => {
+                        Platform::copy_to_clipboard(&url)?;
+                    }
+                    Err(_) => {
+                        gui.popup = PopupState::Confirm {
+                            title: "No PR found".to_string(),
+                            message: format!("No pull request found for branch '{}'", branch_for_pr),
+                            on_confirm: Box::new(|_| Ok(())),
+                        };
+                    }
+                }
+                Ok(())
+            })),
+        });
+
+        gui.popup = PopupState::Menu {
+            title: "Copy to clipboard".to_string(),
+            items,
+            selected: 0,
+        };
+    }
+    Ok(())
+}
+
+fn open_in_browser_menu(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let model = gui.model.lock().unwrap();
+    if let Some(branch) = model.branches.get(selected) {
+        let branch_name = branch.name.clone();
+        let branch_for_pr_create = branch_name.clone();
+        let branch_for_pr = branch_name.clone();
+        drop(model);
+
+        let mut items = vec![
+            MenuItem {
+                label: "Open repo URL".to_string(),
+                description: String::new(),
+                key: Some("r".to_string()),
+                action: Some(Box::new(move |gui| {
+                    let url = gui.git.get_repo_url()?;
+                    Platform::open_file(&url)?;
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Open PR create URL".to_string(),
+                description: String::new(),
+                key: Some("c".to_string()),
+                action: Some(Box::new(move |gui| {
+                    let url = gui.git.get_pr_create_url(&branch_for_pr_create)?;
+                    Platform::open_file(&url)?;
+                    Ok(())
+                })),
+            },
+        ];
+
+        let pr_branch = branch_for_pr.clone();
+        items.push(MenuItem {
+            label: "Open PR URL".to_string(),
+            description: "(requires existing PR)".to_string(),
+            key: Some("p".to_string()),
+            action: Some(Box::new(move |gui| {
+                match gui.git.get_pr_url(&pr_branch) {
+                    Ok(url) => {
+                        Platform::open_file(&url)?;
+                    }
+                    Err(_) => {
+                        gui.popup = PopupState::Confirm {
+                            title: "No PR found".to_string(),
+                            message: format!("No pull request found for branch '{}'", branch_for_pr),
+                            on_confirm: Box::new(|_| Ok(())),
+                        };
+                    }
+                }
+                Ok(())
+            })),
+        });
+
+        gui.popup = PopupState::Menu {
+            title: "Open in browser".to_string(),
+            items,
+            selected: 0,
         };
     }
     Ok(())

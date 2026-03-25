@@ -1,8 +1,6 @@
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent};
 
-use crate::config::KeybindingConfig;
-use crate::config::keybindings::parse_key;
+
 use crate::gui::popup::{MenuItem, PopupState};
 use crate::gui::Gui;
 
