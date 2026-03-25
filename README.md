@@ -21,6 +21,18 @@ This is mostly a "for me" tool — built for my own workflow. Not saying you sho
   - [ ] Filter by commit message (handy if you prefix with ticket IDs)
 - [ ] Command palette (OpenCode-style) — still figuring this one out
 
+### Get started
+
+```sh
+git clone http://github.com/blankeos/lazygitrs
+cd lazygitrs
+cargo install --path .
+
+
+# Run as usual:
+lazygitrs
+```
+
 MIT
 
 Feel free to fork and give it your own spin.

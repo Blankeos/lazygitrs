@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::io::{self, Stdout};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, MouseEvent};
@@ -99,6 +100,8 @@ pub struct Gui {
     pending_commit_popup: Option<PopupState>,
     /// Search bar textarea (1-line editor for search input).
     search_textarea: Option<tui_textarea::TextArea<'static>>,
+    /// Last time a refresh occurred (for 10s background auto-refresh interval).
+    last_refresh_at: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +153,7 @@ impl Gui {
             patch_building: PatchBuildingState::new(),
             pending_commit_popup: None,
             search_textarea: None,
+            last_refresh_at: Instant::now(),
         })
     }
 
@@ -222,8 +226,18 @@ impl Gui {
                     Event::Resize(w, h) => {
                         self.layout.update_size(w, h);
                     }
+                    Event::FocusGained if self.config.user_config.git.auto_refresh => {
+                        self.needs_refresh = true;
+                    }
                     _ => {}
                 }
+            }
+
+            // Background auto-refresh every 10s (like lazygit's refresher.refreshInterval)
+            if self.config.user_config.git.auto_refresh
+                && self.last_refresh_at.elapsed().as_secs() >= 10
+            {
+                self.needs_refresh = true;
             }
 
             // Refresh data if needed
@@ -231,6 +245,7 @@ impl Gui {
                 self.refresh()?;
                 self.needs_refresh = false;
                 self.needs_diff_refresh = true;
+                self.last_refresh_at = Instant::now();
             }
 
             if self.should_quit {
@@ -1606,6 +1621,7 @@ fn setup_terminal() -> Result<Term> {
         stdout,
         EnterAlternateScreen,
         crossterm::event::EnableMouseCapture,
+        crossterm::event::EnableFocusChange,
         cursor::Hide,
         crossterm::event::PushKeyboardEnhancementFlags(
             crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
@@ -1622,6 +1638,7 @@ fn restore_terminal(terminal: &mut Term) -> Result<()> {
     execute!(
         terminal.backend_mut(),
         crossterm::event::PopKeyboardEnhancementFlags,
+        crossterm::event::DisableFocusChange,
         LeaveAlternateScreen,
         crossterm::event::DisableMouseCapture,
         cursor::Show
