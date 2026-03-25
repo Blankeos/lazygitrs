@@ -1,6 +1,6 @@
+use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::io::Write;
 
 use anyhow::{bail, Result};
 
@@ -78,7 +78,10 @@ mod tests {
 
     #[test]
     fn test_strip_markdown_fences_plain() {
-        assert_eq!(strip_markdown_fences("fix: update login"), "fix: update login");
+        assert_eq!(
+            strip_markdown_fences("fix: update login"),
+            "fix: update login"
+        );
     }
 
     #[test]

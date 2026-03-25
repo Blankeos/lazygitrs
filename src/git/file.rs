@@ -73,6 +73,11 @@ impl GitCommands {
     }
 
     pub fn discard_file(&self, path: &str) -> Result<()> {
+        // Unstage first (ignore errors — file may not be staged)
+        let _ = self.git()
+            .args(&["reset", "HEAD", "--", path])
+            .run();
+        // Then discard working tree changes
         self.git()
             .args(&["checkout", "--", path])
             .run_expecting_success()?;

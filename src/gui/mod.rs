@@ -215,7 +215,9 @@ impl Gui {
             // Handle events
             if event::poll(std::time::Duration::from_millis(16))? {
                 match event::read()? {
-                    Event::Key(key) => self.handle_key(key)?,
+                    Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
+                        self.handle_key(key)?;
+                    }
                     Event::Mouse(mouse) => self.handle_mouse(mouse),
                     Event::Resize(w, h) => {
                         self.layout.update_size(w, h);
@@ -857,19 +859,11 @@ impl Gui {
                 use crossterm::event::KeyModifiers;
                 let is_commit = *is_commit;
 
-                // Shift+Enter or Alt+Enter inserts a newline
-                if key.code == KeyCode::Enter
-                    && (key.modifiers.contains(KeyModifiers::SHIFT)
-                        || key.modifiers.contains(KeyModifiers::ALT))
-                {
-                    if let PopupState::Input { textarea, .. } = &mut self.popup {
-                        textarea.insert_newline();
-                    }
-                }
-                // Plain Enter to confirm
-                else if key.code == KeyCode::Enter
-                    && !key.modifiers.contains(KeyModifiers::SHIFT)
-                    && !key.modifiers.contains(KeyModifiers::ALT)
+                // Confirm: Ctrl+S for commit (multiline), Enter for non-commit (single-line)
+                if (is_commit
+                    && key.code == KeyCode::Char('s')
+                    && key.modifiers.contains(KeyModifiers::CONTROL))
+                    || (!is_commit && key.code == KeyCode::Enter)
                 {
                     let popup = std::mem::replace(&mut self.popup, PopupState::None);
                     if let PopupState::Input { textarea, on_confirm, .. } = popup {
@@ -1612,7 +1606,11 @@ fn setup_terminal() -> Result<Term> {
         stdout,
         EnterAlternateScreen,
         crossterm::event::EnableMouseCapture,
-        cursor::Hide
+        cursor::Hide,
+        crossterm::event::PushKeyboardEnhancementFlags(
+            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        )
     )?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
@@ -1623,6 +1621,7 @@ fn restore_terminal(terminal: &mut Term) -> Result<()> {
     terminal::disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        crossterm::event::PopKeyboardEnhancementFlags,
         LeaveAlternateScreen,
         crossterm::event::DisableMouseCapture,
         cursor::Show

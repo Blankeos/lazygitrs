@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
-use crate::gui::popup::{PopupState, make_textarea};
+use crate::gui::popup::{MenuItem, PopupState, make_textarea};
 use crate::gui::Gui;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
@@ -86,8 +86,38 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
 }
 
 fn toggle_stage(gui: &mut Gui) -> Result<()> {
+    // If in tree view and a directory is selected, stage/unstage all child files
+    if gui.show_file_tree {
+        let selected = gui.context_mgr.selected_active();
+        if let Some(node) = gui.file_tree_nodes.get(selected) {
+            if node.is_dir {
+                let child_indices = node.child_file_indices.clone();
+                let model = gui.model.lock().unwrap();
+                // Check if any child has unstaged changes
+                let any_unstaged = child_indices.iter().any(|&i| {
+                    model.files.get(i).map_or(false, |f| f.has_unstaged_changes || !f.tracked)
+                });
+                let names: Vec<String> = child_indices
+                    .iter()
+                    .filter_map(|&i| model.files.get(i).map(|f| f.name.clone()))
+                    .collect();
+                drop(model);
+
+                for name in &names {
+                    if any_unstaged {
+                        gui.git.stage_file(name)?;
+                    } else {
+                        gui.git.unstage_file(name)?;
+                    }
+                }
+                gui.needs_refresh = true;
+                return Ok(());
+            }
+        }
+    }
+
     let Some(file_idx) = gui.selected_file_index() else {
-        return Ok(()); // Directory node selected, nothing to do
+        return Ok(());
     };
     let model = gui.model.lock().unwrap();
     if let Some(file) = model.files.get(file_idx) {
@@ -189,14 +219,28 @@ fn discard_file(gui: &mut Gui) -> Result<()> {
         drop(model);
 
         if !gui.config.user_config.gui.skip_discard_change_warning {
-            gui.popup = PopupState::Confirm {
-                title: "Discard changes".to_string(),
-                message: format!("Discard changes to '{}'?", name),
-                on_confirm: Box::new(move |gui| {
-                    gui.git.discard_file(&name)?;
-                    gui.needs_refresh = true;
-                    Ok(())
-                }),
+            let name_clone = name.clone();
+            gui.popup = PopupState::Menu {
+                title: format!("Discard changes to '{}'?", name),
+                items: vec![
+                    MenuItem {
+                        label: "Discard".to_string(),
+                        description: "discard all changes".to_string(),
+                        key: Some("d".to_string()),
+                        action: Some(Box::new(move |gui| {
+                            gui.git.discard_file(&name_clone)?;
+                            gui.needs_refresh = true;
+                            Ok(())
+                        })),
+                    },
+                    MenuItem {
+                        label: "Cancel".to_string(),
+                        description: String::new(),
+                        key: Some("c".to_string()),
+                        action: Some(Box::new(|_| Ok(()))),
+                    },
+                ],
+                selected: 0,
             };
         } else {
             gui.git.discard_file(&name)?;

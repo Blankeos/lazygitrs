@@ -718,7 +718,7 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect) {
 
                 let hint_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
                 let hint_text = if *is_commit {
-                    " Enter: confirm | Alt+Enter: newline | Ctrl+O: menu | Esc: cancel"
+                    " Ctrl+S: confirm | Ctrl+O: menu | Esc: cancel"
                 } else {
                     " Enter to confirm, Esc to cancel"
                 };
