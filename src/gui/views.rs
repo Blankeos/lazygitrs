@@ -963,16 +963,14 @@ fn render_selection_overlay(frame: &mut Frame, diff_view: &mut DiffViewState, pa
 
 fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect) {
     let popup_width = (area.width * 60 / 100).min(60).max(30);
-    let popup_height = 10u16;
-
     let x = (area.width.saturating_sub(popup_width)) / 2;
-    let y = (area.height.saturating_sub(popup_height)) / 2;
-    let popup_rect = Rect::new(x, y, popup_width, popup_height);
-
-    frame.render_widget(Clear, popup_rect);
 
     match popup {
         PopupState::Confirm { title, message, .. } => {
+            let confirm_height = 6u16;
+            let cy = (area.height.saturating_sub(confirm_height)) / 2;
+            let popup_rect = Rect::new(x, cy, popup_width, confirm_height);
+            frame.render_widget(Clear, popup_rect);
             let block = Block::default()
                 .title(format!(" {} ", title))
                 .borders(Borders::ALL)
@@ -1030,14 +1028,15 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect) {
             items,
             selected,
         } => {
-            let height = (items.len() as u16 + 4).min(area.height - 4);
-            let popup_rect = Rect::new(x, y, popup_width, height);
+            let height = (items.len() as u16 + 2).min(area.height - 4);
+            let my = (area.height.saturating_sub(height)) / 2;
+            let popup_rect = Rect::new(x, my, popup_width, height);
             frame.render_widget(Clear, popup_rect);
 
             let block = Block::default()
                 .title(format!(" {} ", title))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Magenta));
+                .border_style(Style::default().fg(Color::Cyan));
 
             let list_items: Vec<ListItem> = items
                 .iter()
@@ -1070,6 +1069,11 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect) {
             frame.render_widget(list, popup_rect);
         }
         PopupState::Loading { title, message } => {
+            let height = 8u16;
+            let ly = (area.height.saturating_sub(height)) / 2;
+            let popup_rect = Rect::new(x, ly, popup_width, height);
+            frame.render_widget(Clear, popup_rect);
+
             let block = Block::default()
                 .title(format!(" {} ", title))
                 .borders(Borders::ALL)
@@ -1100,7 +1104,8 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect) {
             // Height: search bar (1) + blank (1) + items + blank (1) + hint (1) + borders (2)
             let content_lines = visible.len().max(1);
             let height = (content_lines as u16 + 6).min(area.height - 4).max(8);
-            let popup_rect = Rect::new(x, y, popup_width, height);
+            let cy = (area.height.saturating_sub(height)) / 2;
+            let popup_rect = Rect::new(x, cy, popup_width, height);
             frame.render_widget(Clear, popup_rect);
 
             let block = Block::default()
