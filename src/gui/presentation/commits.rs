@@ -67,19 +67,19 @@ fn render_commits<'a>(commits: &[Commit], head_hash: &str, theme: &Theme) -> Vec
                 ));
             }
 
+            // Tags (before message so they're visible in compact views)
+            for tag in &commit.tags {
+                spans.push(Span::styled(
+                    format!("[{}] ", tag),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ));
+            }
+
             // Commit message
             spans.push(Span::styled(
                 commit.name.clone(),
                 Style::default().fg(Color::White),
             ));
-
-            // Tags
-            for tag in &commit.tags {
-                spans.push(Span::styled(
-                    format!(" [{}]", tag),
-                    Style::default().fg(Color::Yellow),
-                ));
-            }
 
             // Author (compact)
             spans.push(Span::styled(
