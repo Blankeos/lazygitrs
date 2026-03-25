@@ -1081,6 +1081,10 @@ impl Gui {
                     self.popup = PopupState::None;
                 }
             }
+            PopupState::Message { .. } => {
+                // Any key dismisses the message
+                self.popup = PopupState::None;
+            }
             PopupState::Menu { items, selected, .. } => {
                 let items_len = items.len();
                 match key.code {

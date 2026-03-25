@@ -27,6 +27,11 @@ pub enum PopupState {
         items: Vec<MenuItem>,
         selected: usize,
     },
+    /// Informational message — dismissed by any key press.
+    Message {
+        title: String,
+        message: String,
+    },
     /// Shown while a background operation (like AI commit generation) is running.
     Loading {
         title: String,

@@ -989,6 +989,28 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect) {
             let widget = Paragraph::new(text).block(block);
             frame.render_widget(widget, popup_rect);
         }
+        PopupState::Message { title, message } => {
+            let msg_height = 5u16;
+            let cy = (area.height.saturating_sub(msg_height)) / 2;
+            let popup_rect = Rect::new(x, cy, popup_width, msg_height);
+            frame.render_widget(Clear, popup_rect);
+            let block = Block::default()
+                .title(format!(" {} ", title))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow));
+
+            let text = vec![
+                Line::from(""),
+                Line::from(format!(" {}", message)),
+                Line::from(Span::styled(
+                    " Press any key to dismiss",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+
+            let widget = Paragraph::new(text).block(block);
+            frame.render_widget(widget, popup_rect);
+        }
         PopupState::Input { title, textarea, is_commit, .. } => {
             // Textarea popup: taller to allow multiline editing
             let ta_height = 12u16;

@@ -281,10 +281,9 @@ fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
                         Platform::copy_to_clipboard(&url)?;
                     }
                     Err(_) => {
-                        gui.popup = PopupState::Confirm {
+                        gui.popup = PopupState::Message {
                             title: "No PR found".to_string(),
                             message: format!("No pull request found for branch '{}'", branch_for_pr),
-                            on_confirm: Box::new(|_| Ok(())),
                         };
                     }
                 }
@@ -344,10 +343,9 @@ fn open_in_browser_menu(gui: &mut Gui) -> Result<()> {
                         Platform::open_file(&url)?;
                     }
                     Err(_) => {
-                        gui.popup = PopupState::Confirm {
+                        gui.popup = PopupState::Message {
                             title: "No PR found".to_string(),
                             message: format!("No pull request found for branch '{}'", branch_for_pr),
-                            on_confirm: Box::new(|_| Ok(())),
                         };
                     }
                 }
