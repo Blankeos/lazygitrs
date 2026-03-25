@@ -21,6 +21,15 @@ impl GitCommands {
         Ok(result.stdout)
     }
 
+    /// Get diff for all files (staged + unstaged combined).
+    pub fn diff_all(&self) -> Result<String> {
+        let result = self
+            .git()
+            .args(&["diff", "HEAD", "--color=never"])
+            .run_expecting_success()?;
+        Ok(result.stdout)
+    }
+
     /// Get the full staged diff (for AI commit generation).
     pub fn diff_staged(&self) -> Result<String> {
         let result = self

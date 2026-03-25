@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
-use crate::gui::popup::{PopupState, make_textarea};
+use crate::gui::popup::{MenuItem, PopupState, make_textarea};
 use crate::gui::Gui;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
@@ -38,14 +38,27 @@ fn pop_stash(gui: &mut Gui) -> Result<()> {
         let name = entry.name.clone();
         drop(model);
 
-        gui.popup = PopupState::Confirm {
-            title: "Pop stash".to_string(),
-            message: format!("Pop '{}'?", name),
-            on_confirm: Box::new(move |gui| {
-                gui.git.stash_pop(index)?;
-                gui.needs_refresh = true;
-                Ok(())
-            }),
+        gui.popup = PopupState::Menu {
+            title: format!("Pop stash '{}'?", name),
+            items: vec![
+                MenuItem {
+                    label: "Pop".to_string(),
+                    description: "apply and drop this stash".to_string(),
+                    key: Some("g".to_string()),
+                    action: Some(Box::new(move |gui| {
+                        gui.git.stash_pop(index)?;
+                        gui.needs_refresh = true;
+                        Ok(())
+                    })),
+                },
+                MenuItem {
+                    label: "Cancel".to_string(),
+                    description: String::new(),
+                    key: Some("c".to_string()),
+                    action: Some(Box::new(|_| Ok(()))),
+                },
+            ],
+            selected: 0,
         };
     }
     Ok(())
@@ -56,9 +69,31 @@ fn apply_stash(gui: &mut Gui) -> Result<()> {
     let model = gui.model.lock().unwrap();
     if let Some(entry) = model.stash_entries.get(selected) {
         let index = entry.index;
+        let name = entry.name.clone();
         drop(model);
-        gui.git.stash_apply(index)?;
-        gui.needs_refresh = true;
+
+        gui.popup = PopupState::Menu {
+            title: format!("Apply stash '{}'?", name),
+            items: vec![
+                MenuItem {
+                    label: "Apply".to_string(),
+                    description: "apply stash (keep in stash list)".to_string(),
+                    key: Some("a".to_string()),
+                    action: Some(Box::new(move |gui| {
+                        gui.git.stash_apply(index)?;
+                        gui.needs_refresh = true;
+                        Ok(())
+                    })),
+                },
+                MenuItem {
+                    label: "Cancel".to_string(),
+                    description: String::new(),
+                    key: Some("c".to_string()),
+                    action: Some(Box::new(|_| Ok(()))),
+                },
+            ],
+            selected: 0,
+        };
     }
     Ok(())
 }
@@ -71,14 +106,27 @@ fn drop_stash(gui: &mut Gui) -> Result<()> {
         let name = entry.name.clone();
         drop(model);
 
-        gui.popup = PopupState::Confirm {
-            title: "Drop stash".to_string(),
-            message: format!("Drop '{}'?", name),
-            on_confirm: Box::new(move |gui| {
-                gui.git.stash_drop(index)?;
-                gui.needs_refresh = true;
-                Ok(())
-            }),
+        gui.popup = PopupState::Menu {
+            title: format!("Drop stash '{}'?", name),
+            items: vec![
+                MenuItem {
+                    label: "Drop".to_string(),
+                    description: "permanently remove this stash".to_string(),
+                    key: Some("d".to_string()),
+                    action: Some(Box::new(move |gui| {
+                        gui.git.stash_drop(index)?;
+                        gui.needs_refresh = true;
+                        Ok(())
+                    })),
+                },
+                MenuItem {
+                    label: "Cancel".to_string(),
+                    description: String::new(),
+                    key: Some("c".to_string()),
+                    action: Some(Box::new(|_| Ok(()))),
+                },
+            ],
+            selected: 0,
         };
     }
     Ok(())

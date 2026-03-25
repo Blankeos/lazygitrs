@@ -109,4 +109,46 @@ impl GitCommands {
             .run_expecting_success()?;
         Ok(())
     }
+
+    /// Stash all changes including untracked files.
+    pub fn stash_include_untracked(&self, message: &str) -> Result<()> {
+        if message.is_empty() {
+            self.git()
+                .args(&["stash", "push", "--include-untracked"])
+                .run_expecting_success()?;
+        } else {
+            self.git()
+                .args(&["stash", "push", "--include-untracked", "-m", message])
+                .run_expecting_success()?;
+        }
+        Ok(())
+    }
+
+    /// Stash all changes but keep the index (staged changes remain staged).
+    pub fn stash_keep_index(&self, message: &str) -> Result<()> {
+        if message.is_empty() {
+            self.git()
+                .args(&["stash", "push", "--keep-index"])
+                .run_expecting_success()?;
+        } else {
+            self.git()
+                .args(&["stash", "push", "--keep-index", "-m", message])
+                .run_expecting_success()?;
+        }
+        Ok(())
+    }
+
+    /// Stash only unstaged changes (keep staged intact).
+    pub fn stash_unstaged(&self, message: &str) -> Result<()> {
+        if message.is_empty() {
+            self.git()
+                .args(&["stash", "push", "--keep-index"])
+                .run_expecting_success()?;
+        } else {
+            self.git()
+                .args(&["stash", "push", "--keep-index", "-m", message])
+                .run_expecting_success()?;
+        }
+        Ok(())
+    }
 }

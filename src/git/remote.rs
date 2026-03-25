@@ -119,4 +119,30 @@ impl GitCommands {
             .run_expecting_success()?;
         Ok(())
     }
+
+    /// Build a web URL for a commit from the origin remote URL.
+    pub fn get_commit_url(&self, hash: &str) -> Result<String> {
+        let result = self
+            .git()
+            .args(&["remote", "get-url", "origin"])
+            .run_expecting_success()?;
+        let remote_url = result.stdout.trim().to_string();
+        let base = remote_url_to_https(&remote_url);
+        Ok(format!("{}/commit/{}", base, hash))
+    }
+}
+
+/// Convert a git remote URL (SSH or HTTPS) to a plain HTTPS base URL.
+fn remote_url_to_https(url: &str) -> String {
+    let mut u = url.to_string();
+    // git@github.com:user/repo.git -> https://github.com/user/repo
+    if u.starts_with("git@") {
+        u = u.replacen("git@", "https://", 1);
+        u = u.replacen(':', "/", 1);
+    }
+    // Strip .git suffix
+    if u.ends_with(".git") {
+        u.truncate(u.len() - 4);
+    }
+    u.trim_end_matches('/').to_string()
 }

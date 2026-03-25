@@ -194,6 +194,8 @@ pub struct FilesKeybinding {
     pub toggle_staged_all: String,
     #[serde(rename = "stashAllChanges")]
     pub stash_all_changes: String,
+    #[serde(rename = "viewStashOptions")]
+    pub view_stash_options: String,
     #[serde(rename = "toggleTreeView")]
     pub toggle_tree_view: String,
     pub fetch: String,
@@ -210,6 +212,7 @@ impl Default for FilesKeybinding {
             commit_changes_with_editor: "C".into(),
             toggle_staged_all: "a".into(),
             stash_all_changes: "s".into(),
+            view_stash_options: "S".into(),
             toggle_tree_view: "`".into(),
             fetch: "f".into(),
             ignore_file: "i".into(),

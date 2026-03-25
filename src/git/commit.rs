@@ -131,6 +131,33 @@ impl GitCommands {
         Ok(())
     }
 
+    /// Full commit message (subject + body).
+    pub fn commit_message_full(&self, hash: &str) -> Result<String> {
+        let result = self
+            .git()
+            .args(&["log", "-1", "--format=%B", hash])
+            .run_expecting_success()?;
+        Ok(result.stdout.trim().to_string())
+    }
+
+    /// Commit message body only (without subject line).
+    pub fn commit_message_body(&self, hash: &str) -> Result<String> {
+        let result = self
+            .git()
+            .args(&["log", "-1", "--format=%b", hash])
+            .run_expecting_success()?;
+        Ok(result.stdout.trim().to_string())
+    }
+
+    /// Diff of a single commit.
+    pub fn commit_diff(&self, hash: &str) -> Result<String> {
+        let result = self
+            .git()
+            .args(&["diff", &format!("{}^..{}", hash, hash)])
+            .run_expecting_success()?;
+        Ok(result.stdout)
+    }
+
     pub fn reset_to_commit(&self, hash: &str, mode: &str) -> Result<()> {
         self.git()
             .args(&["reset", mode, hash])

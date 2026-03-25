@@ -5,6 +5,7 @@ use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
 use crate::gui::popup::{MenuItem, PopupState, make_textarea};
 use crate::gui::Gui;
+use crate::os::platform::Platform;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
     // Enter: toggle directory collapse in tree view, or focus diff for files
@@ -48,6 +49,10 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return stash_changes(gui);
     }
 
+    if matches_key(key, &keybindings.files.view_stash_options) {
+        return open_stash_options(gui);
+    }
+
     if key.code == KeyCode::Char('d') {
         return discard_file(gui);
     }
@@ -73,6 +78,11 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         // Reset selection when toggling view modes
         gui.context_mgr.set_selection(0);
         return Ok(());
+    }
+
+    // Copy to clipboard
+    if key.code == KeyCode::Char('y') {
+        return copy_to_clipboard_menu(gui);
     }
 
     // Fetch
@@ -193,6 +203,180 @@ fn open_commit_prompt(gui: &mut Gui) -> Result<()> {
         is_commit: true,
     };
     Ok(())
+}
+
+fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
+    let Some(file_idx) = gui.selected_file_index() else {
+        return Ok(());
+    };
+    let model = gui.model.lock().unwrap();
+    let Some(file) = model.files.get(file_idx) else {
+        return Ok(());
+    };
+    let file_name = file.display_name.clone();
+    let rel_path = file.name.clone();
+    drop(model);
+
+    let abs_path = gui.git.repo_path().join(&rel_path).to_string_lossy().to_string();
+    let rel_for_diff = rel_path.clone();
+    let file_name_copy = file_name.clone();
+    let rel_path_copy = rel_path.clone();
+
+    gui.popup = PopupState::Menu {
+        title: "Copy to clipboard".to_string(),
+        items: vec![
+            MenuItem {
+                label: "File name".to_string(),
+                description: String::new(),
+                key: Some("n".to_string()),
+                action: Some(Box::new(move |_gui| {
+                    Platform::copy_to_clipboard(&file_name_copy)?;
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Relative path".to_string(),
+                description: String::new(),
+                key: Some("p".to_string()),
+                action: Some(Box::new(move |_gui| {
+                    Platform::copy_to_clipboard(&rel_path_copy)?;
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Absolute path".to_string(),
+                description: String::new(),
+                key: Some("P".to_string()),
+                action: Some(Box::new(move |_gui| {
+                    Platform::copy_to_clipboard(&abs_path)?;
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Diff of selected file".to_string(),
+                description: String::new(),
+                key: Some("s".to_string()),
+                action: Some(Box::new(move |gui| {
+                    let mut diff = gui.git.diff_file(&rel_for_diff).unwrap_or_default();
+                    let staged = gui.git.diff_file_staged(&rel_for_diff).unwrap_or_default();
+                    if !staged.is_empty() {
+                        if !diff.is_empty() {
+                            diff.push('\n');
+                        }
+                        diff.push_str(&staged);
+                    }
+                    Platform::copy_to_clipboard(&diff)?;
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Diff of all files".to_string(),
+                description: String::new(),
+                key: Some("a".to_string()),
+                action: Some(Box::new(|gui| {
+                    let diff = gui.git.diff_all().unwrap_or_default();
+                    Platform::copy_to_clipboard(&diff)?;
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Cancel".to_string(),
+                description: String::new(),
+                key: None,
+                action: Some(Box::new(|_| Ok(()))),
+            },
+        ],
+        selected: 0,
+    };
+    Ok(())
+}
+
+fn open_stash_options(gui: &mut Gui) -> Result<()> {
+    gui.popup = PopupState::Menu {
+        title: "Stash options".to_string(),
+        items: vec![
+            MenuItem {
+                label: "Stash all changes".to_string(),
+                description: String::new(),
+                key: Some("a".to_string()),
+                action: Some(Box::new(|gui| {
+                    open_stash_message_prompt(gui, StashKind::All);
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Stash all changes and keep index".to_string(),
+                description: String::new(),
+                key: Some("i".to_string()),
+                action: Some(Box::new(|gui| {
+                    open_stash_message_prompt(gui, StashKind::KeepIndex);
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Stash all changes including untracked files".to_string(),
+                description: String::new(),
+                key: Some("U".to_string()),
+                action: Some(Box::new(|gui| {
+                    open_stash_message_prompt(gui, StashKind::IncludeUntracked);
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Stash staged changes".to_string(),
+                description: String::new(),
+                key: Some("s".to_string()),
+                action: Some(Box::new(|gui| {
+                    open_stash_message_prompt(gui, StashKind::Staged);
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Stash unstaged changes".to_string(),
+                description: String::new(),
+                key: Some("u".to_string()),
+                action: Some(Box::new(|gui| {
+                    open_stash_message_prompt(gui, StashKind::Unstaged);
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Cancel".to_string(),
+                description: String::new(),
+                key: None,
+                action: Some(Box::new(|_| Ok(()))),
+            },
+        ],
+        selected: 0,
+    };
+    Ok(())
+}
+
+enum StashKind {
+    All,
+    KeepIndex,
+    IncludeUntracked,
+    Staged,
+    Unstaged,
+}
+
+fn open_stash_message_prompt(gui: &mut Gui, kind: StashKind) {
+    gui.popup = PopupState::Input {
+        title: "Stash message (leave empty for default)".to_string(),
+        textarea: make_textarea(""),
+        on_confirm: Box::new(move |gui, message| {
+            match kind {
+                StashKind::All => gui.git.stash_save(message)?,
+                StashKind::KeepIndex => gui.git.stash_keep_index(message)?,
+                StashKind::IncludeUntracked => gui.git.stash_include_untracked(message)?,
+                StashKind::Staged => gui.git.stash_staged(message)?,
+                StashKind::Unstaged => gui.git.stash_unstaged(message)?,
+            }
+            gui.needs_refresh = true;
+            Ok(())
+        }),
+        is_commit: false,
+    };
 }
 
 fn stash_changes(gui: &mut Gui) -> Result<()> {
