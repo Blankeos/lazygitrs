@@ -1454,6 +1454,7 @@ impl Gui {
                     HelpEntry { key: kb.commits.tag_commit.clone(), description: "Tag commit".into() },
                     HelpEntry { key: kb.commits.checkout_commit.clone(), description: "Checkout commit".into() },
                     HelpEntry { key: kb.commits.view_bisect_options.clone(), description: "Bisect options".into() },
+                    HelpEntry { key: "y".into(), description: "Copy to clipboard menu".into() },
                 ],
             },
             ContextId::Reflog => HelpSection {
@@ -1462,7 +1463,7 @@ impl Gui {
                     HelpEntry { key: kb.commits.checkout_commit.clone(), description: "Checkout commit".into() },
                     HelpEntry { key: kb.commits.view_reset_options.clone(), description: "Reset options".into() },
                     HelpEntry { key: kb.commits.cherry_pick_copy.clone(), description: "Cherry-pick".into() },
-                    HelpEntry { key: "y".into(), description: "Copy to clipboard".into() },
+                    HelpEntry { key: "y".into(), description: "Copy to clipboard menu".into() },
                 ],
             },
             ContextId::Stash | ContextId::StashFiles => HelpSection {
