@@ -1,0 +1,39 @@
+{
+	"name": "lazygitrs",
+	"version": "0.0.0",
+	"private": false,
+	"description": "A faster, memory-safe, more ergonomic slopfork of lazygit",
+	"main": "bin.js",
+	"bin": {
+		"lazygitrs": "./bin.js"
+	},
+	"scripts": {
+		"postinstall": "node install.js"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/Blankeos/lazygitrs.git"
+	},
+	"keywords": [
+		"cli",
+		"git",
+		"tui",
+		"lazygit",
+		"terminal"
+	],
+	"author": "Blankeos",
+	"license": "MIT",
+	"files": [
+		"install.js",
+		"bin.js",
+		"README.md"
+	],
+	"engines": {
+		"node": ">=12"
+	},
+	"os": [
+		"darwin",
+		"linux",
+		"win32"
+	]
+}

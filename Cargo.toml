@@ -1,7 +1,9 @@
 [package]
 name = "lazygitrs"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2024"
+description = "A faster, memory-safe, more ergonomic slopfork of lazygit"
+repository = "https://github.com/blankeos/lazygitrs"
 
 [dependencies]
 anyhow = "1"
@@ -38,3 +40,8 @@ tui-textarea = { version = "0.7", features = ["crossterm"] }
 lto = true
 codegen-units = 1
 strip = true
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

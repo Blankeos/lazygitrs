@@ -13,3 +13,10 @@ preview:
 # as
 rpreview:
     ./target/release/lazygitrs
+
+tag: tag_and_release
+tag_and_release:
+    sh tag_and_release.sh
+
+sync_readme:
+    cp README.md npm/README.md

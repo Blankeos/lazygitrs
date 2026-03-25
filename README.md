@@ -8,15 +8,18 @@ This is mostly a "for me" tool — built for my own workflow. Not saying you sho
 
 The goal: everything lazygit does, but faster and with opinions I actually agree with. (I can't promise backwards-compat w/ lazygit's config since it'll eventually drift w/ my own opinions, but I made sure to do that)
 
-### Get started
+### Install
 
 ```sh
-git clone http://github.com/blankeos/lazygitrs
-cd lazygitrs
-cargo install --path .
+npm install -g @blankeos/lazygitrs  # npm
+bun install -g @blankeos/lazygitrs  # or bun
+cargo binstall lazygitrs            # or cargo-binstall (prebuilt binary, faster)
+cargo install lazygitrs             # or cargo (build from source)
+```
 
+Then run:
 
-# Run as usual:
+```sh
 lazygitrs
 ```
 
@@ -42,8 +45,6 @@ lazygitrs
 - [x] **Default GitHub conveniences** — copy repo url, open repo url, copy PR create url, open PR create, copy pr url, open pr. (The 'copy' variants are useful if you use different default browsers for work/personal.)
 - [x] **Branch Filtering** — better experience in the Commits tab, compare what actually matters.
 - [ ] **Future: Built-in compare tool** — Again, inspired by lumen, but more built into the TUI. Pick a commit/branch A and a commit/branch B, then see how they differ.
-
-### Planned
 
 MIT
 
