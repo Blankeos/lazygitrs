@@ -4,6 +4,7 @@ version = "0.0.0"
 edition = "2024"
 description = "A faster, memory-safe, more ergonomic slopfork of lazygit"
 repository = "https://github.com/blankeos/lazygitrs"
+license = "MIT"
 
 [dependencies]
 anyhow = "1"
