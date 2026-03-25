@@ -3,6 +3,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 
 use std::collections::HashSet;
 
@@ -592,7 +593,7 @@ fn render_status_sidebar<'a>(model: &Model, _config: &AppConfig, inner_width: us
     };
 
     // Left side: " ↑N reponame → branch"
-    let left_len = 1 + ab_text.len() + repo_name.len() + 1 + 2 + branch_name.len();
+    let left_len = 1 + UnicodeWidthStr::width(ab_text.as_str()) + repo_name.len() + 1 + UnicodeWidthStr::width("→ ") + branch_name.len();
     // Right side: stats + trailing space
     let right_len = if has_changes { stats_text.len() + 1 } else { 0 };
     let padding = inner_width.saturating_sub(left_len + right_len);
