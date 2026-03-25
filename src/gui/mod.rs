@@ -2217,6 +2217,16 @@ impl Gui {
                     self.context_mgr.move_selection(3, &model);
                 }
             }
+            MouseEventKind::ScrollLeft => {
+                if self.diff_focused || self.is_in_main_panel(mouse.column) {
+                    self.diff_view.scroll_left(4);
+                }
+            }
+            MouseEventKind::ScrollRight => {
+                if self.diff_focused || self.is_in_main_panel(mouse.column) {
+                    self.diff_view.scroll_right(4);
+                }
+            }
             _ => {}
         }
     }
