@@ -1,6 +1,6 @@
 {
 	"name": "lazygitrs",
-	"version": "0.0.2",
+	"version": "0.0.3",
 	"private": false,
 	"description": "A faster, memory-safe, more ergonomic slopfork of lazygit",
 	"main": "bin.js",

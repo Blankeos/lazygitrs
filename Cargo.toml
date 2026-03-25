@@ -1,6 +1,6 @@
 [package]
 name = "lazygitrs"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 description = "A faster, memory-safe, more ergonomic slopfork of lazygit"
 repository = "https://github.com/blankeos/lazygitrs"
