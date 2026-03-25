@@ -1,0 +1,15 @@
+- [x] commits pane overhaul
+  - [x] Better graph view (enabled by default)
+  - [x] Filter by branch
+  - [x] Filter by commit message (handy if you prefix with ticket IDs)
+- [ ] ~Command palette (OpenCode-style) — still figuring this one out~
+
+- [x] Stash viewer:
+  - Can we add the same viewer for files in the '[5] Stash' sidebar tab? (the same way we currently do with Commits tab)
+- [x] Enter key in the branches sidebar tab.
+  - When I press 'enter' here, it shows the 'Commits (<branch>)'. Then when I press 'enter' again it shows the 'Commit Files' (kinda similar to the [4] commits sidebar tab)
+- [x] Commit item focus, what does the diff preview look like? Currently it's just plain (which kinda makes sense because there could be multiple of files in 1 commit) Expected: A nice viewer wherein I can still see the syntax highlighting, just as nice as hovering on a single file. I wonder if we can still use similar for this.
+- [x] A 'Help' sort of 'which-key' feature thingy, pressing `?` would open a dialog that shows me which keys I can press in the current context. Make it also searchable i.e. pressing `/` would highlight the specific hotkey I'm looking for. Very similar to the original lazygit, just make it look better because I actually didn't like the original. i.e. The search looked too disconnected from the dialog.
+- [x] Like \_tmp_lumen, I want to be able to highlight lines on the diff exploration viewing mode with my mouse.. Highlighting something would also show the same `y copy esc` tooltip just under the highlight. (no annotate since that's a lumen concept)
+- [x] Like \_tmp_lumen, I want to `{}` to travel between hunks. I want `[]` to show 'old' or 'new' (so it toggle hides the side-by-side). Make sure the `[]` doesn't break the mouse interactions for highlights. I want to show the `?` help panel while focusing the 'main content diff content exploration focus' so I can see these hotkeys.
+- [x] Like the original lazygit, let's have a subtab under [4] Commits, for Reflog.
