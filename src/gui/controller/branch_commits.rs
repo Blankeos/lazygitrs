@@ -6,14 +6,16 @@ use crate::gui::context::ContextId;
 use crate::gui::Gui;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, _keybindings: &KeybindingConfig) -> Result<()> {
-    // Escape: go back to Branches
+    // Escape: go back to parent context (Branches or Tags)
     if key.code == KeyCode::Esc {
-        gui.context_mgr.set_active(ContextId::Branches);
+        let parent = gui.sub_commits_parent_context;
+        gui.context_mgr.set_active(parent);
         {
             let mut model = gui.model.lock().unwrap();
             model.sub_commits.clear();
         }
         gui.branch_commits_name.clear();
+        gui.sub_commits_parent_context = ContextId::Branches;
         gui.needs_diff_refresh = true;
         return Ok(());
     }

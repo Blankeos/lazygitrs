@@ -84,6 +84,20 @@ impl GitCommands {
         Ok(branches)
     }
 
+    pub fn add_remote(&self, name: &str, url: &str) -> Result<()> {
+        self.git()
+            .args(&["remote", "add", name, url])
+            .run_expecting_success()?;
+        Ok(())
+    }
+
+    pub fn delete_remote(&self, name: &str) -> Result<()> {
+        self.git()
+            .args(&["remote", "remove", name])
+            .run_expecting_success()?;
+        Ok(())
+    }
+
     pub fn fetch(&self, remote: &str) -> Result<()> {
         self.git()
             .args(&["fetch", remote])

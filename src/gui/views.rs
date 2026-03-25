@@ -251,8 +251,34 @@ pub fn render(
                 render_list(frame, rect, block, items, selected, is_active, &theme);
             }
             ContextId::Tags => {
-                let items = presentation::tags::render_tag_list(model, &theme);
-                render_list(frame, rect, block, items, selected, is_active, &theme);
+                // If BranchCommits or BranchCommitFiles is active (drill-down from Tags), render that instead
+                if ctx_mgr.active() == ContextId::BranchCommitFiles {
+                    let cf_selected = ctx_mgr.selected(ContextId::BranchCommitFiles);
+                    let cf_title = build_commit_files_title(ContextId::BranchCommitFiles, commit_files_hash, commit_files_message);
+                    let cf_block = Block::default()
+                        .title(cf_title)
+                        .borders(Borders::ALL)
+                        .border_style(border_style);
+                    if show_commit_file_tree {
+                        let items = presentation::commit_files::render_commit_file_tree(model, &theme, commit_file_tree_nodes, commit_files_collapsed_dirs);
+                        render_list(frame, rect, cf_block, items, cf_selected, is_active, &theme);
+                    } else {
+                        let items = presentation::commit_files::render_commit_file_list(model, &theme);
+                        render_list(frame, rect, cf_block, items, cf_selected, is_active, &theme);
+                    }
+                } else if ctx_mgr.active() == ContextId::BranchCommits {
+                    let bc_selected = ctx_mgr.selected(ContextId::BranchCommits);
+                    let bc_title = build_branch_commits_title(branch_commits_name);
+                    let bc_block = Block::default()
+                        .title(bc_title)
+                        .borders(Borders::ALL)
+                        .border_style(border_style);
+                    let items = presentation::commits::render_sub_commit_list(model, &theme);
+                    render_list(frame, rect, bc_block, items, bc_selected, is_active, &theme);
+                } else {
+                    let items = presentation::tags::render_tag_list(model, &theme);
+                    render_list(frame, rect, block, items, selected, is_active, &theme);
+                }
             }
             ContextId::Commits => {
                 // If CommitFiles is active within this window, render that instead
@@ -276,8 +302,25 @@ pub fn render(
                 }
             }
             ContextId::Reflog => {
-                let items = presentation::reflog::render_reflog_list(model, &theme);
-                render_list(frame, rect, block, items, selected, is_active, &theme);
+                // If CommitFiles is active (drill-down from Reflog), render that instead
+                if ctx_mgr.active() == ContextId::CommitFiles {
+                    let cf_selected = ctx_mgr.selected(ContextId::CommitFiles);
+                    let cf_title = build_commit_files_title(ContextId::CommitFiles, commit_files_hash, commit_files_message);
+                    let cf_block = Block::default()
+                        .title(cf_title)
+                        .borders(Borders::ALL)
+                        .border_style(border_style);
+                    if show_commit_file_tree {
+                        let items = presentation::commit_files::render_commit_file_tree(model, &theme, commit_file_tree_nodes, commit_files_collapsed_dirs);
+                        render_list(frame, rect, cf_block, items, cf_selected, is_active, &theme);
+                    } else {
+                        let items = presentation::commit_files::render_commit_file_list(model, &theme);
+                        render_list(frame, rect, cf_block, items, cf_selected, is_active, &theme);
+                    }
+                } else {
+                    let items = presentation::reflog::render_reflog_list(model, &theme);
+                    render_list(frame, rect, block, items, selected, is_active, &theme);
+                }
             }
             ContextId::Stash => {
                 // If StashFiles is active within this window, render that instead
@@ -1117,7 +1160,16 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
                         format!("  {}", item.label)
                     };
 
-                    ListItem::new(label).style(style)
+                    if !item.description.is_empty() {
+                        let spans = vec![
+                            Span::styled(label, style),
+                            Span::raw(" "),
+                            Span::styled(&item.description, Style::default().fg(Color::Yellow)),
+                        ];
+                        ListItem::new(Line::from(spans))
+                    } else {
+                        ListItem::new(label).style(style)
+                    }
                 })
                 .collect();
 

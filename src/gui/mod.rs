@@ -119,8 +119,12 @@ pub struct Gui {
     pub commit_files_collapsed_dirs: HashSet<String>,
     /// Whether to show tree view for commit files (mirrors show_file_tree).
     pub show_commit_file_tree: bool,
-    /// Name of the branch whose commits are being viewed in BranchCommits context.
+    /// Name of the branch/tag whose commits are being viewed in BranchCommits context.
     pub branch_commits_name: String,
+    /// Parent context to return to when pressing Esc from BranchCommits.
+    pub sub_commits_parent_context: context::ContextId,
+    /// Parent context to return to when pressing Esc from CommitFiles.
+    pub commit_files_parent_context: Option<context::ContextId>,
     /// Frame counter for the loading spinner animation.
     spinner_frame: usize,
 }
@@ -185,6 +189,8 @@ impl Gui {
             commit_files_collapsed_dirs: HashSet::new(),
             show_commit_file_tree: show_file_tree,
             branch_commits_name: String::new(),
+            sub_commits_parent_context: context::ContextId::Branches,
+            commit_files_parent_context: None,
             spinner_frame: 0,
         })
     }
@@ -1425,7 +1431,7 @@ impl Gui {
 
         // Context-specific keybindings
         let context_section = match active {
-            ContextId::Files | ContextId::Worktrees | ContextId::Submodules => HelpSection {
+            ContextId::Files => HelpSection {
                 title: "Files".into(),
                 entries: vec![
                     HelpEntry { key: "<enter>".into(), description: "Toggle dir / Focus diff".into() },
@@ -1440,6 +1446,20 @@ impl Gui {
                     HelpEntry { key: kb.files.fetch.clone(), description: "Fetch".into() },
                     HelpEntry { key: kb.files.ignore_file.clone(), description: "Ignore file".into() },
                     HelpEntry { key: "d".into(), description: "Discard changes".into() },
+                ],
+            },
+            ContextId::Worktrees => HelpSection {
+                title: "Worktrees".into(),
+                entries: vec![
+                    HelpEntry { key: "n".into(), description: "Create worktree".into() },
+                    HelpEntry { key: "d".into(), description: "Remove worktree".into() },
+                ],
+            },
+            ContextId::Submodules => HelpSection {
+                title: "Submodules".into(),
+                entries: vec![
+                    HelpEntry { key: "u".into(), description: "Update submodules".into() },
+                    HelpEntry { key: "i".into(), description: "Init submodules".into() },
                 ],
             },
             ContextId::Branches | ContextId::BranchCommits | ContextId::BranchCommitFiles => HelpSection {
@@ -1478,12 +1498,14 @@ impl Gui {
                     HelpEntry { key: kb.commits.tag_commit.clone(), description: "Tag commit".into() },
                     HelpEntry { key: kb.commits.checkout_commit.clone(), description: "Checkout commit".into() },
                     HelpEntry { key: kb.commits.view_bisect_options.clone(), description: "Bisect options".into() },
+                    HelpEntry { key: "o".into(), description: "Open in browser".into() },
                     HelpEntry { key: "y".into(), description: "Copy to clipboard menu".into() },
                 ],
             },
             ContextId::Reflog => HelpSection {
                 title: "Reflog".into(),
                 entries: vec![
+                    HelpEntry { key: "<enter>".into(), description: "View commit files".into() },
                     HelpEntry { key: kb.commits.checkout_commit.clone(), description: "Checkout commit".into() },
                     HelpEntry { key: kb.commits.view_reset_options.clone(), description: "Reset options".into() },
                     HelpEntry { key: kb.commits.cherry_pick_copy.clone(), description: "Cherry-pick".into() },
@@ -1498,6 +1520,26 @@ impl Gui {
                     HelpEntry { key: kb.stash.pop_stash.clone(), description: "Pop stash".into() },
                     HelpEntry { key: kb.stash.rename_stash.clone(), description: "Rename stash".into() },
                     HelpEntry { key: "d".into(), description: "Drop stash".into() },
+                ],
+            },
+            ContextId::Remotes => HelpSection {
+                title: "Remotes".into(),
+                entries: vec![
+                    HelpEntry { key: "f".into(), description: "Fetch from remote".into() },
+                    HelpEntry { key: "n".into(), description: "Add new remote".into() },
+                    HelpEntry { key: "d".into(), description: "Delete remote".into() },
+                    HelpEntry { key: kb.universal.push_files.clone(), description: "Push".into() },
+                    HelpEntry { key: kb.universal.pull_files.clone(), description: "Pull".into() },
+                ],
+            },
+            ContextId::Tags => HelpSection {
+                title: "Tags".into(),
+                entries: vec![
+                    HelpEntry { key: "<enter>".into(), description: "View tag commits".into() },
+                    HelpEntry { key: "n".into(), description: "Create tag".into() },
+                    HelpEntry { key: "d".into(), description: "Delete tag".into() },
+                    HelpEntry { key: "P".into(), description: "Push tag".into() },
+                    HelpEntry { key: "g".into(), description: "Reset options".into() },
                 ],
             },
             ContextId::Status => HelpSection {

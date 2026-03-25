@@ -3,13 +3,23 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
-use crate::gui::popup::{MenuItem, PopupState};
+use crate::gui::popup::{MenuItem, PopupState, make_textarea};
 use crate::gui::Gui;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
     // Fetch from selected remote
     if key.code == KeyCode::Char('f') {
         return fetch_remote(gui);
+    }
+
+    // Add new remote
+    if key.code == KeyCode::Char('n') {
+        return add_remote(gui);
+    }
+
+    // Delete remote
+    if key.code == KeyCode::Char('d') {
+        return delete_remote(gui);
     }
 
     // Push
@@ -22,6 +32,54 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return show_pull_menu(gui);
     }
 
+    Ok(())
+}
+
+fn add_remote(gui: &mut Gui) -> Result<()> {
+    gui.popup = PopupState::Input {
+        title: "New remote name".to_string(),
+        textarea: make_textarea(""),
+        on_confirm: Box::new(|gui, name| {
+            let name = name.trim().to_string();
+            if !name.is_empty() {
+                gui.popup = PopupState::Input {
+                    title: format!("URL for remote '{}'", name),
+                    textarea: make_textarea(""),
+                    on_confirm: Box::new(move |gui, url| {
+                        let url = url.trim().to_string();
+                        if !url.is_empty() {
+                            gui.git.add_remote(&name, &url)?;
+                            gui.needs_refresh = true;
+                        }
+                        Ok(())
+                    }),
+                    is_commit: false,
+                };
+            }
+            Ok(())
+        }),
+        is_commit: false,
+    };
+    Ok(())
+}
+
+fn delete_remote(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let model = gui.model.lock().unwrap();
+    if let Some(remote) = model.remotes.get(selected) {
+        let name = remote.name.clone();
+        drop(model);
+
+        gui.popup = PopupState::Confirm {
+            title: "Delete remote".to_string(),
+            message: format!("Delete remote '{}'?", name),
+            on_confirm: Box::new(move |gui| {
+                gui.git.delete_remote(&name)?;
+                gui.needs_refresh = true;
+                Ok(())
+            }),
+        };
+    }
     Ok(())
 }
 

@@ -7,12 +7,16 @@ use crate::gui::context::ContextId;
 use crate::gui::Gui;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
-    // Escape: go back to parent list (Commits or Stash)
+    // Escape: go back to parent list (Commits, Stash, BranchCommits, or Reflog)
     if key.code == KeyCode::Esc {
-        let parent = match gui.context_mgr.active() {
-            ContextId::StashFiles => ContextId::Stash,
-            ContextId::BranchCommitFiles => ContextId::BranchCommits,
-            _ => ContextId::Commits,
+        let parent = if let Some(override_parent) = gui.commit_files_parent_context.take() {
+            override_parent
+        } else {
+            match gui.context_mgr.active() {
+                ContextId::StashFiles => ContextId::Stash,
+                ContextId::BranchCommitFiles => ContextId::BranchCommits,
+                _ => ContextId::Commits,
+            }
         };
         gui.context_mgr.set_active(parent);
         gui.commit_file_tree_nodes.clear();
