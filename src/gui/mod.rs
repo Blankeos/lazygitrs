@@ -1100,7 +1100,12 @@ impl Gui {
                 if key.code == KeyCode::Char('y') || key.code == KeyCode::Enter {
                     let popup = std::mem::replace(&mut self.popup, PopupState::None);
                     if let PopupState::Confirm { on_confirm, .. } = popup {
-                        on_confirm(self)?;
+                        if let Err(e) = on_confirm(self) {
+                            self.popup = PopupState::Message {
+                                title: "Error".to_string(),
+                                message: format!("{}", e),
+                            };
+                        }
                     }
                 } else {
                     self.popup = PopupState::None;
@@ -1144,7 +1149,12 @@ impl Gui {
                         if let PopupState::Menu { items, selected, .. } = popup {
                             if let Some(item) = items.get(selected) {
                                 if let Some(ref action) = item.action {
-                                    action(self)?;
+                                    if let Err(e) = action(self) {
+                                        self.popup = PopupState::Message {
+                                            title: "Error".to_string(),
+                                            message: format!("{}", e),
+                                        };
+                                    }
                                 }
                             }
                         }
@@ -1169,7 +1179,12 @@ impl Gui {
                                 let popup = std::mem::replace(&mut self.popup, PopupState::None);
                                 if let PopupState::Menu { items, .. } = popup {
                                     if let Some(ref action) = items[idx].action {
-                                        action(self)?;
+                                        if let Err(e) = action(self) {
+                                            self.popup = PopupState::Message {
+                                                title: "Error".to_string(),
+                                                message: format!("{}", e),
+                                            };
+                                        }
                                     }
                                 }
                             }
@@ -1193,7 +1208,12 @@ impl Gui {
                     let popup = std::mem::replace(&mut self.popup, PopupState::None);
                     if let PopupState::Input { textarea, on_confirm, .. } = popup {
                         let text = textarea.lines().join("\n");
-                        on_confirm(self, &text)?;
+                        if let Err(e) = on_confirm(self, &text) {
+                            self.popup = PopupState::Message {
+                                title: "Error".to_string(),
+                                message: format!("{}", e),
+                            };
+                        }
                     }
                 } else if key.code == KeyCode::Esc {
                     self.popup = PopupState::None;
@@ -1269,7 +1289,12 @@ impl Gui {
                                 .filter(|it| it.checked)
                                 .map(|it| it.label)
                                 .collect();
-                            on_confirm(self, checked)?;
+                            if let Err(e) = on_confirm(self, checked) {
+                                self.popup = PopupState::Message {
+                                    title: "Error".to_string(),
+                                    message: format!("{}", e),
+                                };
+                            }
                         }
                     }
                     KeyCode::Esc => {

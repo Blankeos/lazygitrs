@@ -36,6 +36,7 @@ tree-sitter-html = "0.23"
 tree-sitter-md = "0.3"
 unicode-width = "0.2"
 tui-textarea = { version = "0.7", features = ["crossterm"] }
+textwrap = "0.16.2"
 
 [profile.release]
 lto = true

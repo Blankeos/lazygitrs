@@ -1067,23 +1067,38 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
             frame.render_widget(widget, popup_rect);
         }
         PopupState::Message { title, message } => {
-            let msg_height = 5u16;
+            let is_error = title == "Error";
+            let icon = if is_error { "⚠ " } else { "" };
+            let inner_width = popup_width.saturating_sub(4) as usize; // borders + padding
+            let wrapped: Vec<std::borrow::Cow<'_, str>> = message
+                .lines()
+                .flat_map(|line| {
+                    if line.is_empty() {
+                        vec![std::borrow::Cow::Borrowed("")]
+                    } else {
+                        textwrap::wrap(line, inner_width)
+                    }
+                })
+                .collect();
+            let msg_height = (wrapped.len() as u16) + 4; // border*2 + blank line + dismiss line
             let cy = (area.height.saturating_sub(msg_height)) / 2;
             let popup_rect = Rect::new(x, cy, popup_width, msg_height);
             frame.render_widget(Clear, popup_rect);
+            let border_color = if is_error { Color::Red } else { Color::Yellow };
             let block = Block::default()
-                .title(format!(" {} ", title))
+                .title(format!(" {}{} ", icon, title))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow));
+                .border_style(Style::default().fg(border_color));
 
-            let text = vec![
-                Line::from(""),
-                Line::from(format!(" {}", message)),
-                Line::from(Span::styled(
-                    " Press any key to dismiss",
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ];
+            let mut text: Vec<Line> = Vec::new();
+            text.push(Line::from(""));
+            for line in &wrapped {
+                text.push(Line::from(format!(" {}", line)));
+            }
+            text.push(Line::from(Span::styled(
+                " Press any key to dismiss",
+                Style::default().fg(Color::DarkGray),
+            )));
 
             let widget = Paragraph::new(text).block(block);
             frame.render_widget(widget, popup_rect);

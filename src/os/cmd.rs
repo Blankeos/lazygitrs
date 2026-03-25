@@ -164,7 +164,7 @@ impl CmdBuilder {
         let result = self.run()?;
         if !result.success {
             anyhow::bail!(
-                "Command failed (exit {}): {} {}\nstderr: {}",
+                "Command failed (exit {}): {} {}\n\n{}",
                 result.exit_code.unwrap_or(-1),
                 self.program,
                 self.args.join(" "),
