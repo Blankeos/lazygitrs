@@ -41,6 +41,7 @@ pub fn render(
     commit_files_hash: &str,
     commit_files_message: &str,
     branch_commits_name: &str,
+    spinner_frame: usize,
 ) {
     let area = frame.area();
     let theme = config.user_config.theme();
@@ -150,8 +151,9 @@ pub fn render(
         // Render text selection highlight overlay and tooltip (must be before popup)
         render_selection_overlay(frame, diff_view, fl.main_panel);
         if *popup != PopupState::None {
-            render_popup(frame, popup, area);
+            render_popup(frame, popup, area, spinner_frame);
         }
+        render_command_log(frame, &fl, command_log, show_command_log);
         return;
     }
 
@@ -323,37 +325,6 @@ pub fn render(
         frame.render_widget(widget, fl.main_panel);
     }
 
-    // Render command log overlay in bottom-right of main panel
-    if show_command_log && !command_log.is_empty() {
-        let log_height = command_log.len().min(5) as u16;
-        let log_width = fl.main_panel.width.min(50);
-        let log_x = fl.main_panel.x + fl.main_panel.width - log_width;
-        let log_y = fl.main_panel.y + fl.main_panel.height - log_height - 1;
-        let log_rect = Rect::new(log_x, log_y, log_width, log_height + 2);
-
-        let log_block = Block::default()
-            .title(" Command Log ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray));
-
-        let log_lines: Vec<Line> = command_log
-            .iter()
-            .rev()
-            .take(log_height as usize)
-            .rev()
-            .map(|s| {
-                Line::from(Span::styled(
-                    format!(" {}", s),
-                    Style::default().fg(Color::DarkGray),
-                ))
-            })
-            .collect();
-
-        frame.render_widget(Clear, log_rect);
-        let log_widget = Paragraph::new(log_lines).block(log_block);
-        frame.render_widget(log_widget, log_rect);
-    }
-
     // Render status bar (or search bar if search is active)
     if let Some((query, match_count, current_match)) = search_state {
         let match_info = if match_count > 0 {
@@ -403,8 +374,71 @@ pub fn render(
 
     // Render popup overlay
     if *popup != PopupState::None {
-        render_popup(frame, popup, area);
+        render_popup(frame, popup, area, spinner_frame);
     }
+
+    // Render command log last so it appears above everything
+    render_command_log(frame, &fl, command_log, show_command_log);
+}
+
+fn render_command_log(
+    frame: &mut Frame,
+    fl: &layout::FrameLayout,
+    command_log: &[String],
+    show_command_log: bool,
+) {
+    if !show_command_log || command_log.is_empty() {
+        return;
+    }
+
+    let log_height = command_log.len().min(5) as u16;
+    let log_width = fl.main_panel.width.min(50);
+    let log_x = fl.main_panel.x + fl.main_panel.width - log_width;
+    let log_y = fl.main_panel.y + fl.main_panel.height - log_height - 1;
+    let log_rect = Rect::new(log_x, log_y, log_width, log_height + 2);
+
+    let border_color = Color::Rgb(80, 80, 80);
+    let title_color = Color::Rgb(140, 140, 140);
+    let hint_color = Color::Rgb(90, 90, 90);
+    let log_block = Block::default()
+        .title(Line::from(vec![
+            Span::styled(" ", Style::default().fg(title_color)),
+            Span::styled("Command Log", Style::default().fg(title_color).add_modifier(Modifier::BOLD)),
+            Span::styled(" ", Style::default().fg(title_color)),
+        ]))
+        .title_bottom(Line::from(vec![
+            Span::styled(" ", Style::default().fg(hint_color)),
+            Span::styled(";", Style::default().fg(Color::Rgb(160, 160, 160)).add_modifier(Modifier::BOLD)),
+            Span::styled(" toggle ", Style::default().fg(hint_color)),
+        ]).alignment(ratatui::layout::Alignment::Right))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+
+    let cmd_color = Color::Rgb(100, 100, 100);
+    let visible_count = command_log.len().min(log_height as usize);
+    let log_lines: Vec<Line> = command_log
+        .iter()
+        .rev()
+        .take(log_height as usize)
+        .rev()
+        .enumerate()
+        .map(|(i, s)| {
+            let is_latest = i == visible_count - 1;
+            let fg = if is_latest {
+                Color::Rgb(160, 160, 160)
+            } else {
+                cmd_color
+            };
+            Line::from(vec![
+                Span::styled(" $ ", Style::default().fg(Color::Rgb(80, 130, 80))),
+                Span::styled(s.to_string(), Style::default().fg(fg)),
+            ])
+        })
+        .collect();
+
+    frame.render_widget(Clear, log_rect);
+    let log_widget = Paragraph::new(log_lines).block(log_block);
+    frame.render_widget(log_widget, log_rect);
 }
 
 /// Build a window title like " 4 Commit Files (abc1234 feat: some change) ".
@@ -961,7 +995,7 @@ fn render_selection_overlay(frame: &mut Frame, diff_view: &mut DiffViewState, pa
     }
 }
 
-fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect) {
+fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame: usize) {
     let popup_width = (area.width * 60 / 100).min(60).max(30);
     let x = (area.width.saturating_sub(popup_width)) / 2;
 
@@ -1091,6 +1125,10 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect) {
             frame.render_widget(list, popup_rect);
         }
         PopupState::Loading { title, message } => {
+            const SPINNER_CHARS: &[char] = &['·', '✻', '✽', '✶', '✳', '✢'];
+            // Change symbol every ~8 frames (~128ms at 60fps)
+            let spinner = SPINNER_CHARS[(spinner_frame / 8) % SPINNER_CHARS.len()];
+
             let height = 8u16;
             let ly = (area.height.saturating_sub(height)) / 2;
             let popup_rect = Rect::new(x, ly, popup_width, height);
@@ -1109,7 +1147,7 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect) {
                 )),
                 Line::from(""),
                 Line::from(Span::styled(
-                    " Please wait...",
+                    format!(" {} Please wait...", spinner),
                     Style::default().fg(Color::DarkGray),
                 )),
             ];

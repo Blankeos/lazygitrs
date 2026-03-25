@@ -121,6 +121,8 @@ pub struct Gui {
     pub show_commit_file_tree: bool,
     /// Name of the branch whose commits are being viewed in BranchCommits context.
     pub branch_commits_name: String,
+    /// Frame counter for the loading spinner animation.
+    spinner_frame: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +185,7 @@ impl Gui {
             commit_files_collapsed_dirs: HashSet::new(),
             show_commit_file_tree: show_file_tree,
             branch_commits_name: String::new(),
+            spinner_frame: 0,
         })
     }
 
@@ -219,6 +222,9 @@ impl Gui {
 
             // Check for completed background remote operations
             self.receive_remote_op_results();
+
+            // Advance spinner animation
+            self.spinner_frame = self.spinner_frame.wrapping_add(1);
 
             // Render
             terminal.draw(|frame| {
@@ -257,6 +263,7 @@ impl Gui {
                     &self.commit_files_hash,
                     &self.commit_files_message,
                     &self.branch_commits_name,
+                    self.spinner_frame,
                 );
             })?;
 
@@ -839,6 +846,12 @@ impl Gui {
             return Ok(());
         }
 
+        // Toggle command log (;)
+        if key.code == KeyCode::Char(';') {
+            self.show_command_log = !self.show_command_log;
+            return Ok(());
+        }
+
         // Undo (z)
         if matches_key(key, &keybindings.universal.undo) {
             return self.undo();
@@ -983,6 +996,12 @@ impl Gui {
         }
         if matches_key(key, &keybindings.universal.prev_screen_mode) {
             self.prev_screen_mode();
+            return Ok(());
+        }
+
+        // Toggle command log (;)
+        if key.code == KeyCode::Char(';') {
+            self.show_command_log = !self.show_command_log;
             return Ok(());
         }
 
@@ -1398,6 +1417,7 @@ impl Gui {
                 HelpEntry { key: kb.universal.create_patch_options_menu.clone(), description: "Patch options".into() },
                 HelpEntry { key: "{/}".into(), description: "Previous/next hunk".into() },
                 HelpEntry { key: "[/]".into(), description: "Toggle old/new only view".into() },
+                HelpEntry { key: ";".into(), description: "Toggle command log".into() },
                 HelpEntry { key: "1-5".into(), description: "Jump to panel".into() },
                 HelpEntry { key: "?".into(), description: "Show this help".into() },
             ],
@@ -1519,6 +1539,7 @@ impl Gui {
                 HelpEntry { key: "PgUp/PgDn".into(), description: "Page up / down".into() },
                 HelpEntry { key: "y".into(), description: "Copy selected text".into() },
                 HelpEntry { key: "+/_".into(), description: "Enlarge / shrink panel".into() },
+                HelpEntry { key: ";".into(), description: "Toggle command log".into() },
                 HelpEntry { key: "1-5".into(), description: "Jump to sidebar panel".into() },
                 HelpEntry { key: "esc".into(), description: "Return to sidebar".into() },
                 HelpEntry { key: "?".into(), description: "Show this help".into() },
