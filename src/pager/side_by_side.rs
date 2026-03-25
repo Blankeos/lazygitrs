@@ -229,7 +229,7 @@ impl DiffViewState {
         self.scroll_offset = 0;
         self.horizontal_scroll = 0;
         self.selection = None;
-        self.side_view = DiffSideView::Both;
+        // Preserve side_view across reloads so periodic refresh doesn't reset it
         // Single section with index 0
         self.sections = vec![FileSection {
             old_highlighter: FileHighlighter::new(old, filename),
@@ -262,7 +262,6 @@ impl DiffViewState {
             self.scroll_offset = 0;
             self.horizontal_scroll = 0;
             self.selection = None;
-            self.side_view = DiffSideView::Both;
 
             for (section_idx, (file_name, file_diff)) in file_diffs.iter().enumerate() {
                 let (old, new) = parse_unified_diff(file_diff);
