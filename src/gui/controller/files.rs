@@ -400,6 +400,7 @@ fn discard_file(gui: &mut Gui) -> Result<()> {
     let model = gui.model.lock().unwrap();
     if let Some(file) = model.files.get(file_idx) {
         let name = file.name.clone();
+        let added = file.added;
         drop(model);
 
         if !gui.config.user_config.gui.skip_discard_change_warning {
@@ -412,7 +413,7 @@ fn discard_file(gui: &mut Gui) -> Result<()> {
                         description: "discard all changes".to_string(),
                         key: Some("d".to_string()),
                         action: Some(Box::new(move |gui| {
-                            gui.git.discard_file(&name_clone)?;
+                            gui.git.discard_file(&name_clone, added)?;
                             gui.needs_refresh = true;
                             Ok(())
                         })),
@@ -427,7 +428,7 @@ fn discard_file(gui: &mut Gui) -> Result<()> {
                 selected: 0,
             };
         } else {
-            gui.git.discard_file(&name)?;
+            gui.git.discard_file(&name, added)?;
             gui.needs_refresh = true;
         }
     }

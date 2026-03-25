@@ -37,7 +37,7 @@ impl GitCommands {
                 has_staged_changes: has_staged,
                 has_unstaged_changes: has_unstaged,
                 tracked,
-                added: x == 'A' || y == 'A',
+                added: x == 'A' || y == 'A' || !tracked,
                 deleted: x == 'D' || y == 'D',
                 has_merge_conflicts: x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D'),
             });
@@ -72,15 +72,26 @@ impl GitCommands {
         Ok(())
     }
 
-    pub fn discard_file(&self, path: &str) -> Result<()> {
-        // Unstage first (ignore errors — file may not be staged)
+    pub fn discard_file(&self, path: &str, added: bool) -> Result<()> {
+        // Unstage first if needed (ignore errors — file may not be staged)
         let _ = self.git()
             .args(&["reset", "HEAD", "--", path])
             .run();
-        // Then discard working tree changes
-        self.git()
-            .args(&["checkout", "--", path])
-            .run_expecting_success()?;
+
+        if added {
+            // New/untracked file: just delete it
+            let full_path = self.repo_path().join(path);
+            if full_path.is_dir() {
+                std::fs::remove_dir_all(&full_path)?;
+            } else {
+                std::fs::remove_file(&full_path)?;
+            }
+        } else {
+            // Tracked file: discard working tree changes
+            self.git()
+                .args(&["checkout", "--", path])
+                .run_expecting_success()?;
+        }
         Ok(())
     }
 
