@@ -46,35 +46,51 @@ impl GitCommands {
     }
 
     /// Load all model data from the repository.
+    ///
+    /// Git commands are run in parallel using scoped threads since they are
+    /// all independent reads against the same repo.
     pub fn load_model(&self) -> Result<Model> {
         let mut model = Model::default();
 
         model.repo_name = self.repo_name();
         model.head_hash = self.head_hash().unwrap_or_default();
-        model.files = self.load_files()?;
-        model.branches = self.load_branches()?;
-        model.commits = self.load_commits(50)?;
-        model.stash_entries = self.load_stash()?;
-        model.remotes = self.load_remotes()?;
-        model.tags = self.load_tags()?;
-        model.worktrees = self.load_worktrees().unwrap_or_default();
-        model.reflog_commits = self.load_reflog(100).unwrap_or_default();
 
-        // Load total line change stats
-        if let Ok((added, deleted)) = self.diff_shortstat() {
-            model.total_additions = added;
-            model.total_deletions = deleted;
-        }
+        // Run all independent git loads in parallel.
+        std::thread::scope(|s| {
+            let h_files = s.spawn(|| self.load_files());
+            let h_branches = s.spawn(|| self.load_branches());
+            let h_commits = s.spawn(|| self.load_commits(50));
+            let h_stash = s.spawn(|| self.load_stash());
+            let h_remotes = s.spawn(|| self.load_remotes());
+            let h_tags = s.spawn(|| self.load_tags());
+            let h_worktrees = s.spawn(|| self.load_worktrees());
+            let h_reflog = s.spawn(|| self.load_reflog(100));
+            let h_shortstat = s.spawn(|| self.diff_shortstat());
+            let h_status = s.spawn(|| self.repo_status());
 
-        // Load in-progress operation state
-        if let Ok(status) = self.repo_status() {
-            model.is_rebasing = status.is_rebasing;
-            model.is_merging = status.is_merging;
-            model.is_cherry_picking = status.is_cherry_picking;
-            model.is_bisecting = status.is_bisecting;
-        }
+            model.files = h_files.join().unwrap()?;
+            model.branches = h_branches.join().unwrap()?;
+            model.commits = h_commits.join().unwrap()?;
+            model.stash_entries = h_stash.join().unwrap()?;
+            model.remotes = h_remotes.join().unwrap()?;
+            model.tags = h_tags.join().unwrap()?;
+            model.worktrees = h_worktrees.join().unwrap().unwrap_or_default();
+            model.reflog_commits = h_reflog.join().unwrap().unwrap_or_default();
 
-        Ok(model)
+            if let Ok((added, deleted)) = h_shortstat.join().unwrap() {
+                model.total_additions = added;
+                model.total_deletions = deleted;
+            }
+
+            if let Ok(status) = h_status.join().unwrap() {
+                model.is_rebasing = status.is_rebasing;
+                model.is_merging = status.is_merging;
+                model.is_cherry_picking = status.is_cherry_picking;
+                model.is_bisecting = status.is_bisecting;
+            }
+
+            Ok(model)
+        })
     }
 
     /// Refresh just the working tree files.
