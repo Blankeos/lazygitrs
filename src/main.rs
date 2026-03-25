@@ -10,8 +10,10 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
+const LOGO: &str = include_str!("../logo.txt");
+
 #[derive(Parser)]
-#[command(name = "lazygitrs", version, about = "A fast terminal UI for git")]
+#[command(name = "lazygitrs", version, about = "A fast and ergonomic terminal UI for git", before_help = LOGO)]
 struct Cli {
     /// Path to the git repository
     #[arg(short, long)]
