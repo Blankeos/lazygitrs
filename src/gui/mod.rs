@@ -955,6 +955,12 @@ impl Gui {
             return Ok(());
         }
 
+        // Help popup
+        if key.code == KeyCode::Char('?') {
+            self.show_diff_help();
+            return Ok(());
+        }
+
         // Number keys 1-5 to jump to sidebar panels (unfocus diff)
         // Use set_window instead of jump_to_window to avoid cycling tabs,
         // since the user is "arriving" from diff focus, not pressing the same key again.
@@ -990,12 +996,27 @@ impl Gui {
             KeyCode::Char('l') | KeyCode::Right => {
                 self.diff_view.scroll_right(4);
             }
-            // ] and [ jump between hunks
-            KeyCode::Char(']') => {
+            // { and } jump between hunks
+            KeyCode::Char('}') => {
                 self.diff_view.next_hunk();
             }
-            KeyCode::Char('[') => {
+            KeyCode::Char('{') => {
                 self.diff_view.prev_hunk();
+            }
+            // [ and ] toggle old-only / new-only view
+            KeyCode::Char(']') => {
+                use crate::pager::side_by_side::DiffSideView;
+                self.diff_view.side_view = match self.diff_view.side_view {
+                    DiffSideView::NewOnly => DiffSideView::Both,
+                    _ => DiffSideView::NewOnly,
+                };
+            }
+            KeyCode::Char('[') => {
+                use crate::pager::side_by_side::DiffSideView;
+                self.diff_view.side_view = match self.diff_view.side_view {
+                    DiffSideView::OldOnly => DiffSideView::Both,
+                    _ => DiffSideView::OldOnly,
+                };
             }
             // Page up/down for larger scrolling
             KeyCode::PageDown => {
@@ -1341,6 +1362,7 @@ impl Gui {
                 HelpEntry { key: kb.universal.create_rebase_options_menu.clone(), description: "Rebase options".into() },
                 HelpEntry { key: kb.universal.create_patch_options_menu.clone(), description: "Patch options".into() },
                 HelpEntry { key: "{/}".into(), description: "Previous/next hunk".into() },
+                HelpEntry { key: "[/]".into(), description: "Toggle old/new only view".into() },
                 HelpEntry { key: "1-5".into(), description: "Jump to panel".into() },
                 HelpEntry { key: "?".into(), description: "Show this help".into() },
             ],
@@ -1431,6 +1453,33 @@ impl Gui {
 
         self.popup = PopupState::Help {
             sections,
+            selected: 0,
+            search: String::new(),
+            scroll_offset: 0,
+        };
+    }
+
+    fn show_diff_help(&mut self) {
+        let diff_section = HelpSection {
+            title: "Diff Viewer".into(),
+            entries: vec![
+                HelpEntry { key: "j/k".into(), description: "Scroll up / down".into() },
+                HelpEntry { key: "h/l".into(), description: "Scroll left / right".into() },
+                HelpEntry { key: "{/}".into(), description: "Previous / next hunk".into() },
+                HelpEntry { key: "[".into(), description: "Toggle old-only view".into() },
+                HelpEntry { key: "]".into(), description: "Toggle new-only view".into() },
+                HelpEntry { key: "g/G".into(), description: "Go to top / bottom".into() },
+                HelpEntry { key: "PgUp/PgDn".into(), description: "Page up / down".into() },
+                HelpEntry { key: "y".into(), description: "Copy selected text".into() },
+                HelpEntry { key: "+/_".into(), description: "Enlarge / shrink panel".into() },
+                HelpEntry { key: "1-5".into(), description: "Jump to sidebar panel".into() },
+                HelpEntry { key: "esc".into(), description: "Return to sidebar".into() },
+                HelpEntry { key: "?".into(), description: "Show this help".into() },
+            ],
+        };
+
+        self.popup = PopupState::Help {
+            sections: vec![diff_section],
             selected: 0,
             search: String::new(),
             scroll_offset: 0,

@@ -88,16 +88,28 @@ impl DiffPanelLayout {
 
         let is_new_file = state.old_content.is_empty() && state.sections.len() <= 1;
 
-        if is_new_file {
-            // New file: single panel — gutter(5) + content(rest)
+        // Single-side view uses full-width single panel
+        let single_side = match state.side_view {
+            DiffSideView::OldOnly => Some(DiffPanel::Old),
+            DiffSideView::NewOnly => Some(DiffPanel::New),
+            DiffSideView::Both => None,
+        };
+
+        if single_side.is_some() || is_new_file {
+            // Single panel — gutter(5) + content(rest)
             let content_x = inner_x + gutter;
             let content_end_x = inner_x + inner_w;
+            let panel = single_side.unwrap_or(DiffPanel::New);
+            let (old_x, old_end, new_x, new_end) = match panel {
+                DiffPanel::Old => (content_x, content_end_x, 0, 0),
+                DiffPanel::New => (0, 0, content_x, content_end_x),
+            };
             Self {
-                is_new_file: true,
-                old_content_x: 0,
-                old_content_end_x: 0,
-                new_content_x: content_x,
-                new_content_end_x: content_end_x,
+                is_new_file: is_new_file && single_side.is_none(),
+                old_content_x: old_x,
+                old_content_end_x: old_end,
+                new_content_x: new_x,
+                new_content_end_x: new_end,
                 inner_y,
                 inner_end_y,
             }
@@ -155,6 +167,14 @@ impl DiffPanelLayout {
     }
 }
 
+/// Which side(s) of the diff to display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffSideView {
+    Both,
+    OldOnly,
+    NewOnly,
+}
+
 /// State for the diff view panel.
 pub struct DiffViewState {
     pub scroll_offset: usize,
@@ -169,6 +189,8 @@ pub struct DiffViewState {
     sections: Vec<FileSection>,
     /// Active mouse text selection, if any.
     pub selection: Option<TextSelection>,
+    /// Which side(s) of the diff to show (Both, OldOnly, NewOnly).
+    pub side_view: DiffSideView,
 }
 
 impl Default for DiffViewState {
@@ -184,6 +206,7 @@ impl Default for DiffViewState {
             tab_width: 4,
             sections: Vec::new(),
             selection: None,
+            side_view: DiffSideView::Both,
         }
     }
 }
@@ -206,6 +229,7 @@ impl DiffViewState {
         self.scroll_offset = 0;
         self.horizontal_scroll = 0;
         self.selection = None;
+        self.side_view = DiffSideView::Both;
         // Single section with index 0
         self.sections = vec![FileSection {
             old_highlighter: FileHighlighter::new(old, filename),
@@ -238,6 +262,7 @@ impl DiffViewState {
             self.scroll_offset = 0;
             self.horizontal_scroll = 0;
             self.selection = None;
+            self.side_view = DiffSideView::Both;
 
             for (section_idx, (file_name, file_diff)) in file_diffs.iter().enumerate() {
                 let (old, new) = parse_unified_diff(file_diff);
@@ -347,8 +372,19 @@ pub fn render_diff(
         return;
     }
 
+    let side_label = match state.side_view {
+        DiffSideView::OldOnly => " [old] ",
+        DiffSideView::NewOnly => " [new] ",
+        DiffSideView::Both => "",
+    };
+    let title = if side_label.is_empty() {
+        format!(" {} ", state.filename)
+    } else {
+        format!(" {}{}", state.filename, side_label)
+    };
+
     let block = Block::default()
-        .title(format!(" {} ", state.filename))
+        .title(title)
         .borders(Borders::ALL)
         .border_style(border_style);
 
@@ -365,17 +401,20 @@ pub fn render_diff(
     // Detect new file: old content is empty, so no left panel needed
     let is_new_file = state.old_content.is_empty() && state.sections.len() <= 1;
 
+    // Single-side view mode ([ for old, ] for new)
+    let single_side = match state.side_view {
+        DiffSideView::OldOnly => Some(DiffPanel::Old),
+        DiffSideView::NewOnly => Some(DiffPanel::New),
+        DiffSideView::Both => None,
+    };
+
     let visible_height = inner.height as usize;
     let buf = frame.buffer_mut();
 
-    if is_new_file {
-        // New file: single full-width panel (right side only)
+    if single_side.is_some() || is_new_file {
+        // Single-panel mode: new file, old-only, or new-only
+        let show_panel = single_side.unwrap_or(DiffPanel::New); // new-file defaults to New
         let content_width = inner.width.saturating_sub(gutter_width);
-        let default_highlighter = FileHighlighter::default();
-        let new_highlighter = state
-            .highlighters_for_section(0)
-            .map(|(_, n)| n)
-            .unwrap_or(&default_highlighter);
 
         for (row, diff_line) in state.lines[state.scroll_offset..]
             .iter()
@@ -387,11 +426,50 @@ pub fn render_diff(
                 break;
             }
 
-            let bg = theme.diff_add_bg;
+            // Handle file header separator lines
+            if let Some(ref header) = diff_line.file_header {
+                render_file_header(buf, inner.x, y, inner.width, header, theme);
+                continue;
+            }
+
+            let default_hl = FileHighlighter::default();
+            let (old_highlighter, new_highlighter) = state
+                .highlighters_for_section(diff_line.section_index)
+                .unwrap_or((&default_hl, &default_hl));
+
+            // Pick the appropriate side's data
+            let (line_data, segments, is_old_side, highlighter) = match show_panel {
+                DiffPanel::Old => (
+                    &diff_line.old_line,
+                    &diff_line.old_segments,
+                    true,
+                    old_highlighter,
+                ),
+                DiffPanel::New => (
+                    &diff_line.new_line,
+                    &diff_line.new_segments,
+                    false,
+                    new_highlighter,
+                ),
+            };
+
+            // Skip lines that only exist on the other side
+            // (e.g., Insert lines have no old_line, Delete lines have no new_line)
+            // Show them as blank with appropriate background
+            let bg = if is_new_file {
+                theme.diff_add_bg
+            } else {
+                match (diff_line.change_type, show_panel) {
+                    (ChangeType::Delete, DiffPanel::Old) => theme.diff_remove_bg,
+                    (ChangeType::Insert, DiffPanel::New) => theme.diff_add_bg,
+                    (ChangeType::Modified, DiffPanel::Old) => theme.diff_remove_bg,
+                    (ChangeType::Modified, DiffPanel::New) => theme.diff_add_bg,
+                    _ => Color::Reset,
+                }
+            };
 
             // Gutter
-            let line_num = diff_line
-                .new_line
+            let line_num = line_data
                 .as_ref()
                 .map(|(n, _)| format!("{:>4} ", n))
                 .unwrap_or_else(|| "     ".to_string());
@@ -399,17 +477,23 @@ pub fn render_diff(
             buf_write_str(buf, inner.x, y, &line_num, gutter_style, gutter_width);
 
             // Content
-            let spans = build_content_spans(
-                diff_line.new_line.as_ref().map(|(n, t)| (*n, t.as_str())),
-                &diff_line.new_segments,
-                diff_line.change_type,
-                false,
-                new_highlighter,
-                bg,
-                theme,
-                content_width as usize,
-            );
-            buf_write_spans(buf, inner.x + gutter_width, y, &spans, content_width, state.horizontal_scroll);
+            if line_data.is_some() {
+                let spans = build_content_spans(
+                    line_data.as_ref().map(|(n, t)| (*n, t.as_str())),
+                    segments,
+                    diff_line.change_type,
+                    is_old_side,
+                    highlighter,
+                    bg,
+                    theme,
+                    content_width as usize,
+                );
+                buf_write_spans(buf, inner.x + gutter_width, y, &spans, content_width, state.horizontal_scroll);
+            } else {
+                // Empty line (this side has no content for this row)
+                let fill: String = std::iter::repeat(' ').take(content_width as usize).collect();
+                buf_write_str(buf, inner.x + gutter_width, y, &fill, Style::default().bg(bg), content_width);
+            }
         }
     } else {
         // Normal side-by-side diff
