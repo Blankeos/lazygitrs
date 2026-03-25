@@ -1,22 +1,22 @@
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
-use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use std::collections::HashSet;
 
 use crate::config::AppConfig;
-use crate::model::file_tree::{CommitFileTreeNode, FileTreeNode};
 use crate::model::Model;
+use crate::model::file_tree::{CommitFileTreeNode, FileTreeNode};
 use crate::pager::side_by_side::{self, DiffPanel, DiffPanelLayout, DiffViewState};
 
+use super::ScreenMode;
 use super::context::{ContextId, ContextManager, SideWindow};
 use super::layout::{self, LayoutState};
 use super::popup::PopupState;
 use super::presentation;
-use super::ScreenMode;
 
 pub fn render(
     frame: &mut Frame,
@@ -55,7 +55,13 @@ pub fn render(
         .position(|w| *w == active_window)
         .unwrap_or(1); // default to Files
 
-    let fl = layout::compute_layout(area, layout_state.side_panel_ratio, panel_count, active_panel_index, screen_mode);
+    let fl = layout::compute_layout(
+        area,
+        layout_state.side_panel_ratio,
+        panel_count,
+        active_panel_index,
+        screen_mode,
+    );
 
     // Full screen mode
     if screen_mode == ScreenMode::Full {
@@ -75,7 +81,10 @@ pub fn render(
             // Sidebar is focused: show active sidebar panel fullscreen
             let ctx_id = ctx_mgr.active();
             let selected = ctx_mgr.selected(ctx_id);
-            let title = if ctx_id == ContextId::CommitFiles || ctx_id == ContextId::StashFiles || ctx_id == ContextId::BranchCommitFiles {
+            let title = if ctx_id == ContextId::CommitFiles
+                || ctx_id == ContextId::StashFiles
+                || ctx_id == ContextId::BranchCommitFiles
+            {
                 build_commit_files_title(ctx_id, commit_files_hash, commit_files_message)
             } else if ctx_id == ContextId::BranchCommits {
                 build_branch_commits_title(branch_commits_name)
@@ -102,7 +111,12 @@ pub fn render(
                 }
                 ContextId::Files => {
                     if show_file_tree {
-                        let items = presentation::files::render_file_tree(model, &theme, file_tree_nodes, collapsed_dirs);
+                        let items = presentation::files::render_file_tree(
+                            model,
+                            &theme,
+                            file_tree_nodes,
+                            collapsed_dirs,
+                        );
                         render_list(frame, fl.main_panel, block, items, selected, true, &theme);
                     } else {
                         let items = presentation::files::render_file_list(model, &theme);
@@ -135,10 +149,16 @@ pub fn render(
                 }
                 ContextId::CommitFiles | ContextId::StashFiles | ContextId::BranchCommitFiles => {
                     if show_commit_file_tree {
-                        let items = presentation::commit_files::render_commit_file_tree(model, &theme, commit_file_tree_nodes, commit_files_collapsed_dirs);
+                        let items = presentation::commit_files::render_commit_file_tree(
+                            model,
+                            &theme,
+                            commit_file_tree_nodes,
+                            commit_files_collapsed_dirs,
+                        );
                         render_list(frame, fl.main_panel, block, items, selected, true, &theme);
                     } else {
-                        let items = presentation::commit_files::render_commit_file_list(model, &theme);
+                        let items =
+                            presentation::commit_files::render_commit_file_list(model, &theme);
                         render_list(frame, fl.main_panel, block, items, selected, true, &theme);
                     }
                 }
@@ -175,7 +195,10 @@ pub fn render(
         };
 
         // Build title with tab indicators for multi-tab windows
-        let title = if *window == SideWindow::Commits && ctx_id == ContextId::Commits && !commit_branch_filter.is_empty() {
+        let title = if *window == SideWindow::Commits
+            && ctx_id == ContextId::Commits
+            && !commit_branch_filter.is_empty()
+        {
             let filter_label = commit_branch_filter.join(", ");
             Line::from(vec![
                 Span::raw(" Commits "),
@@ -202,7 +225,12 @@ pub fn render(
             }
             ContextId::Files => {
                 if show_file_tree {
-                    let items = presentation::files::render_file_tree(model, &theme, file_tree_nodes, collapsed_dirs);
+                    let items = presentation::files::render_file_tree(
+                        model,
+                        &theme,
+                        file_tree_nodes,
+                        collapsed_dirs,
+                    );
                     render_list(frame, rect, block, items, selected, is_active, &theme);
                 } else {
                     let items = presentation::files::render_file_list(model, &theme);
@@ -221,16 +249,26 @@ pub fn render(
                 // If BranchCommits or BranchCommitFiles is active, render that instead
                 if ctx_mgr.active() == ContextId::BranchCommitFiles {
                     let cf_selected = ctx_mgr.selected(ContextId::BranchCommitFiles);
-                    let cf_title = build_commit_files_title(ContextId::BranchCommitFiles, commit_files_hash, commit_files_message);
+                    let cf_title = build_commit_files_title(
+                        ContextId::BranchCommitFiles,
+                        commit_files_hash,
+                        commit_files_message,
+                    );
                     let cf_block = Block::default()
                         .title(cf_title)
                         .borders(Borders::ALL)
                         .border_style(border_style);
                     if show_commit_file_tree {
-                        let items = presentation::commit_files::render_commit_file_tree(model, &theme, commit_file_tree_nodes, commit_files_collapsed_dirs);
+                        let items = presentation::commit_files::render_commit_file_tree(
+                            model,
+                            &theme,
+                            commit_file_tree_nodes,
+                            commit_files_collapsed_dirs,
+                        );
                         render_list(frame, rect, cf_block, items, cf_selected, is_active, &theme);
                     } else {
-                        let items = presentation::commit_files::render_commit_file_list(model, &theme);
+                        let items =
+                            presentation::commit_files::render_commit_file_list(model, &theme);
                         render_list(frame, rect, cf_block, items, cf_selected, is_active, &theme);
                     }
                 } else if ctx_mgr.active() == ContextId::BranchCommits {
@@ -255,16 +293,26 @@ pub fn render(
                 // If BranchCommits or BranchCommitFiles is active (drill-down from Tags), render that instead
                 if ctx_mgr.active() == ContextId::BranchCommitFiles {
                     let cf_selected = ctx_mgr.selected(ContextId::BranchCommitFiles);
-                    let cf_title = build_commit_files_title(ContextId::BranchCommitFiles, commit_files_hash, commit_files_message);
+                    let cf_title = build_commit_files_title(
+                        ContextId::BranchCommitFiles,
+                        commit_files_hash,
+                        commit_files_message,
+                    );
                     let cf_block = Block::default()
                         .title(cf_title)
                         .borders(Borders::ALL)
                         .border_style(border_style);
                     if show_commit_file_tree {
-                        let items = presentation::commit_files::render_commit_file_tree(model, &theme, commit_file_tree_nodes, commit_files_collapsed_dirs);
+                        let items = presentation::commit_files::render_commit_file_tree(
+                            model,
+                            &theme,
+                            commit_file_tree_nodes,
+                            commit_files_collapsed_dirs,
+                        );
                         render_list(frame, rect, cf_block, items, cf_selected, is_active, &theme);
                     } else {
-                        let items = presentation::commit_files::render_commit_file_list(model, &theme);
+                        let items =
+                            presentation::commit_files::render_commit_file_list(model, &theme);
                         render_list(frame, rect, cf_block, items, cf_selected, is_active, &theme);
                     }
                 } else if ctx_mgr.active() == ContextId::BranchCommits {
@@ -285,16 +333,26 @@ pub fn render(
                 // If CommitFiles is active within this window, render that instead
                 if ctx_mgr.active() == ContextId::CommitFiles {
                     let cf_selected = ctx_mgr.selected(ContextId::CommitFiles);
-                    let cf_title = build_commit_files_title(ContextId::CommitFiles, commit_files_hash, commit_files_message);
+                    let cf_title = build_commit_files_title(
+                        ContextId::CommitFiles,
+                        commit_files_hash,
+                        commit_files_message,
+                    );
                     let cf_block = Block::default()
                         .title(cf_title)
                         .borders(Borders::ALL)
                         .border_style(border_style);
                     if show_commit_file_tree {
-                        let items = presentation::commit_files::render_commit_file_tree(model, &theme, commit_file_tree_nodes, commit_files_collapsed_dirs);
+                        let items = presentation::commit_files::render_commit_file_tree(
+                            model,
+                            &theme,
+                            commit_file_tree_nodes,
+                            commit_files_collapsed_dirs,
+                        );
                         render_list(frame, rect, cf_block, items, cf_selected, is_active, &theme);
                     } else {
-                        let items = presentation::commit_files::render_commit_file_list(model, &theme);
+                        let items =
+                            presentation::commit_files::render_commit_file_list(model, &theme);
                         render_list(frame, rect, cf_block, items, cf_selected, is_active, &theme);
                     }
                 } else {
@@ -306,16 +364,26 @@ pub fn render(
                 // If CommitFiles is active (drill-down from Reflog), render that instead
                 if ctx_mgr.active() == ContextId::CommitFiles {
                     let cf_selected = ctx_mgr.selected(ContextId::CommitFiles);
-                    let cf_title = build_commit_files_title(ContextId::CommitFiles, commit_files_hash, commit_files_message);
+                    let cf_title = build_commit_files_title(
+                        ContextId::CommitFiles,
+                        commit_files_hash,
+                        commit_files_message,
+                    );
                     let cf_block = Block::default()
                         .title(cf_title)
                         .borders(Borders::ALL)
                         .border_style(border_style);
                     if show_commit_file_tree {
-                        let items = presentation::commit_files::render_commit_file_tree(model, &theme, commit_file_tree_nodes, commit_files_collapsed_dirs);
+                        let items = presentation::commit_files::render_commit_file_tree(
+                            model,
+                            &theme,
+                            commit_file_tree_nodes,
+                            commit_files_collapsed_dirs,
+                        );
                         render_list(frame, rect, cf_block, items, cf_selected, is_active, &theme);
                     } else {
-                        let items = presentation::commit_files::render_commit_file_list(model, &theme);
+                        let items =
+                            presentation::commit_files::render_commit_file_list(model, &theme);
                         render_list(frame, rect, cf_block, items, cf_selected, is_active, &theme);
                     }
                 } else {
@@ -327,16 +395,26 @@ pub fn render(
                 // If StashFiles is active within this window, render that instead
                 if ctx_mgr.active() == ContextId::StashFiles {
                     let sf_selected = ctx_mgr.selected(ContextId::StashFiles);
-                    let sf_title = build_commit_files_title(ContextId::StashFiles, commit_files_hash, commit_files_message);
+                    let sf_title = build_commit_files_title(
+                        ContextId::StashFiles,
+                        commit_files_hash,
+                        commit_files_message,
+                    );
                     let sf_block = Block::default()
                         .title(sf_title)
                         .borders(Borders::ALL)
                         .border_style(border_style);
                     if show_commit_file_tree {
-                        let items = presentation::commit_files::render_commit_file_tree(model, &theme, commit_file_tree_nodes, commit_files_collapsed_dirs);
+                        let items = presentation::commit_files::render_commit_file_tree(
+                            model,
+                            &theme,
+                            commit_file_tree_nodes,
+                            commit_files_collapsed_dirs,
+                        );
                         render_list(frame, rect, sf_block, items, sf_selected, is_active, &theme);
                     } else {
-                        let items = presentation::commit_files::render_commit_file_list(model, &theme);
+                        let items =
+                            presentation::commit_files::render_commit_file_list(model, &theme);
                         render_list(frame, rect, sf_block, items, sf_selected, is_active, &theme);
                     }
                 } else {
@@ -385,7 +463,10 @@ pub fn render(
             let prefix_width = 2u16; // " /"
             let suffix_text = match_info;
             let suffix_width = suffix_text.len() as u16;
-            let ta_width = fl.status_bar.width.saturating_sub(prefix_width + suffix_width);
+            let ta_width = fl
+                .status_bar
+                .width
+                .saturating_sub(prefix_width + suffix_width);
 
             // Prefix " /"
             let prefix_rect = Rect::new(fl.status_bar.x, fl.status_bar.y, prefix_width, 1);
@@ -398,8 +479,16 @@ pub fn render(
 
             // Suffix (match info)
             if !suffix_text.is_empty() {
-                let suffix_rect = Rect::new(fl.status_bar.x + prefix_width + ta_width, fl.status_bar.y, suffix_width, 1);
-                let suffix = Paragraph::new(Span::styled(suffix_text, Style::default().fg(Color::Yellow)));
+                let suffix_rect = Rect::new(
+                    fl.status_bar.x + prefix_width + ta_width,
+                    fl.status_bar.y,
+                    suffix_width,
+                    1,
+                );
+                let suffix = Paragraph::new(Span::styled(
+                    suffix_text,
+                    Style::default().fg(Color::Yellow),
+                ));
                 frame.render_widget(suffix, suffix_rect);
             }
         } else {
@@ -447,14 +536,27 @@ fn render_command_log(
     let log_block = Block::default()
         .title(Line::from(vec![
             Span::styled(" ", Style::default().fg(title_color)),
-            Span::styled("Command Log", Style::default().fg(title_color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Command Log",
+                Style::default()
+                    .fg(title_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" ", Style::default().fg(title_color)),
         ]))
-        .title_bottom(Line::from(vec![
-            Span::styled(" ", Style::default().fg(hint_color)),
-            Span::styled(";", Style::default().fg(Color::Rgb(160, 160, 160)).add_modifier(Modifier::BOLD)),
-            Span::styled(" toggle ", Style::default().fg(hint_color)),
-        ]).alignment(ratatui::layout::Alignment::Right))
+        .title_bottom(
+            Line::from(vec![
+                Span::styled(" ", Style::default().fg(hint_color)),
+                Span::styled(
+                    ";",
+                    Style::default()
+                        .fg(Color::Rgb(160, 160, 160))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" toggle ", Style::default().fg(hint_color)),
+            ])
+            .alignment(ratatui::layout::Alignment::Right),
+        )
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
 
@@ -497,8 +599,16 @@ fn build_branch_commits_title<'a>(branch_name: &str) -> Line<'a> {
     ])
 }
 
-fn build_commit_files_title<'a>(ctx: ContextId, commit_hash: &str, commit_message: &str) -> Line<'a> {
-    let short = if commit_hash.len() > 7 { &commit_hash[..7] } else { commit_hash };
+fn build_commit_files_title<'a>(
+    ctx: ContextId,
+    commit_hash: &str,
+    commit_message: &str,
+) -> Line<'a> {
+    let short = if commit_hash.len() > 7 {
+        &commit_hash[..7]
+    } else {
+        commit_hash
+    };
     let prefix = match ctx {
         ContextId::StashFiles => " 5 Stash Files ",
         ContextId::BranchCommitFiles => " 3 Commit Files ",
@@ -506,10 +616,7 @@ fn build_commit_files_title<'a>(ctx: ContextId, commit_hash: &str, commit_messag
     };
     let mut spans = vec![
         Span::raw(prefix),
-        Span::styled(
-            format!("({}", short),
-            Style::default().fg(Color::Yellow),
-        ),
+        Span::styled(format!("({}", short), Style::default().fg(Color::Yellow)),
     ];
     if !commit_message.is_empty() {
         spans.push(Span::raw(" "));
@@ -522,7 +629,11 @@ fn build_commit_files_title<'a>(ctx: ContextId, commit_hash: &str, commit_messag
     Line::from(spans)
 }
 
-fn build_window_title<'a>(window: SideWindow, active_ctx: ContextId, _ctx_mgr: &ContextManager) -> Line<'a> {
+fn build_window_title<'a>(
+    window: SideWindow,
+    active_ctx: ContextId,
+    _ctx_mgr: &ContextManager,
+) -> Line<'a> {
     let tabs = window.tabs();
     let key = window.key_label();
 
@@ -539,7 +650,9 @@ fn build_window_title<'a>(window: SideWindow, active_ctx: ContextId, _ctx_mgr: &
         if *ctx == active_ctx {
             spans.push(Span::styled(
                 ctx.title(),
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             ));
         } else {
             spans.push(Span::styled(
@@ -593,7 +706,12 @@ fn render_status_sidebar<'a>(model: &Model, _config: &AppConfig, inner_width: us
     };
 
     // Left side: " ↑N reponame → branch"
-    let left_len = 1 + UnicodeWidthStr::width(ab_text.as_str()) + repo_name.len() + 1 + UnicodeWidthStr::width("→ ") + branch_name.len();
+    let left_len = 1
+        + UnicodeWidthStr::width(ab_text.as_str())
+        + repo_name.len()
+        + 1
+        + UnicodeWidthStr::width("→ ")
+        + branch_name.len();
     // Right side: stats + trailing space
     let right_len = if has_changes { stats_text.len() + 1 } else { 0 };
     let padding = inner_width.saturating_sub(left_len + right_len);
@@ -609,7 +727,9 @@ fn render_status_sidebar<'a>(model: &Model, _config: &AppConfig, inner_width: us
     }
     spans.push(Span::styled(
         format!("{} ", repo_name),
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
     ));
     spans.push(Span::styled("→ ", Style::default().fg(Color::DarkGray)));
     spans.push(Span::styled(branch_name, Style::default().fg(Color::Green)));
@@ -660,7 +780,12 @@ fn render_status_main(
     let logo = include_str!("../../logo.txt");
     let mut lines: Vec<Line> = logo
         .lines()
-        .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(Color::Cyan))))
+        .map(|l| {
+            Line::from(Span::styled(
+                l.to_string(),
+                Style::default().fg(Color::Cyan),
+            ))
+        })
         .collect();
 
     lines.push(Line::from(""));
@@ -710,14 +835,8 @@ fn render_worktree_list<'a>(model: &Model) -> Vec<ListItem<'a>> {
         .map(|wt| {
             let marker = if wt.is_current { "* " } else { "  " };
             let line = Line::from(vec![
-                Span::styled(
-                    marker.to_string(),
-                    Style::default().fg(Color::Green),
-                ),
-                Span::styled(
-                    wt.branch.clone(),
-                    Style::default().fg(Color::Cyan),
-                ),
+                Span::styled(marker.to_string(), Style::default().fg(Color::Green)),
+                Span::styled(wt.branch.clone(), Style::default().fg(Color::Cyan)),
                 Span::styled(
                     format!(" {}", wt.path),
                     Style::default().fg(Color::DarkGray),
@@ -824,15 +943,9 @@ fn get_info_content<'a>(model: &Model, ctx_mgr: &ContextManager) -> Vec<Line<'a>
                 for url in &remote.urls {
                     lines.push(Line::from(format!(" URL: {}", url)));
                 }
-                lines.push(Line::from(format!(
-                    " Branches: {}",
-                    remote.branches.len()
-                )));
+                lines.push(Line::from(format!(" Branches: {}", remote.branches.len())));
                 for branch in &remote.branches {
-                    lines.push(Line::from(format!(
-                        "   {} ({})",
-                        branch.name, branch.hash
-                    )));
+                    lines.push(Line::from(format!("   {} ({})", branch.name, branch.hash)));
                 }
                 lines
             } else {
@@ -878,7 +991,9 @@ fn render_status_bar(
     let context_hints = match ctx_mgr.active() {
         ContextId::Files => "c: commit | a: stage all | <space>: toggle | d: discard",
         ContextId::Branches => "<space>: checkout | n: new | d: delete | M: merge | r: rebase",
-        ContextId::Commits => "r: reword | g: reset | t: revert | C: cherry-pick | ctrl-l: filter branch",
+        ContextId::Commits => {
+            "r: reword | g: reset | t: revert | C: cherry-pick | ctrl-l: filter branch"
+        }
         ContextId::Stash => "g: pop | <space>: apply | d: drop",
         ContextId::Remotes => "f: fetch | P: push | p: pull",
         ContextId::Tags => "n: new | d: delete | P: push",
@@ -1000,7 +1115,8 @@ fn render_selection_overlay(frame: &mut Frame, diff_view: &mut DiffViewState, pa
     // Tooltip below the selection (only after drag finishes).
     if !selection.dragging {
         let tooltip_width: u16 = 13; // " y copy  esc "
-        let tooltip_x = bot_col.saturating_sub(tooltip_width / 2)
+        let tooltip_x = bot_col
+            .saturating_sub(tooltip_width / 2)
             .max(content_start)
             .min(content_end.saturating_sub(tooltip_width));
         let tooltip_y = (bot_row + 1).min(pl.inner_end_y.saturating_sub(1));
@@ -1104,7 +1220,12 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
             let widget = Paragraph::new(text).block(block);
             frame.render_widget(widget, popup_rect);
         }
-        PopupState::Input { title, textarea, is_commit, .. } => {
+        PopupState::Input {
+            title,
+            textarea,
+            is_commit,
+            ..
+        } => {
             // Textarea popup: taller to allow multiline editing
             let ta_height = 12u16;
             let ta_y = (area.height.saturating_sub(ta_height)) / 2;
@@ -1119,7 +1240,10 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
             frame.render_widget(outer, ta_rect);
 
             // Inner area for textarea + hint
-            let inner = ta_rect.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+            let inner = ta_rect.inner(ratatui::layout::Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
 
             // Reserve last line for the hint
             if inner.height > 2 {
@@ -1162,7 +1286,7 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
                     let label = if let Some(ref key) = item.key {
                         format!(" {} {}", key, item.label)
                     } else {
-                        format!("  {}", item.label)
+                        format!("   {}", item.label)
                     };
 
                     if disabled {
@@ -1170,29 +1294,24 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
                             .fg(Color::DarkGray)
                             .add_modifier(Modifier::CROSSED_OUT);
                         ListItem::new(Line::from(Span::styled(label, text_style)))
-                    } else if !item.description.is_empty() {
-                        let item_style = if i == *selected {
-                            Style::default()
-                                .bg(Color::DarkGray)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default()
-                        };
-                        let spans = vec![
-                            Span::styled(label, item_style),
-                            Span::raw(" "),
-                            Span::styled(&item.description, Style::default().fg(Color::Yellow)),
-                        ];
-                        ListItem::new(Line::from(spans))
                     } else {
-                        let item_style = if i == *selected {
+                        let selected_style = if i == *selected {
                             Style::default()
                                 .bg(Color::DarkGray)
                                 .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default()
                         };
-                        ListItem::new(Line::from(Span::styled(label, item_style)))
+                        let line = if !item.description.is_empty() {
+                            Line::from(vec![
+                                Span::styled(label, Style::default()),
+                                Span::raw(" "),
+                                Span::styled(&item.description, Style::default().fg(Color::Yellow)),
+                            ])
+                        } else {
+                            Line::from(label)
+                        };
+                        ListItem::new(line).style(selected_style)
                     }
                 })
                 .collect();
@@ -1200,24 +1319,22 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
             let list = List::new(list_items).block(block);
             frame.render_widget(list, popup_rect);
 
-            // Show disabled item info bar below the menu
-            let disabled_descriptions: Vec<&str> = items.iter()
-                .filter(|item| item.action.is_none() && !item.description.is_empty())
-                .map(|item| item.description.as_str())
-                .collect();
-            if !disabled_descriptions.is_empty() {
-                let hint_y = popup_rect.y + popup_rect.height;
-                if hint_y < area.height {
-                    let hint_text = format!("Disabled: {}", disabled_descriptions.join(", "));
-                    let hint_rect = Rect::new(popup_rect.x, hint_y, popup_rect.width, 1);
-                    frame.render_widget(Clear, hint_rect);
-                    frame.render_widget(
-                        Paragraph::new(Span::styled(
-                            hint_text,
-                            Style::default().fg(Color::DarkGray),
-                        )),
-                        hint_rect,
-                    );
+            // Show disabled item description only when the selected item is disabled
+            if let Some(selected_item) = items.get(*selected) {
+                if selected_item.action.is_none() && !selected_item.description.is_empty() {
+                    let hint_y = popup_rect.y + popup_rect.height;
+                    if hint_y < area.height {
+                        let hint_text = format!("Disabled: {}", selected_item.description);
+                        let hint_rect = Rect::new(popup_rect.x, hint_y, popup_rect.width, 1);
+                        frame.render_widget(Clear, hint_rect);
+                        frame.render_widget(
+                            Paragraph::new(Span::styled(
+                                hint_text,
+                                Style::default().fg(Color::DarkGray),
+                            )),
+                            hint_rect,
+                        );
+                    }
                 }
             }
         }
@@ -1240,7 +1357,9 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
                 Line::from(""),
                 Line::from(Span::styled(
                     format!(" {} ", message),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
                 Line::from(Span::styled(
@@ -1252,10 +1371,20 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
             let widget = Paragraph::new(text).block(block);
             frame.render_widget(widget, popup_rect);
         }
-        PopupState::Checklist { title, items, selected, search, .. } => {
+        PopupState::Checklist {
+            title,
+            items,
+            selected,
+            search,
+            ..
+        } => {
             // Filter items by search query
-            let visible: Vec<(usize, &super::popup::ChecklistItem)> = items.iter().enumerate()
-                .filter(|(_, it)| search.is_empty() || it.label.to_lowercase().contains(&search.to_lowercase()))
+            let visible: Vec<(usize, &super::popup::ChecklistItem)> = items
+                .iter()
+                .enumerate()
+                .filter(|(_, it)| {
+                    search.is_empty() || it.label.to_lowercase().contains(&search.to_lowercase())
+                })
                 .collect();
 
             // Height: search bar (1) + blank (1) + items + blank (1) + hint (1) + borders (2)
@@ -1271,7 +1400,10 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
                 .border_style(Style::default().fg(Color::Cyan));
             frame.render_widget(block, popup_rect);
 
-            let inner = popup_rect.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+            let inner = popup_rect.inner(ratatui::layout::Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
             if inner.height < 3 {
                 // Too small, skip
             } else {
@@ -1304,31 +1436,41 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
                 let list_height = inner.height.saturating_sub(3); // search + sep + hint
                 let list_area = Rect::new(inner.x, list_start, inner.width, list_height);
 
-                let list_items: Vec<ListItem> = visible.iter().enumerate().map(|(vi, (_, item))| {
-                    let check_sym = if item.checked { "◉" } else { "○" };
-                    let check_color = if item.checked { Color::Green } else { Color::DarkGray };
-                    let is_selected = vi == *selected;
+                let list_items: Vec<ListItem> = visible
+                    .iter()
+                    .enumerate()
+                    .map(|(vi, (_, item))| {
+                        let check_sym = if item.checked { "◉" } else { "○" };
+                        let check_color = if item.checked {
+                            Color::Green
+                        } else {
+                            Color::DarkGray
+                        };
+                        let is_selected = vi == *selected;
 
-                    let line = Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled(check_sym, Style::default().fg(check_color)),
-                        Span::raw("  "),
-                        Span::styled(
-                            item.label.clone(),
-                            if is_selected {
-                                Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
-                            } else {
-                                Style::default().fg(Color::White)
-                            },
-                        ),
-                    ]);
+                        let line = Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(check_sym, Style::default().fg(check_color)),
+                            Span::raw("  "),
+                            Span::styled(
+                                item.label.clone(),
+                                if is_selected {
+                                    Style::default()
+                                        .fg(Color::White)
+                                        .add_modifier(Modifier::BOLD)
+                                } else {
+                                    Style::default().fg(Color::White)
+                                },
+                            ),
+                        ]);
 
-                    if is_selected {
-                        ListItem::new(line).style(Style::default().bg(Color::DarkGray))
-                    } else {
-                        ListItem::new(line)
-                    }
-                }).collect();
+                        if is_selected {
+                            ListItem::new(line).style(Style::default().bg(Color::DarkGray))
+                        } else {
+                            ListItem::new(line)
+                        }
+                    })
+                    .collect();
 
                 let list = List::new(list_items);
                 frame.render_widget(list, list_area);
@@ -1342,17 +1484,31 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
                 ];
                 if any_checked {
                     hint_spans.push(Span::styled("ctrl-a", Style::default().fg(Color::Yellow)));
-                    hint_spans.push(Span::styled(": clear  ", Style::default().fg(Color::DarkGray)));
+                    hint_spans.push(Span::styled(
+                        ": clear  ",
+                        Style::default().fg(Color::DarkGray),
+                    ));
                 }
                 hint_spans.push(Span::styled("enter", Style::default().fg(Color::Yellow)));
-                hint_spans.push(Span::styled(": apply  ", Style::default().fg(Color::DarkGray)));
+                hint_spans.push(Span::styled(
+                    ": apply  ",
+                    Style::default().fg(Color::DarkGray),
+                ));
                 hint_spans.push(Span::styled("esc", Style::default().fg(Color::Yellow)));
-                hint_spans.push(Span::styled(": cancel", Style::default().fg(Color::DarkGray)));
+                hint_spans.push(Span::styled(
+                    ": cancel",
+                    Style::default().fg(Color::DarkGray),
+                ));
                 let hint = Line::from(hint_spans);
                 frame.render_widget(Paragraph::new(hint), hint_area);
             }
         }
-        PopupState::Help { sections, selected, search, scroll_offset } => {
+        PopupState::Help {
+            sections,
+            selected,
+            search,
+            scroll_offset,
+        } => {
             // Collect all visible entries (filtered by search) as flat list with section headers
             let search_lower = search.to_lowercase();
             let has_search = !search_lower.is_empty();
@@ -1361,10 +1517,14 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
             let mut display: Vec<(bool, String, String)> = Vec::new();
             for section in sections {
                 let visible_entries: Vec<&super::popup::HelpEntry> = if has_search {
-                    section.entries.iter().filter(|e| {
-                        e.key.to_lowercase().contains(&search_lower)
-                            || e.description.to_lowercase().contains(&search_lower)
-                    }).collect()
+                    section
+                        .entries
+                        .iter()
+                        .filter(|e| {
+                            e.key.to_lowercase().contains(&search_lower)
+                                || e.description.to_lowercase().contains(&search_lower)
+                        })
+                        .collect()
                 } else {
                     section.entries.iter().collect()
                 };
@@ -1381,7 +1541,9 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
             let popup_width = (area.width * 70 / 100).min(72).max(36);
             let content_height = display.len().max(1);
             // search bar (1) + separator (1) + content + hint (1) + borders (2)
-            let popup_height = (content_height as u16 + 5).min(area.height.saturating_sub(4)).max(10);
+            let popup_height = (content_height as u16 + 5)
+                .min(area.height.saturating_sub(4))
+                .max(10);
             let x = (area.width.saturating_sub(popup_width)) / 2;
             let y = (area.height.saturating_sub(popup_height)) / 2;
             let popup_rect = Rect::new(x, y, popup_width, popup_height);
@@ -1393,7 +1555,10 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
                 .border_style(Style::default().fg(Color::Cyan));
             frame.render_widget(block, popup_rect);
 
-            let inner = popup_rect.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+            let inner = popup_rect.inner(ratatui::layout::Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
             if inner.height < 3 {
                 return;
             }
@@ -1432,7 +1597,8 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
             let so = *scroll_offset;
             let effective_scroll = if so > max_scroll { max_scroll } else { so };
 
-            let visible_display: Vec<&(bool, String, String)> = display.iter()
+            let visible_display: Vec<&(bool, String, String)> = display
+                .iter()
                 .skip(effective_scroll)
                 .take(list_height)
                 .collect();
@@ -1450,12 +1616,12 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
             let mut list_items: Vec<ListItem> = Vec::new();
             for (is_header, key_or_title, desc) in visible_display {
                 if *is_header {
-                    let line = Line::from(vec![
-                        Span::styled(
-                            format!(" {} ", key_or_title),
-                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                        ),
-                    ]);
+                    let line = Line::from(vec![Span::styled(
+                        format!(" {} ", key_or_title),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )]);
                     list_items.push(ListItem::new(line));
                 } else {
                     let is_selected = entry_idx == *selected;
@@ -1465,7 +1631,9 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
                     let desc_display = format!("  {}", desc);
 
                     let key_style = if is_selected {
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
                     } else if has_search && key_or_title.to_lowercase().contains(&search_lower) {
                         Style::default().fg(Color::Yellow)
                     } else {
@@ -1473,7 +1641,9 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
                     };
 
                     let desc_style = if is_selected {
-                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD)
                     } else if has_search && desc.to_lowercase().contains(&search_lower) {
                         Style::default().fg(Color::White)
                     } else {
@@ -1486,7 +1656,8 @@ fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame
                     ]);
 
                     if is_selected {
-                        list_items.push(ListItem::new(line).style(Style::default().bg(Color::DarkGray)));
+                        list_items
+                            .push(ListItem::new(line).style(Style::default().bg(Color::DarkGray)));
                     } else {
                         list_items.push(ListItem::new(line));
                     }

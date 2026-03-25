@@ -13,3 +13,48 @@
 - [x] Like \_tmp_lumen, I want to be able to highlight lines on the diff exploration viewing mode with my mouse.. Highlighting something would also show the same `y copy esc` tooltip just under the highlight. (no annotate since that's a lumen concept)
 - [x] Like \_tmp_lumen, I want to `{}` to travel between hunks. I want `[]` to show 'old' or 'new' (so it toggle hides the side-by-side). Make sure the `[]` doesn't break the mouse interactions for highlights. I want to show the `?` help panel while focusing the 'main content diff content exploration focus' so I can see these hotkeys.
 - [x] Like the original lazygit, let's have a subtab under [4] Commits, for Reflog.
+
+- [x] More feature-parity stuff with the original lazygit... Missing features from the original lazygit (from my investigation, but I could be missing more, so add more here)
+  - [x] In 'Remotes', I press `n`, prolly not implemented.
+  - [x] In 'Remotes', I press `d` (delete), prolly not implemented.
+  - [x] In 'Tags', I press `g` (reset), prolly not implemented.
+    - [x] I noticed in the original lazygit, in the reset menu options, I see the associated command w/ it i.e.
+    - Mixed reset reset --mixed f115cxxx (the 'reset --mixed f115cxxx' has a different color.)
+    - Soft reset reset --soft f115cxxx
+    - Hard reset reset --hard f115cxxx
+  - [x] In 'Tags', I press `P`, to push tags? prolly not implemeanted.
+  - [x] contextual `?` for some other pages that we haven't considered before.
+    - [x] I press `?` on Remotes, I don't see much.
+    - [x] I press `?` on Tags, I don't see much.
+    - [x] I press `?` on Worktrees, I don't see much. It still says 'Files'
+    - [x] I press `?` on Submodules, I don't see much. It still says 'Files'
+  - [x] In Tags, in the original lazygit, I can:
+    - [x] Press enter and see a 'commits list view'?
+    - [x] after in the 'commits list view', I can press enter again and see the 'commit files' view.
+    - [x] after in the 'commit files' view, I can press enter to go into 'diff exploration' (if you notice this is pretty much all standard at this point)
+  - [x] In Reflog, in the original lazygit, I can:
+    - [x] Press enter and it goes into 'commits list view', then if I press enter it goes into 'commit files' view, and enter again goes to 'diff exploration' (pretty standard again)
+  - [x] In 'commits list view', I can press `o` to open commit in the browser.
+    - Let's make this a bit different for lazygitrs. Same idea with the 'Branches' `o` key. It opens a popup for 'Open in browser' with a list of stuff I can open about this commit. So I guess 1 option is just the 'Open commit url'
+    - Actually now that I realize.. We already have a `y` option for Commit url, so that's very good.
+  - [x] In 'Commits list view', pressing `y` opens the 'Copy to clipboard'. Minor issue/changes:
+    - [x] In the original lazygit, sometimes 'commit message body' is strikethrough'd Maybe because if it doesnt exist?
+    - [x] In the original lazygit, sometimes 'commit tags' is strikethrough'd Maybe because it doesnt exist?
+
+- [ ] For the feature-parity stuff I didn't consider in the previous todo, write it here (For AI):
+  - [ ] In 'Commits', I press `d` to drop the selected commit. Currently unimplemented.
+  - [ ] In 'Files', the original lazygit has `e` to open file in editor and `o` to open file in default program.
+  - [ ] In 'Files', the original lazygit has `M` to open merge tool / external merge tool for resolving conflicts.
+  - [ ] Merge conflict resolution UI — the original lazygit lets you pick between versions when a merge/rebase results in conflicts.
+  - [ ] Rebase conflict resolution UI — similar conflict resolution flow during interactive rebase.
+  - [ ] Cherry-pick paste (`V`) — we have cherry-pick copy (`C`) in Commits, but no paste action to apply copied commits onto current branch.
+  - [ ] In 'Remotes', pressing `Enter` should drill into remote branches. Then from a remote branch: `<space>` to checkout, `M` to merge, `r` to rebase onto it, `d` to delete remote branch.
+  - [ ] In 'Submodules', the original lazygit has more operations: `a` to add submodule, `d` to remove submodule, `e` to enter submodule (open a nested lazygit in that submodule), `<space>` to update submodule.
+  - [ ] In 'Worktrees', the original lazygit has `<space>` to switch to worktree (open it).
+  - [ ] In 'Commits', the original lazygit has `<c-r>` to reset cherry-pick selection.
+  - [ ] In 'Branches', the original lazygit shows divergence info (ahead/behind counts relative to upstream).
+  - [ ] Full `$EDITOR` integration — committing with `C` (editor mode) currently has a limitation where it can't suspend the TUI to open a real terminal editor.
+  - [ ] In 'Files', the original lazygit has `<c-o>` to copy the diff of the selected file to clipboard (we have this in `y` menu, but the direct shortcut may be missing).
+  - [ ] Undo/Redo — the original lazygit has `z`/`<c-z>` to undo and redo git actions (using reflog under the hood).
+  - [ ] Diff mode — the original lazygit has a way to diff any two commits/branches against each other (not just viewing a single commit's diff).
+  - [ ] In 'Branches', the original lazygit has `<c-o>` to copy PR URL, we might already have this in the `y` menu but worth verifying the direct shortcut.
