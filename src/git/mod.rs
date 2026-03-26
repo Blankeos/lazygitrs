@@ -40,6 +40,7 @@ pub enum ModelPart {
         is_merging: bool,
         is_cherry_picking: bool,
         is_bisecting: bool,
+        rebase_onto_hash: String,
     },
 }
 
@@ -85,7 +86,7 @@ impl GitCommands {
         std::thread::scope(|s| {
             let h_files = s.spawn(|| self.load_files());
             let h_branches = s.spawn(|| self.load_branches());
-            let h_commits = s.spawn(|| self.load_commits(50));
+            let h_commits = s.spawn(|| self.load_commits(0));
             let h_stash = s.spawn(|| self.load_stash());
             let h_remotes = s.spawn(|| self.load_remotes());
             let h_tags = s.spawn(|| self.load_tags());
@@ -115,6 +116,7 @@ impl GitCommands {
                 model.is_merging = status.is_merging;
                 model.is_cherry_picking = status.is_cherry_picking;
                 model.is_bisecting = status.is_bisecting;
+                model.rebase_onto_hash = status.rebase_onto_hash;
             }
 
             Ok(model)
@@ -142,7 +144,7 @@ impl GitCommands {
 
         spawn_part!(tx, self, Files, |g: &GitCommands| g.load_files());
         spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
-        spawn_part!(tx, self, Commits, |g: &GitCommands| g.load_commits(50));
+        spawn_part!(tx, self, Commits, |g: &GitCommands| g.load_commits(0));
         spawn_part!(tx, self, Stash, |g: &GitCommands| g.load_stash());
         spawn_part!(tx, self, Remotes, |g: &GitCommands| g.load_remotes());
         spawn_part!(tx, self, Tags, |g: &GitCommands| g.load_tags());
@@ -176,6 +178,7 @@ impl GitCommands {
                         is_merging: status.is_merging,
                         is_cherry_picking: status.is_cherry_picking,
                         is_bisecting: status.is_bisecting,
+                        rebase_onto_hash: status.rebase_onto_hash,
                     });
                 }
             });
@@ -221,6 +224,24 @@ impl GitCommands {
         let result = self
             .git()
             .args(&["rev-parse", "HEAD"])
+            .run_expecting_success()?;
+        Ok(result.stdout_trimmed().to_string())
+    }
+
+    /// Resolve a ref (branch name, tag, hash) to a full commit hash.
+    pub fn resolve_ref(&self, refspec: &str) -> Result<String> {
+        let result = self
+            .git()
+            .args(&["rev-parse", refspec])
+            .run_expecting_success()?;
+        Ok(result.stdout_trimmed().to_string())
+    }
+
+    /// Get the subject line of a commit.
+    pub fn commit_subject(&self, hash: &str) -> Result<String> {
+        let result = self
+            .git()
+            .args(&["log", "-1", "--format=%s", hash])
             .run_expecting_success()?;
         Ok(result.stdout_trimmed().to_string())
     }

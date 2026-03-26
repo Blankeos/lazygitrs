@@ -11,6 +11,8 @@ pub struct RepoStatus {
     pub is_merging: bool,
     pub is_cherry_picking: bool,
     pub is_bisecting: bool,
+    /// Short hash of the commit being rebased onto.
+    pub rebase_onto_hash: String,
 }
 
 impl GitCommands {
@@ -21,15 +23,33 @@ impl GitCommands {
 
         let git_dir = self.repo_path().join(".git");
 
+        let is_rebasing = git_dir.join("rebase-merge").exists()
+            || git_dir.join("rebase-apply").exists();
+
+        // Read the "onto" hash when rebasing
+        let rebase_onto_hash = if is_rebasing {
+            // Try rebase-merge/onto first, then rebase-apply/onto
+            std::fs::read_to_string(git_dir.join("rebase-merge/onto"))
+                .or_else(|_| std::fs::read_to_string(git_dir.join("rebase-apply/onto")))
+                .map(|s| {
+                    let full = s.trim().to_string();
+                    // Return short hash (first 12 chars)
+                    full[..12.min(full.len())].to_string()
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
         Ok(RepoStatus {
             branch,
             ahead,
             behind,
-            is_rebasing: git_dir.join("rebase-merge").exists()
-                || git_dir.join("rebase-apply").exists(),
+            is_rebasing,
             is_merging: git_dir.join("MERGE_HEAD").exists(),
             is_cherry_picking: git_dir.join("CHERRY_PICK_HEAD").exists(),
             is_bisecting: git_dir.join("BISECT_LOG").exists(),
+            rebase_onto_hash,
         })
     }
 

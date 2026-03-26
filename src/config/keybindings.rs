@@ -300,6 +300,8 @@ pub struct CommitsKeybinding {
     pub open_log_menu: String,
     #[serde(rename = "viewBisectOptions")]
     pub view_bisect_options: String,
+    #[serde(rename = "interactiveRebase")]
+    pub interactive_rebase: String,
 }
 
 impl Default for CommitsKeybinding {
@@ -324,6 +326,7 @@ impl Default for CommitsKeybinding {
             reset_cherry_pick: "<c-q>".into(),
             open_log_menu: "<c-l>".into(),
             view_bisect_options: "b".into(),
+            interactive_rebase: "i".into(),
         }
     }
 }

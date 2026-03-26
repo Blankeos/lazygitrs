@@ -183,7 +183,7 @@ pub fn render(
                 }
             }
         }
-        render_status_bar(frame, fl.status_bar, ctx_mgr, diff_view, &theme);
+        render_status_bar(frame, fl.status_bar, ctx_mgr, diff_view, &theme, model);
         // Render text selection highlight overlay and tooltip (must be before popup)
         render_selection_overlay(frame, diff_view, fl.main_panel);
         if *popup != PopupState::None {
@@ -544,7 +544,7 @@ pub fn render(
             frame.render_widget(bar, fl.status_bar);
         }
     } else {
-        render_status_bar(frame, fl.status_bar, ctx_mgr, diff_view, &theme);
+        render_status_bar(frame, fl.status_bar, ctx_mgr, diff_view, &theme, model);
     }
 
     // Render text selection highlight overlay and tooltip
@@ -713,6 +713,17 @@ fn build_window_title<'a>(
 
 /// Compact 1-line status for the sidebar: "reponame → branch          +N -N"
 fn render_status_sidebar<'a>(model: &Model, _config: &AppConfig, inner_width: usize) -> Line<'a> {
+    // Determine the working-tree state prefix (rebasing/merging/cherry-picking)
+    let state_prefix = if model.is_rebasing {
+        Some("rebasing")
+    } else if model.is_merging {
+        Some("merging")
+    } else if model.is_cherry_picking {
+        Some("cherry-picking")
+    } else {
+        None
+    };
+
     let head_branch = model.branches.iter().find(|b| b.head);
     let branch_name = head_branch
         .map(|b| b.name.clone())
@@ -756,18 +767,74 @@ fn render_status_sidebar<'a>(model: &Model, _config: &AppConfig, inner_width: us
         _ => String::new(),
     };
 
-    // Left side: " ↑N reponame → branch"
+    let mut spans = Vec::new();
+
+    // When in a special state (rebasing, merging, etc.), show lazygit-style:
+    //   (rebasing) reponame → <hash>
+    if let Some(state) = state_prefix {
+        let right_side = if model.is_rebasing && !model.rebase_onto_hash.is_empty() {
+            model.rebase_onto_hash.clone()
+        } else {
+            branch_name.clone()
+        };
+
+        let prefix = format!("({})", state);
+        let left_len = 1 + prefix.len() + 1 + repo_name.len() + 1
+            + UnicodeWidthStr::width("→ ") + right_side.len();
+        let right_len = if has_changes { stats_text.len() + 1 } else { 0 };
+        let padding = inner_width.saturating_sub(left_len + right_len);
+
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            prefix,
+            Style::default().fg(Color::Yellow),
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!("{} ", repo_name),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled("→ ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            right_side,
+            Style::default().fg(Color::Yellow),
+        ));
+
+        if has_changes {
+            spans.push(Span::raw(" ".repeat(padding)));
+            if additions > 0 {
+                spans.push(Span::styled(
+                    format!("+{}", additions),
+                    Style::default().fg(Color::Green),
+                ));
+            }
+            if additions > 0 && deletions > 0 {
+                spans.push(Span::raw(" "));
+            }
+            if deletions > 0 {
+                spans.push(Span::styled(
+                    format!("-{}", deletions),
+                    Style::default().fg(Color::Red),
+                ));
+            }
+            spans.push(Span::raw(" "));
+        }
+
+        return Line::from(spans);
+    }
+
+    // Normal state: " ↑N reponame → branch"
     let left_len = 1
         + UnicodeWidthStr::width(ab_text.as_str())
         + repo_name.len()
         + 1
         + UnicodeWidthStr::width("→ ")
         + branch_name.len();
-    // Right side: stats + trailing space
     let right_len = if has_changes { stats_text.len() + 1 } else { 0 };
     let padding = inner_width.saturating_sub(left_len + right_len);
 
-    let mut spans = Vec::new();
     if !ab_text.is_empty() {
         spans.push(Span::styled(
             format!(" {}", ab_text),
@@ -858,7 +925,7 @@ fn render_status_main(
     // In-progress operation banners
     if model.is_rebasing {
         lines.push(Line::from(Span::styled(
-            " REBASING (m: options)",
+            " REBASING",
             Style::default().fg(Color::Yellow),
         )));
     }
@@ -1064,7 +1131,19 @@ fn render_status_bar(
     ctx_mgr: &ContextManager,
     diff_view: &DiffViewState,
     theme: &crate::config::Theme,
+    model: &Model,
 ) {
+    // When in a special state (rebasing/merging/cherry-picking), show those options prominently
+    let state_hints = if model.is_rebasing {
+        Some("m: continue/abort/skip rebase")
+    } else if model.is_merging {
+        Some("m: continue/abort merge")
+    } else if model.is_cherry_picking {
+        Some("m: continue/abort cherry-pick")
+    } else {
+        None
+    };
+
     let context_hints = match ctx_mgr.active() {
         ContextId::Files => "c: commit | a: stage all | <space>: toggle | d: discard | e: edit | o: open",
         ContextId::Branches => "<space>: checkout | n: new | d: delete | M: merge | r: rebase",
@@ -1090,13 +1169,19 @@ fn render_status_bar(
         String::new()
     };
 
-    let bar = Paragraph::new(Span::styled(
+    let bar_text = if let Some(state) = state_hints {
+        format!(
+            " {} | {} | q: quit | tab/1-5: panels | j/k: nav{}",
+            state, context_hints, scroll_info
+        )
+    } else {
         format!(
             " {} | q: quit | tab/1-5: panels | j/k: nav{}",
             context_hints, scroll_info
-        ),
-        theme.status_bar,
-    ));
+        )
+    };
+
+    let bar = Paragraph::new(Span::styled(bar_text, theme.status_bar));
     frame.render_widget(bar, rect);
 }
 
@@ -1769,6 +1854,170 @@ pub fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_f
                 Span::styled(": search  ", Style::default().fg(Color::DarkGray)),
                 Span::styled("esc", Style::default().fg(Color::Yellow)),
                 Span::styled(": close", Style::default().fg(Color::DarkGray)),
+            ]);
+            frame.render_widget(Paragraph::new(hint), hint_area);
+        }
+        PopupState::RefPicker {
+            title,
+            items,
+            selected,
+            search_textarea,
+            scroll_offset,
+            ..
+        } => {
+            let search = search_textarea.lines().join("");
+            let search_lower = search.to_lowercase();
+
+            // All items are always shown (no filtering) — typing jumps to match
+            // Group by category for display
+            let mut display: Vec<(bool, String, String)> = Vec::new(); // (is_header, label, value)
+            let mut last_cat = String::new();
+            for item in items.iter() {
+                if item.category != last_cat {
+                    display.push((true, item.category.clone(), String::new()));
+                    last_cat = item.category.clone();
+                }
+                display.push((false, item.label.clone(), item.value.clone()));
+            }
+
+            let popup_width = (area.width * 70 / 100).min(72).max(36);
+            // Fixed max height — always scrollable for consistency
+            let max_popup = (area.height * 60 / 100).max(10);
+            let popup_height = max_popup.min(area.height.saturating_sub(4));
+            let x = (area.width.saturating_sub(popup_width)) / 2;
+            let y = (area.height.saturating_sub(popup_height)) / 2;
+            let popup_rect = Rect::new(x, y, popup_width, popup_height);
+            frame.render_widget(Clear, popup_rect);
+
+            let block = Block::default()
+                .title(format!(" {} ", title))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan));
+            frame.render_widget(block, popup_rect);
+
+            let inner = popup_rect.inner(ratatui::layout::Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
+            if inner.height < 3 {
+                return;
+            }
+
+            // Search bar
+            let prefix_width = 2u16;
+            let prefix_rect = Rect::new(inner.x, inner.y, prefix_width, 1);
+            let prefix_style = if search.is_empty() {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::Yellow)
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled("  ", prefix_style)),
+                prefix_rect,
+            );
+            let ta_width = inner.width.saturating_sub(prefix_width);
+            let ta_rect = Rect::new(inner.x + prefix_width, inner.y, ta_width, 1);
+            frame.render_widget(&*search_textarea, ta_rect);
+
+            // Separator
+            let sep_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+            let sep = "─".repeat(inner.width as usize);
+            frame.render_widget(
+                Paragraph::new(Span::styled(sep, Style::default().fg(Color::DarkGray))),
+                sep_area,
+            );
+
+            // Content area
+            let list_start = inner.y + 2;
+            let list_height = inner.height.saturating_sub(3) as usize;
+            let list_area = Rect::new(inner.x, list_start, inner.width, list_height as u16);
+
+            let max_scroll = display.len().saturating_sub(list_height);
+            let so = *scroll_offset;
+            let effective_scroll = if so > max_scroll { max_scroll } else { so };
+
+            let visible_display: Vec<&(bool, String, String)> = display
+                .iter()
+                .skip(effective_scroll)
+                .take(list_height)
+                .collect();
+
+            let mut entry_idx = 0usize;
+            for (is_header, _, _) in display.iter().take(effective_scroll) {
+                if !is_header {
+                    entry_idx += 1;
+                }
+            }
+
+            let mut list_items: Vec<ListItem> = Vec::new();
+            for (is_header, label, _value) in visible_display {
+                if *is_header {
+                    let line = Line::from(vec![Span::styled(
+                        format!(" {} ", label),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )]);
+                    list_items.push(ListItem::new(line));
+                } else {
+                    let is_selected = entry_idx == *selected;
+                    entry_idx += 1;
+
+                    let base_fg = if is_selected { Color::White } else { Color::Gray };
+                    let highlight_fg = Color::Yellow;
+
+                    // Build spans with search match highlighting
+                    let mut spans = vec![Span::styled("  ", Style::default().fg(base_fg))];
+                    if !search_lower.is_empty() {
+                        let label_lower = label.to_lowercase();
+                        if let Some(pos) = label_lower.find(&search_lower) {
+                            let before = &label[..pos];
+                            let matched = &label[pos..pos + search_lower.len()];
+                            let after = &label[pos + search_lower.len()..];
+                            if !before.is_empty() {
+                                spans.push(Span::styled(before.to_string(), Style::default().fg(base_fg)));
+                            }
+                            let match_style = Style::default().fg(highlight_fg).add_modifier(Modifier::BOLD);
+                            spans.push(Span::styled(matched.to_string(), match_style));
+                            if !after.is_empty() {
+                                spans.push(Span::styled(after.to_string(), Style::default().fg(base_fg)));
+                            }
+                        } else {
+                            spans.push(Span::styled(label.clone(), Style::default().fg(base_fg)));
+                        }
+                    } else {
+                        let style = if is_selected {
+                            Style::default().fg(base_fg).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(base_fg)
+                        };
+                        spans.push(Span::styled(label.clone(), style));
+                    }
+
+                    let line = Line::from(spans);
+
+                    if is_selected {
+                        list_items.push(ListItem::new(line).style(Style::default().bg(Color::DarkGray)));
+                    } else {
+                        list_items.push(ListItem::new(line));
+                    }
+                }
+            }
+
+            let list = List::new(list_items);
+            frame.render_widget(list, list_area);
+
+            // Hint bar at bottom
+            let hint_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+            let hint = Line::from(vec![
+                Span::styled(" ↑↓", Style::default().fg(Color::Yellow)),
+                Span::styled(": navigate  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("type", Style::default().fg(Color::Yellow)),
+                Span::styled(": jump to  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("enter", Style::default().fg(Color::Yellow)),
+                Span::styled(": select  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("esc", Style::default().fg(Color::Yellow)),
+                Span::styled(": cancel", Style::default().fg(Color::DarkGray)),
             ]);
             frame.render_widget(Paragraph::new(hint), hint_area);
         }

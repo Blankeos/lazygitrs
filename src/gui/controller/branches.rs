@@ -161,20 +161,139 @@ fn merge_branch(gui: &mut Gui) -> Result<()> {
 fn rebase_branch(gui: &mut Gui) -> Result<()> {
     let selected = gui.context_mgr.selected_active();
     let model = gui.model.lock().unwrap();
+    let current_branch = model.head_branch_name.clone();
     if let Some(branch) = model.branches.get(selected) {
         let name = branch.name.clone();
+        let is_same_branch = name == current_branch;
+        let name_for_simple = name.clone();
+        let name_for_interactive = name.clone();
+        let name_for_base = name.clone();
         drop(model);
 
-        gui.popup = PopupState::Confirm {
-            title: "Rebase".to_string(),
-            message: format!("Rebase onto '{}'?", name),
-            on_confirm: Box::new(move |gui| {
-                gui.git.rebase_branch(&name)?;
-                gui.needs_refresh = true;
-                Ok(())
-            }),
+        let items = vec![
+            MenuItem {
+                label: format!("Simple rebase onto '{}'", name_for_simple),
+                description: if is_same_branch { "Already on this branch".to_string() } else { String::new() },
+                key: Some("s".to_string()),
+                action: if is_same_branch { None } else { Some(Box::new(move |gui| {
+                    gui.git.rebase_branch(&name_for_simple)?;
+                    gui.needs_refresh = true;
+                    Ok(())
+                })) },
+            },
+            MenuItem {
+                label: format!("Interactive rebase onto '{}'", name_for_interactive),
+                description: if is_same_branch { "Already on this branch".to_string() } else { String::new() },
+                key: Some("i".to_string()),
+                action: if is_same_branch { None } else { Some(Box::new(move |gui| {
+                    enter_interactive_rebase_onto(gui, &name_for_interactive)?;
+                    Ok(())
+                })) },
+            },
+            MenuItem {
+                label: format!("Rebase onto base branch ({})", name_for_base),
+                description: String::new(),
+                key: Some("b".to_string()),
+                action: Some(Box::new(move |gui| {
+                    gui.git.rebase_branch(&name_for_base)?;
+                    gui.needs_refresh = true;
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Cancel".to_string(),
+                description: String::new(),
+                key: None,
+                action: Some(Box::new(|_gui| Ok(()))),
+            },
+        ];
+
+        gui.popup = PopupState::Menu {
+            title: format!("Rebase '{}'", current_branch),
+            items,
+            selected: 0,
         };
     }
+    Ok(())
+}
+
+/// Enter interactive rebase mode onto a specific branch/ref.
+pub fn enter_interactive_rebase_onto(gui: &mut Gui, onto_ref: &str) -> Result<()> {
+    // Resolve the ref to a commit hash
+    let base_hash = gui.git.resolve_ref(onto_ref)?;
+
+    let model = gui.model.lock().unwrap();
+    let branch_name = model.head_branch_name.clone();
+
+    // Find the base commit in the model
+    let base_commit = model.commits.iter().find(|c| c.hash == base_hash).cloned();
+
+    // Get commits to rebase
+    let rebase_hashes = match gui.git.rebase_commit_range(&base_hash) {
+        Ok(h) => h,
+        Err(e) => {
+            gui.popup = PopupState::Message {
+                title: "Interactive rebase".to_string(),
+                message: format!("Failed to determine rebase range: {}", e),
+                kind: crate::gui::popup::MessageKind::Error,
+            };
+            drop(model);
+            return Ok(());
+        }
+    };
+
+    if rebase_hashes.is_empty() {
+        gui.popup = PopupState::Message {
+            title: "Interactive rebase".to_string(),
+            message: "No commits to rebase.".to_string(),
+            kind: crate::gui::popup::MessageKind::Error,
+        };
+        drop(model);
+        return Ok(());
+    }
+
+    let commits_to_rebase: Vec<_> = rebase_hashes
+        .iter()
+        .filter_map(|hash| model.commits.iter().find(|c| c.hash == *hash))
+        .cloned()
+        .collect();
+
+    if commits_to_rebase.is_empty() {
+        gui.popup = PopupState::Message {
+            title: "Interactive rebase".to_string(),
+            message: "Commits not found in current view.".to_string(),
+            kind: crate::gui::popup::MessageKind::Error,
+        };
+        drop(model);
+        return Ok(());
+    }
+
+    // Build a base commit — use model commit if available, otherwise create a minimal one
+    let base = match base_commit {
+        Some(c) => c,
+        None => {
+            // Base commit might not be in the loaded commits list — create a minimal one
+            let msg = gui.git.commit_subject(&base_hash).unwrap_or_default();
+            use crate::model::commit::{CommitStatus, Divergence};
+            crate::model::Commit {
+                hash: base_hash.clone(),
+                name: msg,
+                status: CommitStatus::Pushed,
+                action: String::new(),
+                tags: Vec::<String>::new(),
+                refs: Vec::<String>::new(),
+                extra_info: String::new(),
+                author_name: String::new(),
+                author_email: String::new(),
+                unix_timestamp: 0,
+                parents: Vec::new(),
+                divergence: Divergence::None,
+            }
+        }
+    };
+
+    gui.rebase_mode.enter(branch_name, &base, &commits_to_rebase);
+    drop(model);
     Ok(())
 }
 

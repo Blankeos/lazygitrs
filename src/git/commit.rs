@@ -22,8 +22,10 @@ impl GitCommands {
         for b in branches {
             cmd = cmd.arg(b);
         }
+        if limit > 0 {
+            cmd = cmd.arg(&format!("--max-count={}", limit));
+        }
         cmd = cmd
-            .arg(&format!("--max-count={}", limit))
             .arg(&format!("--format={}", format))
             .arg("--no-show-signature")
             .arg("--topo-order");
@@ -92,8 +94,10 @@ impl GitCommands {
         if all {
             cmd = cmd.arg("--all");
         }
+        if limit > 0 {
+            cmd = cmd.arg(&format!("--max-count={}", limit));
+        }
         cmd = cmd
-            .arg(&format!("--max-count={}", limit))
             .arg(&format!("--format={}", format))
             .arg("--no-show-signature")
             .arg("--topo-order");

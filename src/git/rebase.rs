@@ -24,6 +24,30 @@ impl RebaseAction {
             Self::Drop => "drop",
         }
     }
+
+    /// Cycle to the next action: Pick → Reword → Edit → Squash → Fixup → Drop → Pick.
+    pub fn next(&self) -> Self {
+        match self {
+            Self::Pick => Self::Reword,
+            Self::Reword => Self::Edit,
+            Self::Edit => Self::Squash,
+            Self::Squash => Self::Fixup,
+            Self::Fixup => Self::Drop,
+            Self::Drop => Self::Pick,
+        }
+    }
+
+    /// Cycle to the previous action.
+    pub fn prev(&self) -> Self {
+        match self {
+            Self::Pick => Self::Drop,
+            Self::Reword => Self::Pick,
+            Self::Edit => Self::Reword,
+            Self::Squash => Self::Edit,
+            Self::Fixup => Self::Squash,
+            Self::Drop => Self::Fixup,
+        }
+    }
 }
 
 impl GitCommands {
@@ -156,6 +180,60 @@ impl GitCommands {
             .args(&["rebase", "--skip"])
             .run_expecting_success()?;
         Ok(())
+    }
+
+    /// Interactive rebase with a full todo list: apply multiple actions in one shot.
+    /// `actions` must be in rebase-todo order (oldest commit first, newest last).
+    /// Each entry is (commit_hash, action).
+    pub fn rebase_interactive_batch(
+        &self,
+        base_hash: &str,
+        actions: &[(String, RebaseAction)],
+    ) -> Result<()> {
+        // Build the replacement todo content.
+        // Each line: "<action> <short_hash>"
+        // Git will match the short hash to the full commit in the todo list.
+        let mut todo_lines = Vec::new();
+        for (hash, action) in actions {
+            let short = &hash[..7.min(hash.len())];
+            todo_lines.push(format!("{} {}", action.as_str(), short));
+        }
+        let todo_content = todo_lines.join("\n");
+
+        // The sequence editor script replaces the todo file with our content.
+        // Using printf for portability (avoids echo -e differences across platforms).
+        let editor_script = format!(
+            "printf '{}\\n' > \"$1\"",
+            todo_content.replace('\'', "'\\''")
+        );
+
+        self.git()
+            .args(&["rebase", "-i", "--autostash", base_hash])
+            .env("GIT_SEQUENCE_EDITOR", &editor_script)
+            // Prevent git from opening an interactive editor for reword/edit
+            // actions. `true` exits 0 without modifying COMMIT_EDITMSG, so
+            // reword keeps the original message (reword message editing is
+            // handled in the TUI before execution).
+            .env("GIT_EDITOR", "true")
+            .run_expecting_success()?;
+        Ok(())
+    }
+
+    /// Get the list of commit hashes that would be rebased when running
+    /// `git rebase -i <base>`. Returns hashes in newest-first order.
+    pub fn rebase_commit_range(&self, base_hash: &str) -> Result<Vec<String>> {
+        let result = self
+            .git()
+            .args(&["rev-list", "--reverse", &format!("{}..HEAD", base_hash)])
+            .run_expecting_success()?;
+        let hashes: Vec<String> = result
+            .stdout_trimmed()
+            .lines()
+            .rev() // reverse to newest-first for display
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        Ok(hashes)
     }
 
     /// Get the parent hash of a commit.

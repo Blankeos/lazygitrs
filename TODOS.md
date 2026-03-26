@@ -109,3 +109,16 @@
     - You can obviously exit and go back to the default lazygit UI.
     - You can press tab to cycle focus between the A and B comboboxes, Commit Fles, and diff exploration view.
     - Commit Files and Diff Exploration View actually already exist if you notice. So as expected, they'd have the same hotkeys sort of. Especially diff exploration view like `[]` `{}`.
+
+- [ ] Pressing up or down in the commit messages, cycles through previously submitted ones. Kinda like the up or down key in the commandline.
+- [ ] In '3 Branches' git checkout -.
+- [ ] In '3 Branches' git checkout by name. Pressing 'c'
+- [ ] In '3 Branches'. pressing d, opens a 'Delete branch ?' dialog, and I can see options:
+  - c Delete local branch
+  - r Delete remote branch
+  - b Delete local and remote branch
+  - And when I press 'c' to delete local branch, it asks me, 'branch' is not fully merged. Are you sure you want to delete it?
+  - It also seems to be aware of the remote options so it strikethroughs if the remote is not there.. And the delete local and remote one.
+- [ ] In 'Files' when File Tree view is toggled on, in the original lazygit, there's a ▼ at the very root. I want that for our Files and Commit Files too.
+- [ ] In 'Files' show the diff for folders. We already have this for 'Commits' it shows a multifile diff preview.
+- [ ] In 'Files', pressing `i` shows a dialog, right now it immediately applies it.

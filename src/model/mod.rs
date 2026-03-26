@@ -50,6 +50,8 @@ pub struct Model {
     pub is_merging: bool,
     pub is_cherry_picking: bool,
     pub is_bisecting: bool,
+    /// Short hash of the commit being rebased onto (from .git/rebase-merge/onto).
+    pub rebase_onto_hash: String,
 }
 
 #[derive(Debug, Clone)]

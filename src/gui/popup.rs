@@ -59,6 +59,15 @@ pub enum PopupState {
         search_textarea: TextArea<'static>,
         scroll_offset: usize,
     },
+    /// Searchable ref picker (branches, tags, commits) with a callback.
+    RefPicker {
+        title: String,
+        items: Vec<RefPickerItem>,
+        selected: usize,
+        search_textarea: TextArea<'static>,
+        scroll_offset: usize,
+        on_confirm: RefPickerAction,
+    },
 }
 
 pub type ChecklistAction = Box<dyn FnOnce(&mut Gui, Vec<String>) -> Result<()>>;
@@ -111,4 +120,16 @@ pub struct HelpSection {
 pub struct HelpEntry {
     pub key: String,
     pub description: String,
+}
+
+pub type RefPickerAction = Box<dyn FnOnce(&mut Gui, &str) -> Result<()>>;
+
+#[derive(Debug, Clone)]
+pub struct RefPickerItem {
+    /// The ref name or hash to pass to the callback.
+    pub value: String,
+    /// Display label (e.g. branch name, tag name, short hash + message).
+    pub label: String,
+    /// Section/category (e.g. "Branches", "Tags").
+    pub category: String,
 }
