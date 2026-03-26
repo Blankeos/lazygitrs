@@ -29,6 +29,7 @@ use crate::pager::side_by_side::{DiffPanel, DiffPanelLayout, DiffViewState, Text
 use self::context::{ContextId, ContextManager, SideWindow};
 use self::layout::LayoutState;
 use self::popup::{HelpEntry, HelpSection};
+use self::modes::diff_mode::DiffModeState;
 use self::modes::patch_building::PatchBuildingState;
 use self::popup::{MessageKind, PopupState};
 
@@ -101,6 +102,8 @@ pub struct Gui {
     undo_reflog_idx: usize,
     /// Patch building mode state.
     pub patch_building: PatchBuildingState,
+    /// Diff/compare mode state.
+    pub diff_mode: DiffModeState,
     /// Stashed commit editor popup while commit menu or AI generation is shown.
     pending_commit_popup: Option<PopupState>,
     /// Search bar textarea (1-line editor for search input).
@@ -204,6 +207,7 @@ impl Gui {
             remote_op_tx,
             undo_reflog_idx: 0,
             patch_building: PatchBuildingState::new(),
+            diff_mode: DiffModeState::new(),
             pending_commit_popup: None,
             search_textarea: None,
             last_refresh_at: Instant::now(),
@@ -304,48 +308,62 @@ impl Gui {
 
             // Render
             terminal.draw(|frame| {
-                let model = self.model.lock().unwrap();
-                let search_state = if self.search_active || !self.search_query.is_empty() {
-                    Some((
-                        self.search_query.as_str(),
-                        self.search_matches.len(),
-                        self.search_match_idx,
-                    ))
+                if self.diff_mode.active {
+                    let theme = self.config.user_config.theme();
+                    presentation::diff_mode::render(
+                        frame,
+                        &self.diff_mode,
+                        &mut self.diff_view,
+                        &theme,
+                    );
+                    // Render popup overlay on top of diff mode (for ? help, errors, etc.)
+                    if self.popup != PopupState::None {
+                        views::render_popup(frame, &self.popup, frame.area(), self.spinner_frame);
+                    }
                 } else {
-                    None
-                };
-                let cmd_log = self.command_log.lock().unwrap();
-                views::render(
-                    frame,
-                    &model,
-                    &self.context_mgr,
-                    &self.layout,
-                    &self.popup,
-                    &self.config,
-                    &mut self.diff_view,
-                    self.screen_mode,
-                    self.show_file_tree,
-                    &self.file_tree_nodes,
-                    &self.collapsed_dirs,
-                    self.diff_focused,
-                    search_state,
-                    self.search_textarea.as_ref(),
-                    &cmd_log,
-                    self.show_command_log,
-                    &self.commit_branch_filter,
-                    self.show_commit_file_tree,
-                    &self.commit_file_tree_nodes,
-                    &self.commit_files_collapsed_dirs,
-                    &self.commit_files_hash,
-                    &self.commit_files_message,
-                    &self.branch_commits_name,
-                    &self.remote_branches_name,
-                    self.spinner_frame,
-                    self.remote_op_label.as_deref(),
-                    self.remote_op_success_at
-                        .map(|t| t.elapsed() < std::time::Duration::from_secs(5))
-                        .unwrap_or(false),
-                );
+                    let model = self.model.lock().unwrap();
+                    let search_state = if self.search_active || !self.search_query.is_empty() {
+                        Some((
+                            self.search_query.as_str(),
+                            self.search_matches.len(),
+                            self.search_match_idx,
+                        ))
+                    } else {
+                        None
+                    };
+                    let cmd_log = self.command_log.lock().unwrap();
+                    views::render(
+                        frame,
+                        &model,
+                        &self.context_mgr,
+                        &self.layout,
+                        &self.popup,
+                        &self.config,
+                        &mut self.diff_view,
+                        self.screen_mode,
+                        self.show_file_tree,
+                        &self.file_tree_nodes,
+                        &self.collapsed_dirs,
+                        self.diff_focused,
+                        search_state,
+                        self.search_textarea.as_ref(),
+                        &cmd_log,
+                        self.show_command_log,
+                        &self.commit_branch_filter,
+                        self.show_commit_file_tree,
+                        &self.commit_file_tree_nodes,
+                        &self.commit_files_collapsed_dirs,
+                        &self.commit_files_hash,
+                        &self.commit_files_message,
+                        &self.branch_commits_name,
+                        &self.remote_branches_name,
+                        self.spinner_frame,
+                        self.remote_op_label.as_deref(),
+                        self.remote_op_success_at
+                            .map(|t| t.elapsed() < std::time::Duration::from_secs(5))
+                            .unwrap_or(false),
+                    );
+                }
             })?;
 
             // Handle events
@@ -530,6 +548,18 @@ impl Gui {
 
     /// Request diff loading on a background thread if selection changed.
     fn maybe_request_diff(&mut self) {
+        // Diff mode has its own diff loading
+        if self.diff_mode.active {
+            let diff_key = format!("diffmode:{}", self.diff_mode.diff_files_selected);
+            if diff_key == self.last_diff_key && !self.needs_diff_refresh {
+                return;
+            }
+            self.last_diff_key = diff_key;
+            self.needs_diff_refresh = false;
+            controller::diff_mode::maybe_request_diff(self);
+            return;
+        }
+
         let active = self.context_mgr.active();
         let selected = self.context_mgr.selected_active();
         let diff_key = format!("{:?}:{}", active, selected);
@@ -767,6 +797,11 @@ impl Gui {
             return self.handle_search_key(key);
         }
 
+        // Diff mode takes priority over normal UI
+        if self.diff_mode.active {
+            return controller::diff_mode::handle_key(self, key);
+        }
+
         let keybindings = &self.config.user_config.keybinding;
 
         // When diff panel is focused, handle diff-specific keys
@@ -941,6 +976,13 @@ impl Gui {
         }
         if matches_key(key, &keybindings.universal.prev_screen_mode) {
             self.prev_screen_mode();
+            return Ok(());
+        }
+
+        // Diff/Compare mode (W)
+        if key.code == KeyCode::Char('W') {
+            self.diff_mode.enter();
+            self.diff_view = DiffViewState::new();
             return Ok(());
         }
 
@@ -1189,7 +1231,7 @@ impl Gui {
         Ok(())
     }
 
-    fn handle_popup_key(&mut self, key: KeyEvent) -> Result<()> {
+    pub(crate) fn handle_popup_key(&mut self, key: KeyEvent) -> Result<()> {
         match &self.popup {
             PopupState::Confirm { .. } => {
                 if key.code == KeyCode::Char('y') || key.code == KeyCode::Enter {
@@ -1565,6 +1607,7 @@ impl Gui {
                 HelpEntry { key: "{/}".into(), description: "Previous/next hunk".into() },
                 HelpEntry { key: "[/]".into(), description: "Toggle old/new only view".into() },
                 HelpEntry { key: ";".into(), description: "Toggle command log".into() },
+                HelpEntry { key: "W".into(), description: "Compare / Diff mode".into() },
                 HelpEntry { key: "1-5".into(), description: "Jump to panel".into() },
                 HelpEntry { key: "?".into(), description: "Show this help".into() },
             ],
@@ -2242,6 +2285,12 @@ impl Gui {
             return;
         }
 
+        // Diff mode has its own mouse handling
+        if self.diff_mode.active {
+            self.handle_diff_mode_mouse(mouse);
+            return;
+        }
+
         // Help popup intercepts mouse scroll
         if let PopupState::Help { sections, scroll_offset, search, .. } = &mut self.popup {
             // Compute total display rows so we can clamp scroll
@@ -2364,6 +2413,180 @@ impl Gui {
             }
             MouseEventKind::ScrollRight => {
                 if self.diff_focused || self.is_in_main_panel(mouse.column) {
+                    self.diff_view.scroll_right(4);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_diff_mode_mouse(&mut self, mouse: MouseEvent) {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
+        use ratatui::layout::{Constraint, Direction, Layout, Rect};
+        use self::modes::diff_mode::DiffModeFocus;
+
+        // Help popup intercepts mouse scroll
+        if let PopupState::Help { sections, scroll_offset, search, .. } = &mut self.popup {
+            let search_lower = search.to_lowercase();
+            let has_search = !search_lower.is_empty();
+            let total_rows: usize = sections.iter().map(|s| {
+                let visible = if has_search {
+                    s.entries.iter().filter(|e| {
+                        e.key.to_lowercase().contains(&search_lower)
+                            || e.description.to_lowercase().contains(&search_lower)
+                    }).count()
+                } else {
+                    s.entries.len()
+                };
+                if visible > 0 { visible + 1 } else { 0 }
+            }).sum();
+
+            match mouse.kind {
+                MouseEventKind::ScrollUp => { *scroll_offset = scroll_offset.saturating_sub(3); }
+                MouseEventKind::ScrollDown => { *scroll_offset = (*scroll_offset + 3).min(total_rows.saturating_sub(1)); }
+                _ => {}
+            }
+            return;
+        }
+
+        let area = Rect::new(0, 0, self.layout.width, self.layout.height);
+
+        // Replicate the diff mode layout to determine regions
+        let outer = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(area);
+
+        let content = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(33), Constraint::Percentage(67)])
+            .split(outer[0]);
+
+        let sidebar = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Min(1),
+            ])
+            .split(content[0]);
+
+        let selector_a_rect = sidebar[0];
+        let selector_b_rect = sidebar[1];
+        let files_rect = sidebar[2];
+        let diff_rect = content[1];
+
+        let col = mouse.column;
+        let row = mouse.row;
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Check if click is in the diff panel — start text selection
+                if rect_contains(diff_rect, col, row) && !self.diff_view.is_empty() {
+                    let pl = DiffPanelLayout::compute(diff_rect, &self.diff_view);
+                    if let Some(panel) = pl.panel_at_x(col) {
+                        self.diff_view.selection = Some(TextSelection {
+                            panel,
+                            start_col: col,
+                            start_row: row,
+                            end_col: col,
+                            end_row: row,
+                            dragging: true,
+                            text: String::new(),
+                        });
+                    } else {
+                        self.diff_view.selection = None;
+                    }
+                    self.diff_mode.focus = DiffModeFocus::DiffExploration;
+                } else {
+                    self.diff_view.selection = None;
+
+                    // Click on panels to switch focus
+                    if rect_contains(selector_a_rect, col, row) {
+                        self.diff_mode.focus = DiffModeFocus::SelectorA;
+                    } else if rect_contains(selector_b_rect, col, row) {
+                        self.diff_mode.focus = DiffModeFocus::SelectorB;
+                    } else if rect_contains(files_rect, col, row) {
+                        self.diff_mode.focus = DiffModeFocus::CommitFiles;
+                        // Click to select a file
+                        let inner_y = row.saturating_sub(files_rect.y + 1);
+                        let len = self.diff_mode.visible_files_len();
+                        let visible_height = files_rect.height.saturating_sub(2) as usize;
+                        let scroll_offset = if self.diff_mode.diff_files_selected >= visible_height {
+                            self.diff_mode.diff_files_selected - visible_height + 1
+                        } else {
+                            0
+                        };
+                        let clicked_idx = scroll_offset + inner_y as usize;
+                        if clicked_idx < len {
+                            self.diff_mode.diff_files_selected = clicked_idx;
+                            self.needs_diff_refresh = true;
+                        }
+                    } else if rect_contains(diff_rect, col, row) {
+                        self.diff_mode.focus = DiffModeFocus::DiffExploration;
+                    }
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let pl = DiffPanelLayout::compute(diff_rect, &self.diff_view);
+                if let Some(ref mut sel) = self.diff_view.selection {
+                    if sel.dragging {
+                        let (cmin, cmax) = pl.content_range(sel.panel);
+                        let col_min = cmin.saturating_sub(5);
+                        sel.end_col = col.max(col_min).min(cmax.saturating_sub(1));
+                        sel.end_row = row
+                            .max(pl.inner_y)
+                            .min(pl.inner_end_y.saturating_sub(1));
+                    }
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(ref mut sel) = self.diff_view.selection {
+                    sel.dragging = false;
+                    if sel.start_col == sel.end_col && sel.start_row == sel.end_row {
+                        self.diff_view.selection = None;
+                    }
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if rect_contains(diff_rect, col, row) {
+                    self.diff_view.selection = None;
+                    if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                        self.diff_view.scroll_left(4);
+                    } else {
+                        self.diff_view.scroll_up(3);
+                    }
+                } else if rect_contains(files_rect, col, row) {
+                    let len = self.diff_mode.visible_files_len();
+                    if len > 0 {
+                        self.diff_mode.diff_files_selected = self.diff_mode.diff_files_selected.saturating_sub(3);
+                        self.needs_diff_refresh = true;
+                    }
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if rect_contains(diff_rect, col, row) {
+                    self.diff_view.selection = None;
+                    if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                        self.diff_view.scroll_right(4);
+                    } else {
+                        self.diff_view.scroll_down(3);
+                    }
+                } else if rect_contains(files_rect, col, row) {
+                    let len = self.diff_mode.visible_files_len();
+                    if len > 0 {
+                        self.diff_mode.diff_files_selected = (self.diff_mode.diff_files_selected + 3).min(len - 1);
+                        self.needs_diff_refresh = true;
+                    }
+                }
+            }
+            MouseEventKind::ScrollLeft => {
+                if rect_contains(diff_rect, col, row) {
+                    self.diff_view.scroll_left(4);
+                }
+            }
+            MouseEventKind::ScrollRight => {
+                if rect_contains(diff_rect, col, row) {
                     self.diff_view.scroll_right(4);
                 }
             }
@@ -2717,6 +2940,10 @@ fn matches_key(key: KeyEvent, binding: &str) -> bool {
     } else {
         false
     }
+}
+
+fn rect_contains(r: ratatui::layout::Rect, col: u16, row: u16) -> bool {
+    col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
 }
 
 fn setup_terminal() -> Result<Term> {

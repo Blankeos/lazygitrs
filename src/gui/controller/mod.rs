@@ -4,6 +4,7 @@ pub mod branches;
 pub mod commit_files;
 pub mod commits;
 pub mod custom_commands;
+pub mod diff_mode;
 pub mod files;
 pub mod patch_building;
 pub mod reflog;

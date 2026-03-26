@@ -1,5 +1,6 @@
 pub mod branches;
 pub mod commit_files;
+pub mod diff_mode;
 pub mod commits;
 pub mod files;
 pub mod graph;

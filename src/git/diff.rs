@@ -204,6 +204,47 @@ impl GitCommands {
         }
     }
 
+    /// Get the list of files changed between two refs (for diff/compare mode).
+    pub fn diff_refs_files(&self, ref_a: &str, ref_b: &str) -> Result<Vec<crate::model::CommitFile>> {
+        let result = self
+            .git()
+            .args(&["diff", "--name-status", ref_a, ref_b])
+            .run_expecting_success()?;
+
+        let mut files = Vec::new();
+        for line in result.stdout.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let mut parts = line.splitn(2, '\t');
+            let status_str = parts.next().unwrap_or("");
+            let name = parts.next().unwrap_or("").to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let status = match status_str.chars().next() {
+                Some('A') => crate::model::FileChangeStatus::Added,
+                Some('D') => crate::model::FileChangeStatus::Deleted,
+                Some('R') => crate::model::FileChangeStatus::Renamed,
+                Some('C') => crate::model::FileChangeStatus::Copied,
+                Some('U') => crate::model::FileChangeStatus::Unmerged,
+                _ => crate::model::FileChangeStatus::Modified,
+            };
+            files.push(crate::model::CommitFile { name, status });
+        }
+        Ok(files)
+    }
+
+    /// Get the diff of a single file between two refs (for diff/compare mode).
+    pub fn diff_refs_file(&self, ref_a: &str, ref_b: &str, path: &str) -> Result<String> {
+        let result = self
+            .git()
+            .args(&["diff", "--color=never", ref_a, ref_b, "--", path])
+            .run_expecting_success()?;
+        Ok(result.stdout)
+    }
+
     /// Get the staged content of a file.
     pub fn file_content_staged(&self, path: &str) -> Result<String> {
         let result = self

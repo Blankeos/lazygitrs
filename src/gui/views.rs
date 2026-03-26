@@ -1098,7 +1098,7 @@ fn render_status_bar(
 
 /// Render mouse text selection highlight overlay and copy tooltip on the diff view.
 /// `panel_rect` is the main diff panel Rect — selection is rendered only within the selected side.
-fn render_selection_overlay(frame: &mut Frame, diff_view: &mut DiffViewState, panel_rect: Rect) {
+pub fn render_selection_overlay(frame: &mut Frame, diff_view: &mut DiffViewState, panel_rect: Rect) {
     use crate::pager::ChangeType;
 
     let selection = match &diff_view.selection {
@@ -1231,7 +1231,7 @@ fn render_selection_overlay(frame: &mut Frame, diff_view: &mut DiffViewState, pa
     }
 }
 
-fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame: usize) {
+pub fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame: usize) {
     let popup_width = (area.width * 60 / 100).min(60).max(30);
     let x = (area.width.saturating_sub(popup_width)) / 2;
 

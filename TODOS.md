@@ -73,6 +73,8 @@
 - [ ] Config-parity, make sure everything works.
 - [ ] Hot reloading of config (I can edit the config on the fly and the config is still read without restarting lazygit)
 - [x] Bug: in the diff exploration view, because of the 10s interval I think the position of which I scrolled at also seems to get reset. Ideally not. Just like how the [new] and [old] -- it used to have this bug but I fixed it.
+- [ ] Search feature inside the diff exploration view is much needed. Grep for all in diff_mode is good too.
+- [ ] In `?` help dialog, use tui-textarea so I can erase the input using opt-backspace.
 
 ## Stuff I wanna do differently
 
@@ -84,7 +86,7 @@
       - The node-like colors w/ indicators on the left side are great to have.
       - I can SEE the commit it'll rebase ontop of i.e. 'Hello GitLens' in this example.
       - I can see a 'Start Rebase' and an 'Abort' action.
-- [ ] Diff Mode / Compare Mode
+- [x] Diff Mode / Compare Mode
   - Diff mode can be opened w/ a commad palette or when focusing on either BRANCH or COMMITS tab.
   - First trigger of it opening will open its own sort of screen that looks like:
 
