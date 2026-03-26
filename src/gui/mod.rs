@@ -978,8 +978,20 @@ impl Gui {
             let is_cherry_picking = model.is_cherry_picking;
             drop(model);
 
-            if is_rebasing || is_merging || is_cherry_picking {
-                return self.show_rebase_options_menu(is_rebasing, is_merging, is_cherry_picking);
+            // If rebasing, re-enter the interactive rebase view
+            if is_rebasing {
+                if !self.rebase_mode.active {
+                    if let Some(mut progress) = self.git.parse_rebase_progress() {
+                        self.git.hydrate_todo_entries(&mut progress.done_entries);
+                        self.git.hydrate_todo_entries(&mut progress.todo_entries);
+                        self.rebase_mode.enter_in_progress(&progress);
+                    }
+                }
+                return Ok(());
+            }
+
+            if is_merging || is_cherry_picking {
+                return self.show_rebase_options_menu(false, is_merging, is_cherry_picking);
             }
         }
 
@@ -3139,6 +3151,39 @@ impl Gui {
                 );
                 self.context_mgr.commit_files_list_len_override =
                     Some(self.commit_file_tree_nodes.len());
+            }
+        }
+
+        let is_rebasing = model.is_rebasing;
+        drop(model);
+
+        // Auto-enter rebase InProgress mode when a rebase is detected on disk
+        // and we're not already in rebase mode.
+        if is_rebasing && !self.rebase_mode.active {
+            if let Some(mut progress) = self.git.parse_rebase_progress() {
+                // Hydrate entries with author/timestamp from git log
+                self.git.hydrate_todo_entries(&mut progress.done_entries);
+                self.git.hydrate_todo_entries(&mut progress.todo_entries);
+                self.rebase_mode.enter_in_progress(&progress);
+            }
+        }
+        // If rebase mode was active but the rebase completed, exit and show success.
+        if !is_rebasing && self.rebase_mode.active {
+            use crate::gui::modes::rebase_mode::RebasePhase;
+            if self.rebase_mode.phase == RebasePhase::InProgress {
+                let branch = self.rebase_mode.branch_name.clone();
+                let count = self.rebase_mode.total_count;
+                self.rebase_mode.exit();
+                self.popup = crate::gui::popup::PopupState::Message {
+                    title: "Rebase complete".to_string(),
+                    message: format!(
+                        "Successfully rebased '{}' ({} commit{}).",
+                        branch,
+                        count,
+                        if count == 1 { "" } else { "s" },
+                    ),
+                    kind: crate::gui::popup::MessageKind::Info,
+                };
             }
         }
 

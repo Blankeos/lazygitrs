@@ -76,6 +76,7 @@ impl GitCommands {
     pub fn continue_rebase(&self) -> Result<()> {
         self.git()
             .args(&["rebase", "--continue"])
+            .env("GIT_EDITOR", "true")
             .run_expecting_success()?;
         Ok(())
     }

@@ -122,3 +122,4 @@
 - [ ] In 'Files' when File Tree view is toggled on, in the original lazygit, there's a ▼ at the very root. I want that for our Files and Commit Files too.
 - [ ] In 'Files' show the diff for folders. We already have this for 'Commits' it shows a multifile diff preview.
 - [ ] In 'Files', pressing `i` shows a dialog, right now it immediately applies it.
+- [ ] In 'Branches', whichever is the 'checked-out' branch. Put it at the first of the list.
