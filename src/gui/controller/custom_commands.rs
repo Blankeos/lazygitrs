@@ -164,6 +164,7 @@ fn context_id_to_name(ctx: ContextId) -> &'static str {
         ContextId::StashFiles => "stashFiles",
         ContextId::BranchCommits => "branchCommits",
         ContextId::BranchCommitFiles => "branchCommitFiles",
+        ContextId::RemoteBranches => "remoteBranches",
         ContextId::Staging => "staging",
     }
 }

@@ -195,12 +195,23 @@ impl Default for MergingConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OsConfig {
-    #[serde(rename = "editCommand")]
-    pub edit_command: String,
-    #[serde(rename = "editCommandTemplate")]
-    pub edit_command_template: String,
-    #[serde(rename = "openCommand")]
-    pub open_command: String,
+    /// Command template to open a file in the user's editor.
+    /// Uses `{{filename}}` as placeholder. e.g. `"zed {{filename}}"`
+    pub edit: String,
+    /// Command template to open a file at a specific line.
+    /// Uses `{{filename}}` and `{{line}}` as placeholders.
+    #[serde(rename = "editAtLine")]
+    pub edit_at_line: String,
+    /// Command template to open a file at a specific line and wait for close.
+    #[serde(rename = "editAtLineAndWait")]
+    pub edit_at_line_and_wait: String,
+    /// Command template to open a file/URL in the default program.
+    /// Uses `{{filename}}` as placeholder.
+    pub open: String,
+    /// Command template to open a directory in the editor.
+    #[serde(rename = "openDirInEditor")]
+    pub open_dir_in_editor: String,
+    /// Command to copy text to clipboard (text is piped via stdin).
     #[serde(rename = "copyToClipboardCmd")]
     pub copy_to_clipboard_cmd: String,
 }
@@ -216,11 +227,33 @@ impl Default for OsConfig {
         };
 
         Self {
-            edit_command: String::new(),
-            edit_command_template: "{{editor}} {{filename}}".to_string(),
-            open_command: open_cmd.to_string(),
+            edit: String::new(),
+            edit_at_line: String::new(),
+            edit_at_line_and_wait: String::new(),
+            open: open_cmd.to_string(),
+            open_dir_in_editor: String::new(),
             copy_to_clipboard_cmd: copy_cmd.to_string(),
         }
+    }
+}
+
+impl OsConfig {
+    /// Run a command template, replacing `{{filename}}` with the given path.
+    /// If the template is empty, returns an error.
+    pub fn run_template(template: &str, filename: &str) -> anyhow::Result<()> {
+        if template.is_empty() {
+            anyhow::bail!("No command configured");
+        }
+        let cmd_str = template.replace("{{filename}}", filename);
+        // Split into program + args, respecting the template format
+        let parts: Vec<&str> = cmd_str.split_whitespace().collect();
+        if parts.is_empty() {
+            anyhow::bail!("Empty command after template expansion");
+        }
+        std::process::Command::new(parts[0])
+            .args(&parts[1..])
+            .spawn()?;
+        Ok(())
     }
 }
 

@@ -6,6 +6,11 @@ use crate::gui::popup::{PopupState, make_textarea};
 use crate::gui::Gui;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, _keybindings: &KeybindingConfig) -> Result<()> {
+    // Switch to worktree
+    if key.code == KeyCode::Char(' ') {
+        return switch_worktree(gui);
+    }
+
     // Create new worktree
     if key.code == KeyCode::Char('n') {
         return create_worktree(gui);
@@ -16,6 +21,35 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, _keybindings: &KeybindingConfig)
         return remove_worktree(gui);
     }
 
+    Ok(())
+}
+
+fn switch_worktree(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let model = gui.model.lock().unwrap();
+    if let Some(wt) = model.worktrees.get(selected) {
+        if wt.is_current {
+            return Ok(()); // Already in this worktree
+        }
+        let path = wt.path.clone();
+        let branch = wt.branch.clone();
+        drop(model);
+
+        gui.popup = PopupState::Confirm {
+            title: "Switch worktree".to_string(),
+            message: format!("Open lazygitrs in worktree '{}' ({})?\nThis will launch a new instance.", branch, path),
+            on_confirm: Box::new(move |gui| {
+                // Spawn a new lazygitrs instance in the worktree directory
+                let exe = std::env::current_exe().unwrap_or_else(|_| "lazygitrs".into());
+                std::process::Command::new(exe)
+                    .arg("--path")
+                    .arg(&path)
+                    .spawn()?;
+                gui.should_quit = true;
+                Ok(())
+            }),
+        };
+    }
     Ok(())
 }
 

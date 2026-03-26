@@ -7,6 +7,11 @@ use crate::gui::popup::{MenuItem, PopupState, make_textarea};
 use crate::gui::Gui;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
+    // Enter: drill into remote branches
+    if key.code == KeyCode::Enter {
+        return enter_remote_branches(gui);
+    }
+
     // Fetch from selected remote
     if key.code == KeyCode::Char('f') {
         return fetch_remote(gui);
@@ -32,6 +37,27 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return show_pull_menu(gui);
     }
 
+    Ok(())
+}
+
+fn enter_remote_branches(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let model = gui.model.lock().unwrap();
+    if let Some(remote) = model.remotes.get(selected) {
+        let name = remote.name.clone();
+        let branches = remote.branches.clone();
+        drop(model);
+
+        {
+            let mut model = gui.model.lock().unwrap();
+            model.sub_remote_branches = branches;
+        }
+        gui.remote_branches_name = name;
+
+        gui.context_mgr
+            .set_active(crate::gui::context::ContextId::RemoteBranches);
+        gui.context_mgr.set_selection(0);
+    }
     Ok(())
 }
 

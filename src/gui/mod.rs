@@ -121,6 +121,8 @@ pub struct Gui {
     pub show_commit_file_tree: bool,
     /// Name of the branch/tag whose commits are being viewed in BranchCommits context.
     pub branch_commits_name: String,
+    /// Name of the remote whose branches are being viewed in RemoteBranches context.
+    pub remote_branches_name: String,
     /// Parent context to return to when pressing Esc from BranchCommits.
     pub sub_commits_parent_context: context::ContextId,
     /// Parent context to return to when pressing Esc from CommitFiles.
@@ -212,6 +214,7 @@ impl Gui {
             commit_files_collapsed_dirs: HashSet::new(),
             show_commit_file_tree: show_file_tree,
             branch_commits_name: String::new(),
+            remote_branches_name: String::new(),
             sub_commits_parent_context: context::ContextId::Branches,
             commit_files_parent_context: None,
             spinner_frame: 0,
@@ -335,6 +338,7 @@ impl Gui {
                     &self.commit_files_hash,
                     &self.commit_files_message,
                     &self.branch_commits_name,
+                    &self.remote_branches_name,
                     self.spinner_frame,
                     self.remote_op_label.as_deref(),
                     self.remote_op_success_at
@@ -806,6 +810,12 @@ impl Gui {
                     }
                     return Ok(());
                 }
+                if self.context_mgr.active() == ContextId::RemoteBranches
+                    && window == SideWindow::Branches
+                {
+                    self.context_mgr.set_active(ContextId::Remotes);
+                    return Ok(());
+                }
                 self.context_mgr.jump_to_window(window);
                 return Ok(());
             }
@@ -1038,6 +1048,9 @@ impl Gui {
             }
             ContextId::Submodules => {
                 controller::submodules::handle_key(self, key, &keybindings)?;
+            }
+            ContextId::RemoteBranches => {
+                controller::remote_branches::handle_key(self, key, &keybindings)?;
             }
             ContextId::CommitFiles | ContextId::StashFiles | ContextId::BranchCommitFiles => {
                 controller::commit_files::handle_key(self, key, &keybindings)?;
@@ -1573,11 +1586,14 @@ impl Gui {
                     HelpEntry { key: kb.files.fetch.clone(), description: "Fetch".into() },
                     HelpEntry { key: kb.files.ignore_file.clone(), description: "Ignore file".into() },
                     HelpEntry { key: "d".into(), description: "Discard changes".into() },
+                    HelpEntry { key: kb.universal.edit.clone(), description: "Open in editor".into() },
+                    HelpEntry { key: kb.universal.open_file.clone(), description: "Open in default program".into() },
                 ],
             },
             ContextId::Worktrees => HelpSection {
                 title: "Worktrees".into(),
                 entries: vec![
+                    HelpEntry { key: "<space>".into(), description: "Switch to worktree".into() },
                     HelpEntry { key: "n".into(), description: "Create worktree".into() },
                     HelpEntry { key: "d".into(), description: "Remove worktree".into() },
                 ],
@@ -1652,11 +1668,22 @@ impl Gui {
             ContextId::Remotes => HelpSection {
                 title: "Remotes".into(),
                 entries: vec![
+                    HelpEntry { key: "<enter>".into(), description: "View remote branches".into() },
                     HelpEntry { key: "f".into(), description: "Fetch from remote".into() },
                     HelpEntry { key: "n".into(), description: "Add new remote".into() },
                     HelpEntry { key: "d".into(), description: "Delete remote".into() },
                     HelpEntry { key: kb.universal.push_files.clone(), description: "Push".into() },
                     HelpEntry { key: kb.universal.pull_files.clone(), description: "Pull".into() },
+                ],
+            },
+            ContextId::RemoteBranches => HelpSection {
+                title: "Remote Branches".into(),
+                entries: vec![
+                    HelpEntry { key: "<space>".into(), description: "Checkout as local branch".into() },
+                    HelpEntry { key: kb.branches.merge_into_current_branch.clone(), description: "Merge into current".into() },
+                    HelpEntry { key: kb.branches.rebase_branch.clone(), description: "Rebase".into() },
+                    HelpEntry { key: "d".into(), description: "Delete remote branch".into() },
+                    HelpEntry { key: "<esc>".into(), description: "Back to remotes".into() },
                 ],
             },
             ContextId::Tags => HelpSection {
@@ -2118,6 +2145,13 @@ impl Gui {
                     }
                 }
             }
+            ContextId::RemoteBranches => {
+                for (i, rb) in model.sub_remote_branches.iter().enumerate() {
+                    if rb.name.to_lowercase().contains(&query) {
+                        self.search_matches.push(i);
+                    }
+                }
+            }
             ContextId::Worktrees => {
                 for (i, wt) in model.worktrees.iter().enumerate() {
                     if wt.branch.to_lowercase().contains(&query)
@@ -2472,6 +2506,15 @@ impl Gui {
             }
         }
 
+        // If we're viewing remote branches, re-load them (refresh wipes the model)
+        if self.context_mgr.active() == ContextId::RemoteBranches
+            && !self.remote_branches_name.is_empty()
+        {
+            if let Some(remote) = model.remotes.iter().find(|r| r.name == self.remote_branches_name) {
+                model.sub_remote_branches = remote.branches.clone();
+            }
+        }
+
         // If we're viewing commit/stash files, re-load them (refresh wipes the model)
         if (self.context_mgr.active() == ContextId::CommitFiles
             || self.context_mgr.active() == ContextId::StashFiles
@@ -2533,6 +2576,9 @@ impl Gui {
         }
         if self.context_mgr.active() == ContextId::BranchCommits {
             self.context_mgr.set_active(ContextId::Branches);
+        }
+        if self.context_mgr.active() == ContextId::RemoteBranches {
+            self.context_mgr.set_active(ContextId::Remotes);
         }
     }
 

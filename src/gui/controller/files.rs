@@ -80,6 +80,16 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return Ok(());
     }
 
+    // Open file in editor
+    if matches_key(key, &keybindings.universal.edit) {
+        return open_in_editor(gui);
+    }
+
+    // Open file in default program
+    if matches_key(key, &keybindings.universal.open_file) {
+        return open_in_default_program(gui);
+    }
+
     // Copy to clipboard
     if key.code == KeyCode::Char('y') {
         return copy_to_clipboard_menu(gui);
@@ -288,6 +298,43 @@ fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
         ],
         selected: 0,
     };
+    Ok(())
+}
+
+fn open_in_editor(gui: &mut Gui) -> Result<()> {
+    let Some(file_idx) = gui.selected_file_index() else {
+        return Ok(());
+    };
+    let model = gui.model.lock().unwrap();
+    if let Some(file) = model.files.get(file_idx) {
+        let rel_path = file.name.clone();
+        drop(model);
+
+        let abs_path = gui.git.repo_path().join(&rel_path).to_string_lossy().to_string();
+        let edit_template = &gui.config.user_config.os.edit;
+        if !edit_template.is_empty() {
+            crate::config::user_config::OsConfig::run_template(edit_template, &abs_path)?;
+        } else {
+            // Fallback: use $EDITOR or platform open
+            Platform::open_file(&abs_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn open_in_default_program(gui: &mut Gui) -> Result<()> {
+    let Some(file_idx) = gui.selected_file_index() else {
+        return Ok(());
+    };
+    let model = gui.model.lock().unwrap();
+    if let Some(file) = model.files.get(file_idx) {
+        let rel_path = file.name.clone();
+        drop(model);
+
+        let abs_path = gui.git.repo_path().join(&rel_path).to_string_lossy().to_string();
+        let open_template = &gui.config.user_config.os.open;
+        crate::config::user_config::OsConfig::run_template(open_template, &abs_path)?;
+    }
     Ok(())
 }
 

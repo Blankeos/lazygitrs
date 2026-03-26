@@ -36,6 +36,7 @@ pub struct Model {
     pub worktrees: Vec<Worktree>,
     pub reflog_commits: Vec<Commit>,
     pub sub_commits: Vec<Commit>,
+    pub sub_remote_branches: Vec<RemoteBranch>,
     pub commit_files: Vec<CommitFile>,
     pub authors: HashMap<String, Author>,
     // Total line changes

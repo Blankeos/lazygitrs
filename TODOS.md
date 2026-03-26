@@ -42,23 +42,66 @@
     - [x] In the original lazygit, sometimes 'commit tags' is strikethrough'd Maybe because it doesnt exist?
 
 - [ ] For the feature-parity stuff I didn't consider in the previous todo, write it here (For AI):
-  - [ ] In 'Commits', I press `d` to drop the selected commit. Currently unimplemented.
-  - [ ] In 'Files', the original lazygit has `e` to open file in editor and `o` to open file in default program.
-  - [ ] In 'Files', the original lazygit has `M` to open merge tool / external merge tool for resolving conflicts.
-  - [ ] Merge conflict resolution UI — the original lazygit lets you pick between versions when a merge/rebase results in conflicts.
-  - [ ] Rebase conflict resolution UI — similar conflict resolution flow during interactive rebase.
-  - [ ] Cherry-pick paste (`V`) — we have cherry-pick copy (`C`) in Commits, but no paste action to apply copied commits onto current branch.
-  - [ ] In 'Remotes', pressing `Enter` should drill into remote branches. Then from a remote branch: `<space>` to checkout, `M` to merge, `r` to rebase onto it, `d` to delete remote branch.
-  - [ ] In 'Submodules', the original lazygit has more operations: `a` to add submodule, `d` to remove submodule, `e` to enter submodule (open a nested lazygit in that submodule), `<space>` to update submodule.
-  - [ ] In 'Worktrees', the original lazygit has `<space>` to switch to worktree (open it).
-  - [ ] In 'Commits', the original lazygit has `<c-r>` to reset cherry-pick selection.
-  - [ ] In 'Branches', the original lazygit shows divergence info (ahead/behind counts relative to upstream).
-  - [ ] Full `$EDITOR` integration — committing with `C` (editor mode) currently has a limitation where it can't suspend the TUI to open a real terminal editor.
-  - [ ] In 'Files', the original lazygit has `<c-o>` to copy the diff of the selected file to clipboard (we have this in `y` menu, but the direct shortcut may be missing).
-  - [ ] Undo/Redo — the original lazygit has `z`/`<c-z>` to undo and redo git actions (using reflog under the hood).
-  - [ ] Diff mode — the original lazygit has a way to diff any two commits/branches against each other (not just viewing a single commit's diff).
-  - [ ] In 'Branches', the original lazygit has `<c-o>` to copy PR URL, we might already have this in the `y` menu but worth verifying the direct shortcut.
+  - Interactive Rebase / Commit Manipulation:
+    - [ ] In 'Commits', I press `d` to drop the selected commit. Currently unimplemented.
+    - [ ] Cherry-pick paste (`V`) — we have cherry-pick copy (`C`) in Commits, but no paste action to apply copied commits onto current branch.
+    - [ ] In 'Commits', the original lazygit has `<c-r>` to reset cherry-pick selection.
+    - [ ] Undo/Redo — the original lazygit has `z`/`<c-z>` to undo and redo git actions (using reflog under the hood).
+  - Conflict Resolution:
+    - [ ] Merge conflict resolution UI — the original lazygit lets you pick between versions when a merge/rebase results in conflicts.
+    - [ ] Rebase conflict resolution UI — similar conflict resolution flow during interactive rebase.
+    - [ ] In 'Files', the original lazygit has `M` to open merge tool / external merge tool for resolving conflicts.
+  - Files:
+    - [x] In 'Files', the original lazygit has `e` to open file in editor and `o` to open file in default program.
+    - [x] In 'Files', the original lazygit has `<c-o>` to copy the diff of the selected file to clipboard (we have this in `y` menu, but the direct shortcut may be missing).
+    - [ ] Full `$EDITOR` integration — committing with `C` (editor mode) currently has a limitation where it can't suspend the TUI to open a real terminal editor.
+  - Remotes:
+    - [x] In 'Remotes', pressing `Enter` should drill into remote branches. Then from a remote branch: `<space>` to checkout, `M` to merge, `r` to rebase onto it, `d` to delete remote branch.
+  - Submodules:
+    - [ ] In 'Submodules', the original lazygit has more operations: `a` to add submodule, `d` to remove submodule, `e` to enter submodule (open a nested lazygit in that submodule), `<space>` to update submodule.
+  - Worktrees:
+    - [x] In 'Worktrees', the original lazygit has `<space>` to switch to worktree (open it).
+  - Branches:
+    - [x] In 'Branches', the original lazygit shows divergence info (ahead/behind counts relative to upstream). (already implemented)
+  - Done / Won't Do:
+    - [x] ~Diff mode — the original lazygit has a way to diff any two commits/branches against each other (not just viewing a single commit's diff).~ (Author check: I have separate ideas for diff mode: comapring two commits/branches against each other, it'll be more intuitive)
+    - [x] ~In 'Branches', the original lazygit has `<c-o>` to copy PR URL, we might already have this in the `y` menu but worth verifying the direct shortcut.~ (Author check: so yeah we won't need this)
 
 - [x] Improve the speeds still, very important for larger repos. Improve first-load speed. Either cache the data, or the render the TUI even before the git load model data isn't there yet. (perceived speed)
 - [x] regular push behavior to essentially do `git push origin HEAD`
+
+- [ ] Config-parity, make sure everything works.
 - [ ] Hot reloading of config (I can edit the config on the fly and the config is still read without restarting lazygit)
+
+## Stuff I wanna do differently
+
+- [ ] Interactive Rebase should be more intuitive.
+  - [ ] I can see a commits list and then also see the commit it'll be merging into. Kinda exactly like VSCode's interactive rebase editor. https://user-images.githubusercontent.com/641685/102309169-31ba2a00-3f36-11eb-8b26-050c7d83fa3f.png but in TUI version. This could be a dialog on its own with its own focus groups. It'll look simpler and more interactive than the current lazygit.
+    - Non-negotiables for me are:
+      - I can press jk up down to switch between commits. I can h l left right to change the value to pick, squash, drop, edit.
+      - The pick, drop, edit, squash options have semantic colors. The same w/ VSCode.
+      - The node-like colors w/ indicators on the left side are great to have.
+      - I can SEE the commit it'll rebase ontop of i.e. 'Hello GitLens' in this example.
+      - I can see a 'Start Rebase' and an 'Abort' action.
+- [ ] Diff Mode / Compare Mode
+  - Diff mode can be opened w/ a commad palette or when focusing on either BRANCH or COMMITS tab.
+  - First trigger of it opening will open its own sort of screen that looks like:
+
+    ```
+    -------------------------------------------------------
+    | A: ccf0183  | B: 09s8c90 |                          |
+    ---------------------------- diff exploration view    |
+    | Commit Files             |                          |
+    |                          |                          |
+    |                          |                          |
+    |                          |                          |
+    -------------------------------------------------------
+    ```
+
+    - So there's like an A and B comboboxes there. They can help you autosearch for a commit or a branch.
+    -
+    - You can obviously exit and go back to the default lazygit UI.
+    - You can press tab to cycle focus between the A and B comboboxes, Commit Fles, and diff exploration view.
+    - Commit Files and Diff Exploration View actually already exist if you notice. So as expected, they'd have the same hotkeys sort of. Especially diff exploration view like `[]` `{}`.
+
+- [ ] Bug: in the diff exploration view, because of the 10s interval I think the position of which I scrolled at also seems to get reset. Ideally not. Just like how the [new] and [old] -- it used to have this bug but I fixed it.

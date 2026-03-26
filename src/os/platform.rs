@@ -18,23 +18,6 @@ impl Platform {
         Ok(())
     }
 
-    pub fn open_editor(editor: &str, path: &str) -> Result<()> {
-        let editor = if editor.is_empty() {
-            std::env::var("EDITOR").unwrap_or_else(|_| {
-                if cfg!(target_os = "windows") {
-                    "notepad".to_string()
-                } else {
-                    "vi".to_string()
-                }
-            })
-        } else {
-            editor.to_string()
-        };
-
-        CmdBuilder::new(&editor).arg(path).run()?;
-        Ok(())
-    }
-
     pub fn copy_to_clipboard(text: &str) -> Result<()> {
         let cmd = if cfg!(target_os = "macos") {
             CmdBuilder::new("pbcopy")

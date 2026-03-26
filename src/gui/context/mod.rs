@@ -17,6 +17,7 @@ pub enum ContextId {
     StashFiles,
     BranchCommits,
     BranchCommitFiles,
+    RemoteBranches,
     Staging,
 }
 
@@ -66,7 +67,7 @@ impl SideWindow {
         match ctx {
             ContextId::Status => SideWindow::Status,
             ContextId::Files | ContextId::Worktrees | ContextId::Submodules => SideWindow::Files,
-            ContextId::Branches | ContextId::Remotes | ContextId::Tags | ContextId::BranchCommits | ContextId::BranchCommitFiles => SideWindow::Branches,
+            ContextId::Branches | ContextId::Remotes | ContextId::Tags | ContextId::BranchCommits | ContextId::BranchCommitFiles | ContextId::RemoteBranches => SideWindow::Branches,
             ContextId::Commits | ContextId::Reflog | ContextId::CommitFiles => SideWindow::Commits,
             ContextId::Stash | ContextId::StashFiles => SideWindow::Stash,
             ContextId::Staging => SideWindow::Files,
@@ -103,6 +104,7 @@ impl ContextId {
             Self::StashFiles => "Stash Files",
             Self::BranchCommits => "Branch Commits",
             Self::BranchCommitFiles => "Branch Commit Files",
+            Self::RemoteBranches => "Remote Branches",
             Self::Staging => "Staging",
         }
     }
@@ -139,6 +141,7 @@ impl ContextManager {
         selections.insert(ContextId::StashFiles, 0);
         selections.insert(ContextId::BranchCommits, 0);
         selections.insert(ContextId::BranchCommitFiles, 0);
+        selections.insert(ContextId::RemoteBranches, 0);
 
         Self {
             active: ContextId::Files,
@@ -285,6 +288,7 @@ impl ContextManager {
             ContextId::Worktrees => model.worktrees.len(),
             ContextId::CommitFiles | ContextId::StashFiles | ContextId::BranchCommitFiles => self.commit_files_list_len_override.unwrap_or(model.commit_files.len()),
             ContextId::BranchCommits => model.sub_commits.len(),
+            ContextId::RemoteBranches => model.sub_remote_branches.len(),
             _ => 0,
         }
     }

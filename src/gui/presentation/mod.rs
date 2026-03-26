@@ -4,6 +4,7 @@ pub mod commits;
 pub mod files;
 pub mod graph;
 pub mod reflog;
+pub mod remote_branches;
 pub mod remotes;
 pub mod stash;
 pub mod tags;

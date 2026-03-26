@@ -127,6 +127,41 @@ impl GitCommands {
         Ok(())
     }
 
+    pub fn checkout_remote_branch(&self, remote: &str, branch: &str) -> Result<()> {
+        // Creates a local branch tracking the remote branch and checks it out
+        self.git()
+            .args(&["checkout", "-b", branch, &format!("{}/{}", remote, branch)])
+            .run_expecting_success()?;
+        Ok(())
+    }
+
+    pub fn delete_remote_branch(&self, remote: &str, branch: &str) -> Result<()> {
+        self.git()
+            .args(&["push", remote, "--delete", branch])
+            .run_expecting_success()?;
+        Ok(())
+    }
+
+    pub fn merge_remote_branch(&self, remote: &str, branch: &str, args: &str) -> Result<()> {
+        let ref_name = format!("{}/{}", remote, branch);
+        let mut cmd = self.git();
+        cmd = cmd.arg("merge").arg(&ref_name);
+        if !args.is_empty() {
+            for arg in args.split_whitespace() {
+                cmd = cmd.arg(arg);
+            }
+        }
+        cmd.run_expecting_success()?;
+        Ok(())
+    }
+
+    pub fn rebase_remote_branch(&self, remote: &str, branch: &str) -> Result<()> {
+        self.git()
+            .args(&["rebase", &format!("{}/{}", remote, branch)])
+            .run_expecting_success()?;
+        Ok(())
+    }
+
     pub fn push_with_upstream(&self, remote: &str, branch: &str) -> Result<()> {
         self.git()
             .args(&["push", "-u", remote, branch])

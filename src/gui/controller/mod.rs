@@ -7,6 +7,7 @@ pub mod custom_commands;
 pub mod files;
 pub mod patch_building;
 pub mod reflog;
+pub mod remote_branches;
 pub mod remotes;
 pub mod stash;
 pub mod submodules;

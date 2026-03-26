@@ -42,6 +42,7 @@ pub fn render(
     commit_files_hash: &str,
     commit_files_message: &str,
     branch_commits_name: &str,
+    remote_branches_name: &str,
     spinner_frame: usize,
     remote_op_label: Option<&str>,
     remote_op_success: bool,
@@ -129,9 +130,19 @@ pub fn render(
                     let items = presentation::branches::render_branch_list(model, &theme, remote_op_label, spinner_frame, remote_op_success);
                     render_list(frame, fl.main_panel, block, items, selected, true, &theme);
                 }
-                ContextId::Remotes => {
-                    let items = presentation::remotes::render_remote_list(model, &theme);
-                    render_list(frame, fl.main_panel, block, items, selected, true, &theme);
+                ContextId::Remotes | ContextId::RemoteBranches => {
+                    if ctx_mgr.active() == ContextId::RemoteBranches {
+                        let rb_selected = ctx_mgr.selected(ContextId::RemoteBranches);
+                        let rb_block = Block::default()
+                            .title(format!(" Remote Branches ({}) ", remote_branches_name))
+                            .borders(Borders::ALL)
+                            .border_style(theme.active_border);
+                        let items = presentation::remote_branches::render_remote_branch_list(&model.sub_remote_branches, &theme);
+                        render_list(frame, fl.main_panel, rb_block, items, rb_selected, true, &theme);
+                    } else {
+                        let items = presentation::remotes::render_remote_list(model, &theme);
+                        render_list(frame, fl.main_panel, block, items, selected, true, &theme);
+                    }
                 }
                 ContextId::Tags => {
                     let items = presentation::tags::render_tag_list(model, &theme);
@@ -288,8 +299,19 @@ pub fn render(
                 }
             }
             ContextId::Remotes => {
-                let items = presentation::remotes::render_remote_list(model, &theme);
-                render_list(frame, rect, block, items, selected, is_active, &theme);
+                if ctx_mgr.active() == ContextId::RemoteBranches {
+                    let rb_selected = ctx_mgr.selected(ContextId::RemoteBranches);
+                    let rb_title = format!(" Remote Branches ({}) ", remote_branches_name);
+                    let rb_block = Block::default()
+                        .title(rb_title)
+                        .borders(Borders::ALL)
+                        .border_style(border_style);
+                    let items = presentation::remote_branches::render_remote_branch_list(&model.sub_remote_branches, &theme);
+                    render_list(frame, rect, rb_block, items, rb_selected, is_active, &theme);
+                } else {
+                    let items = presentation::remotes::render_remote_list(model, &theme);
+                    render_list(frame, rect, block, items, selected, is_active, &theme);
+                }
             }
             ContextId::Tags => {
                 // If BranchCommits or BranchCommitFiles is active (drill-down from Tags), render that instead
@@ -966,6 +988,16 @@ fn get_info_content<'a>(model: &Model, ctx_mgr: &ContextManager) -> Vec<Line<'a>
                 vec![Line::from(" No remotes")]
             }
         }
+        ContextId::RemoteBranches => {
+            if let Some(rb) = model.sub_remote_branches.get(selected) {
+                vec![
+                    Line::from(format!(" Branch: {}/{}", rb.remote_name, rb.name)),
+                    Line::from(format!(" Hash: {}", rb.hash)),
+                ]
+            } else {
+                vec![Line::from(" No remote branches")]
+            }
+        }
         ContextId::Tags => {
             if let Some(tag) = model.tags.get(selected) {
                 let mut lines = vec![
@@ -1003,14 +1035,16 @@ fn render_status_bar(
     theme: &crate::config::Theme,
 ) {
     let context_hints = match ctx_mgr.active() {
-        ContextId::Files => "c: commit | a: stage all | <space>: toggle | d: discard",
+        ContextId::Files => "c: commit | a: stage all | <space>: toggle | d: discard | e: edit | o: open",
         ContextId::Branches => "<space>: checkout | n: new | d: delete | M: merge | r: rebase",
         ContextId::Commits => {
             "r: reword | g: reset | t: revert | C: cherry-pick | ctrl-l: filter branch"
         }
         ContextId::Stash => "g: pop | <space>: apply | d: drop",
-        ContextId::Remotes => "f: fetch | P: push | p: pull",
+        ContextId::Remotes => "<enter>: branches | f: fetch | P: push | p: pull",
+        ContextId::RemoteBranches => "<space>: checkout | M: merge | r: rebase | d: delete",
         ContextId::Tags => "n: new | d: delete | P: push",
+        ContextId::Worktrees => "<space>: switch | n: new | d: remove",
         _ => "",
     };
 
