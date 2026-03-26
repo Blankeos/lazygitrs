@@ -67,7 +67,8 @@ impl GitCommands {
                     let branch_name = full_name
                         .strip_prefix(&format!("{}/", remote_name))
                         .unwrap_or(full_name);
-                    if branch_name == "HEAD" {
+                    // Filter out HEAD (explicit or symref that resolves to just the remote name)
+                    if branch_name == "HEAD" || branch_name == remote_name {
                         return None;
                     }
                     Some(RemoteBranch {

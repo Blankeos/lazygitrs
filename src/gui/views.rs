@@ -255,8 +255,25 @@ pub fn render(
                 render_list(frame, rect, block, items, selected, is_active, &theme);
             }
             ContextId::Submodules => {
-                let widget = Paragraph::new(" (no submodules)").block(block);
-                frame.render_widget(widget, rect);
+                if model.submodules.is_empty() {
+                    let widget = Paragraph::new(" (no submodules)").block(block);
+                    frame.render_widget(widget, rect);
+                } else {
+                    let items: Vec<ListItem> = model.submodules.iter().map(|sub| {
+                        let line = Line::from(vec![
+                            Span::styled(
+                                format!("  {} ", sub.name),
+                                Style::default().fg(Color::Cyan),
+                            ),
+                            Span::styled(
+                                sub.path.clone(),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                        ]);
+                        ListItem::new(line)
+                    }).collect();
+                    render_list(frame, rect, block, items, selected, is_active, &theme);
+                }
             }
             ContextId::Branches => {
                 // If BranchCommits or BranchCommitFiles is active, render that instead
@@ -1023,6 +1040,16 @@ fn get_info_content<'a>(model: &Model, ctx_mgr: &ContextManager) -> Vec<Line<'a>
                 vec![Line::from(" No worktrees")]
             }
         }
+        ContextId::Submodules => {
+            if let Some(sub) = model.submodules.get(selected) {
+                vec![
+                    Line::from(format!(" Submodule: {}", sub.name)),
+                    Line::from(format!(" Path: {}", sub.path)),
+                ]
+            } else {
+                vec![Line::from(" No submodules")]
+            }
+        }
         _ => vec![Line::from(" lazygitrs")],
     }
 }
@@ -1045,6 +1072,7 @@ fn render_status_bar(
         ContextId::RemoteBranches => "<space>: checkout | M: merge | r: rebase | d: delete",
         ContextId::Tags => "n: new | d: delete | P: push",
         ContextId::Worktrees => "<space>: switch | n: new | d: remove",
+        ContextId::Submodules => "<space>: update | a: add | d: remove | e: enter",
         _ => "",
     };
 

@@ -19,6 +19,8 @@ pub use worktree::Worktree;
 
 use std::collections::HashMap;
 
+use crate::git::submodule::Submodule;
+
 /// Holds all repository data loaded from git.
 #[derive(Debug, Default)]
 pub struct Model {
@@ -34,6 +36,7 @@ pub struct Model {
     pub remotes: Vec<Remote>,
     pub tags: Vec<Tag>,
     pub worktrees: Vec<Worktree>,
+    pub submodules: Vec<Submodule>,
     pub reflog_commits: Vec<Commit>,
     pub sub_commits: Vec<Commit>,
     pub sub_remote_branches: Vec<RemoteBranch>,

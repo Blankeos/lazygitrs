@@ -252,6 +252,7 @@ impl Gui {
                         ModelPart::Remotes(v) => model.remotes = v,
                         ModelPart::Tags(v) => model.tags = v,
                         ModelPart::Worktrees(v) => model.worktrees = v,
+                        ModelPart::Submodules(v) => model.submodules = v,
                         ModelPart::Reflog(v) => model.reflog_commits = v,
                         ModelPart::DiffStats { added, deleted } => {
                             model.total_additions = added;
@@ -1601,7 +1602,11 @@ impl Gui {
             ContextId::Submodules => HelpSection {
                 title: "Submodules".into(),
                 entries: vec![
-                    HelpEntry { key: "u".into(), description: "Update submodules".into() },
+                    HelpEntry { key: "<space>".into(), description: "Update submodule".into() },
+                    HelpEntry { key: "a".into(), description: "Add submodule".into() },
+                    HelpEntry { key: "d".into(), description: "Remove submodule".into() },
+                    HelpEntry { key: "e".into(), description: "Enter submodule".into() },
+                    HelpEntry { key: "u".into(), description: "Update all submodules".into() },
                     HelpEntry { key: "i".into(), description: "Init submodules".into() },
                 ],
             },
@@ -2156,6 +2161,15 @@ impl Gui {
                 for (i, wt) in model.worktrees.iter().enumerate() {
                     if wt.branch.to_lowercase().contains(&query)
                         || wt.path.to_lowercase().contains(&query)
+                    {
+                        self.search_matches.push(i);
+                    }
+                }
+            }
+            ContextId::Submodules => {
+                for (i, sub) in model.submodules.iter().enumerate() {
+                    if sub.name.to_lowercase().contains(&query)
+                        || sub.path.to_lowercase().contains(&query)
                     {
                         self.search_matches.push(i);
                     }

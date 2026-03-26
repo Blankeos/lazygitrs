@@ -51,4 +51,26 @@ impl GitCommands {
             .run_expecting_success()?;
         Ok(())
     }
+
+    pub fn update_submodule(&self, path: &str) -> Result<()> {
+        self.git()
+            .args(&["submodule", "update", "--init", path])
+            .run_expecting_success()?;
+        Ok(())
+    }
+
+    pub fn add_submodule(&self, url: &str, path: &str) -> Result<()> {
+        self.git()
+            .args(&["submodule", "add", url, path])
+            .run_expecting_success()?;
+        Ok(())
+    }
+
+    pub fn remove_submodule(&self, path: &str) -> Result<()> {
+        // git rm removes the submodule entry and working tree
+        self.git()
+            .args(&["rm", path])
+            .run_expecting_success()?;
+        Ok(())
+    }
 }

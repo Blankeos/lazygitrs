@@ -58,7 +58,7 @@
   - Remotes:
     - [x] In 'Remotes', pressing `Enter` should drill into remote branches. Then from a remote branch: `<space>` to checkout, `M` to merge, `r` to rebase onto it, `d` to delete remote branch.
   - Submodules:
-    - [ ] In 'Submodules', the original lazygit has more operations: `a` to add submodule, `d` to remove submodule, `e` to enter submodule (open a nested lazygit in that submodule), `<space>` to update submodule.
+    - [x] In 'Submodules', the original lazygit has more operations: `a` to add submodule, `d` to remove submodule, `e` to enter submodule (open a nested lazygit in that submodule), `<space>` to update submodule.
   - Worktrees:
     - [x] In 'Worktrees', the original lazygit has `<space>` to switch to worktree (open it).
   - Branches:

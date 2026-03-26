@@ -32,6 +32,7 @@ pub enum ModelPart {
     Remotes(Vec<model::Remote>),
     Tags(Vec<model::Tag>),
     Worktrees(Vec<model::Worktree>),
+    Submodules(Vec<submodule::Submodule>),
     Reflog(Vec<model::Commit>),
     DiffStats { added: usize, deleted: usize },
     RepoStatus {
@@ -43,7 +44,7 @@ pub enum ModelPart {
 }
 
 /// Total number of `ModelPart` variants that `load_model_streaming` sends.
-pub const MODEL_PART_COUNT: usize = 10;
+pub const MODEL_PART_COUNT: usize = 11;
 
 /// Facade for all git operations. Mirrors lazygit's GitCommand.
 pub struct GitCommands {
@@ -89,6 +90,7 @@ impl GitCommands {
             let h_remotes = s.spawn(|| self.load_remotes());
             let h_tags = s.spawn(|| self.load_tags());
             let h_worktrees = s.spawn(|| self.load_worktrees());
+            let h_submodules = s.spawn(|| self.load_submodules());
             let h_reflog = s.spawn(|| self.load_reflog(100));
             let h_shortstat = s.spawn(|| self.diff_shortstat());
             let h_status = s.spawn(|| self.repo_status());
@@ -100,6 +102,7 @@ impl GitCommands {
             model.remotes = h_remotes.join().unwrap()?;
             model.tags = h_tags.join().unwrap()?;
             model.worktrees = h_worktrees.join().unwrap().unwrap_or_default();
+            model.submodules = h_submodules.join().unwrap().unwrap_or_default();
             model.reflog_commits = h_reflog.join().unwrap().unwrap_or_default();
 
             if let Ok((added, deleted)) = h_shortstat.join().unwrap() {
@@ -145,6 +148,9 @@ impl GitCommands {
         spawn_part!(tx, self, Tags, |g: &GitCommands| g.load_tags());
         spawn_part!(tx, self, Worktrees, |g: &GitCommands| g
             .load_worktrees()
+            .or_else(|_| Ok::<_, anyhow::Error>(Vec::new())));
+        spawn_part!(tx, self, Submodules, |g: &GitCommands| g
+            .load_submodules()
             .or_else(|_| Ok::<_, anyhow::Error>(Vec::new())));
         spawn_part!(tx, self, Reflog, |g: &GitCommands| g
             .load_reflog(100)

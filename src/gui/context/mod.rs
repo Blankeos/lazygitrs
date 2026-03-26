@@ -286,6 +286,7 @@ impl ContextManager {
             ContextId::Remotes => model.remotes.len(),
             ContextId::Tags => model.tags.len(),
             ContextId::Worktrees => model.worktrees.len(),
+            ContextId::Submodules => model.submodules.len(),
             ContextId::CommitFiles | ContextId::StashFiles | ContextId::BranchCommitFiles => self.commit_files_list_len_override.unwrap_or(model.commit_files.len()),
             ContextId::BranchCommits => model.sub_commits.len(),
             ContextId::RemoteBranches => model.sub_remote_branches.len(),
