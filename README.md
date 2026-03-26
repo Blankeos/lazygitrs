@@ -45,6 +45,7 @@ lazygitrs
 - [x] **Default GitHub conveniences** — copy repo url, open repo url, copy PR create url, open PR create, copy pr url, open pr. (The 'copy' variants are useful if you use different default browsers for work/personal.)
 - [x] **Branch Filtering** — better experience in the Commits tab, compare what actually matters.
 - [x] **Built-in compare tool** — Again, inspired by lumen, but more built into the TUI. Pick a commit/branch A and a commit/branch B, then see how they differ.
+- [x] **Interactive rebasing** — inspired by gitlens, a clean and easy-to-use UI for pick, reword, edit, squash, fixup, drop and fast rebasing.
 - [x] **Command Palette** — easily access stuff like:
   - [ ] `git reset` and then asks, what branch/commit, has quick search.
   - [x] `git diff/compare` and then asks what branch/commit A and B, has quick search.
