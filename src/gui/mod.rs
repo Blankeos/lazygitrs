@@ -67,6 +67,7 @@ pub struct Gui {
     pub show_command_log: bool,
     pub should_quit: bool,
     pub needs_refresh: bool,
+    pub needs_files_refresh: bool,
     pub needs_diff_refresh: bool,
     pub search_query: String,
     /// Whether search input mode is active (typing into search bar).
@@ -201,6 +202,7 @@ impl Gui {
             show_command_log: show_command_log_default,
             should_quit: false,
             needs_refresh: false,
+            needs_files_refresh: false,
             needs_diff_refresh: true,
             search_query: String::new(),
             search_active: false,
@@ -424,8 +426,13 @@ impl Gui {
             if self.needs_refresh {
                 self.refresh()?;
                 self.needs_refresh = false;
+                self.needs_files_refresh = false;
                 self.needs_diff_refresh = true;
                 self.last_refresh_at = Instant::now();
+            } else if self.needs_files_refresh {
+                self.refresh_files_only()?;
+                self.needs_files_refresh = false;
+                self.needs_diff_refresh = true;
             }
 
             if self.should_quit {
@@ -3386,6 +3393,36 @@ impl Gui {
                     kind: crate::gui::popup::MessageKind::Info,
                 };
             }
+        }
+
+        Ok(())
+    }
+
+    /// Lightweight refresh that only reloads files and diff stats.
+    /// Use this after staging/unstaging operations where branches, commits,
+    /// tags, etc. haven't changed.
+    fn refresh_files_only(&mut self) -> Result<()> {
+        let (files, shortstat) = std::thread::scope(|s| {
+            let h_files = s.spawn(|| self.git.load_files());
+            let h_stat = s.spawn(|| self.git.diff_shortstat());
+            (h_files.join().unwrap(), h_stat.join().unwrap())
+        });
+
+        let mut model = self.model.lock().unwrap();
+        if let Ok(f) = files {
+            model.files = f;
+        }
+        if let Ok((added, deleted)) = shortstat {
+            model.total_additions = added;
+            model.total_deletions = deleted;
+        }
+
+        if self.show_file_tree {
+            self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
+            self.context_mgr.files_list_len_override = Some(self.file_tree_nodes.len());
+        } else {
+            self.file_tree_nodes.clear();
+            self.context_mgr.files_list_len_override = None;
         }
 
         Ok(())

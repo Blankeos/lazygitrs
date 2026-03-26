@@ -59,10 +59,10 @@ pub fn render_file_tree<'a>(
 
                 let is_root = node.path == ".";
                 let line = if is_root {
-                    Line::from(Span::styled(format!("  {}", icon.trim_end()), dir_style))
+                    Line::from(Span::styled(format!("{} /", icon.trim_end()), dir_style))
                 } else {
                     Line::from(vec![
-                        Span::styled(format!("  {}{}", indent, icon), dir_style),
+                        Span::styled(format!("{}{}", indent, icon), dir_style),
                         Span::styled(node.name.clone(), dir_style),
                     ])
                 };
@@ -73,7 +73,7 @@ pub fn render_file_tree<'a>(
                 let name_style = file_name_style(file, theme);
 
                 let line = Line::from(vec![
-                    Span::styled(format!(" {} ", status_icon), status_style),
+                    Span::styled(format!("{} ", status_icon), status_style),
                     Span::raw(indent),
                     Span::styled(node.name.clone(), name_style),
                 ]);

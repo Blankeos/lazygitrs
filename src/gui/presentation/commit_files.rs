@@ -43,13 +43,13 @@ pub fn render_commit_file_tree<'a>(
 
                 let line = if is_root {
                     Line::from(Span::styled(
-                        format!("  {}", icon.trim_end()),
+                        format!("{}", icon.trim_end()),
                         Style::default().fg(Color::White),
                     ))
                 } else {
                     Line::from(vec![
                         Span::styled(
-                            format!("  {}{}", indent, icon),
+                            format!("{}{}", indent, icon),
                             Style::default().fg(Color::White),
                         ),
                         Span::styled(node.name.clone(), Style::default().fg(Color::White)),
@@ -63,7 +63,7 @@ pub fn render_commit_file_tree<'a>(
                 let (status_style, status_icon) = commit_file_status_display(file, theme);
 
                 let line = Line::from(vec![
-                    Span::styled(format!(" {} ", status_icon), status_style),
+                    Span::styled(format!("{} ", status_icon), status_style),
                     Span::raw(indent),
                     Span::styled(node.name.clone(), Style::default().fg(Color::White)),
                 ]);

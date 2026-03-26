@@ -130,7 +130,7 @@ fn toggle_stage(gui: &mut Gui) -> Result<()> {
                         gui.git.unstage_file(name)?;
                     }
                 }
-                gui.needs_refresh = true;
+                gui.needs_files_refresh = true;
                 return Ok(());
             }
         }
@@ -151,7 +151,7 @@ fn toggle_stage(gui: &mut Gui) -> Result<()> {
         } else {
             gui.git.unstage_file(&name)?;
         }
-        gui.needs_refresh = true;
+        gui.needs_files_refresh = true;
     }
     Ok(())
 }
@@ -166,7 +166,7 @@ fn toggle_stage_all(gui: &mut Gui) -> Result<()> {
     } else {
         gui.git.unstage_all()?;
     }
-    gui.needs_refresh = true;
+    gui.needs_files_refresh = true;
     Ok(())
 }
 

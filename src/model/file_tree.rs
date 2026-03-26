@@ -26,7 +26,7 @@ pub fn build_file_tree(files: &[File], collapsed_dirs: &HashSet<String>) -> Vec<
         return Vec::new();
     }
 
-    // Collect (path_parts, file_index) and sort by path
+    // Collect (path_parts, file_index) and sort with directories before files
     let mut entries: Vec<(Vec<&str>, usize)> = files
         .iter()
         .enumerate()
@@ -35,7 +35,7 @@ pub fn build_file_tree(files: &[File], collapsed_dirs: &HashSet<String>) -> Vec<
             (parts, i)
         })
         .collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries.sort_by(|a, b| sort_dirs_first(&a.0, &b.0));
 
     // First pass: collect child file indices per directory path
     let mut dir_children: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
@@ -135,6 +135,26 @@ pub fn build_file_tree(files: &[File], collapsed_dirs: &HashSet<String>) -> Vec<
     nodes
 }
 
+/// Sort path parts so directories appear before files at each level,
+/// then alphabetically within each group.
+fn sort_dirs_first(a: &[&str], b: &[&str]) -> std::cmp::Ordering {
+    for i in 0..a.len().min(b.len()) {
+        if a[i] != b[i] {
+            let a_is_dir = i < a.len() - 1;
+            let b_is_dir = i < b.len() - 1;
+            if a_is_dir != b_is_dir {
+                return if a_is_dir {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Greater
+                };
+            }
+            return a[i].cmp(b[i]);
+        }
+    }
+    b.len().cmp(&a.len())
+}
+
 /// A node in the flattened commit file tree for display.
 #[derive(Debug, Clone)]
 pub struct CommitFileTreeNode {
@@ -165,7 +185,7 @@ pub fn build_commit_file_tree(
             (parts, i)
         })
         .collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries.sort_by(|a, b| sort_dirs_first(&a.0, &b.0));
 
     // First pass: collect child file indices per directory path
     let mut dir_children: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
