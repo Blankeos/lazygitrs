@@ -2,7 +2,7 @@
   - [x] Better graph view (enabled by default)
   - [x] Filter by branch
   - [x] Filter by commit message (handy if you prefix with ticket IDs)
-- [ ] ~Command palette (OpenCode-style) — still figuring this one out~
+- [x] ~Command palette (OpenCode-style) — still figuring this one out~ - It's `?`
 
 - [x] Stash viewer:
   - Can we add the same viewer for files in the '[5] Stash' sidebar tab? (the same way we currently do with Commits tab)
