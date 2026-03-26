@@ -19,7 +19,7 @@ use crossterm::{execute, cursor};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, AppState};
 use crate::config::keybindings::parse_key;
 use crate::git::{GitCommands, ModelPart, MODEL_PART_COUNT};
 use crate::model::Model;
@@ -166,7 +166,10 @@ impl Gui {
         let (ai_commit_tx, ai_commit_rx) = mpsc::channel();
         let (remote_op_tx, remote_op_rx) = mpsc::channel();
         let show_file_tree = config.user_config.gui.show_file_tree;
-        let show_command_log_default = config.user_config.gui.show_command_log;
+        let show_command_log_default = config
+            .app_state
+            .show_command_log
+            .unwrap_or(config.user_config.gui.show_command_log);
         let command_log = crate::os::cmd::new_command_log();
         crate::os::cmd::set_thread_command_log(command_log.clone());
 
@@ -1082,6 +1085,7 @@ impl Gui {
         // Toggle command log (;)
         if key.code == KeyCode::Char(';') {
             self.show_command_log = !self.show_command_log;
+            self.persist_command_log_visibility();
             return Ok(());
         }
 
@@ -1290,6 +1294,7 @@ impl Gui {
         // Toggle command log (;)
         if key.code == KeyCode::Char(';') {
             self.show_command_log = !self.show_command_log;
+            self.persist_command_log_visibility();
             return Ok(());
         }
 
@@ -3337,6 +3342,13 @@ impl Gui {
 
     fn commit_history_path(config: &AppConfig) -> std::path::PathBuf {
         config.config_dir.join("commit_message_history")
+    }
+
+    fn persist_command_log_visibility(&self) {
+        if let Ok(mut state) = AppState::load(&self.config.state_path) {
+            state.show_command_log = Some(self.show_command_log);
+            let _ = state.save(&self.config.state_path);
+        }
     }
 
     fn load_commit_history(config: &AppConfig) -> Vec<String> {

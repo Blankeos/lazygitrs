@@ -44,11 +44,11 @@ lazygitrs
 - [x] **Better diff navigation UX** — `[]` new/old only views, `{}` for hunk traveling, `hjkl←↑↓→` for line-by-line scrolling, supports mouse select/scroll too. Lots inspired by [lumen](https://github.com/jnsahaj/lumen)
 - [x] **Default GitHub conveniences** — copy repo url, open repo url, copy PR create url, open PR create, copy pr url, open pr. (The 'copy' variants are useful if you use different default browsers for work/personal.)
 - [x] **Branch Filtering** — better experience in the Commits tab, compare what actually matters.
-- [ ] **Future: Built-in compare tool** — Again, inspired by lumen, but more built into the TUI. Pick a commit/branch A and a commit/branch B, then see how they differ.
-- [ ] **Future: Command Palette** — easily access stuff like:
+- [x] **Built-in compare tool** — Again, inspired by lumen, but more built into the TUI. Pick a commit/branch A and a commit/branch B, then see how they differ.
+- [x] **Command Palette** — easily access stuff like:
   - [ ] `git reset` and then asks, what branch/commit, has quick search.
-  - [ ] `git diff/compare` and then asks what branch/commit A and B, has quick search.
-  - [ ] `git rebase` and then asks rebase on top of what branch/commit.
+  - [x] `git diff/compare` and then asks what branch/commit A and B, has quick search.
+  - [x] `git rebase` and then asks rebase on top of what branch/commit.
 
 <!-- GEN_BENCHMARKS_START -->
 

@@ -10,6 +10,8 @@ pub struct AppState {
     pub recent_repos: Vec<String>,
     #[serde(rename = "startupPopupVersion")]
     pub startup_popup_version: u32,
+    #[serde(rename = "showCommandLog", skip_serializing_if = "Option::is_none")]
+    pub show_command_log: Option<bool>,
 }
 
 impl AppState {
