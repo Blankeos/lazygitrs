@@ -72,6 +72,7 @@
 
 - [ ] Config-parity, make sure everything works.
 - [ ] Hot reloading of config (I can edit the config on the fly and the config is still read without restarting lazygit)
+- [x] Bug: in the diff exploration view, because of the 10s interval I think the position of which I scrolled at also seems to get reset. Ideally not. Just like how the [new] and [old] -- it used to have this bug but I fixed it.
 
 ## Stuff I wanna do differently
 
@@ -103,5 +104,3 @@
     - You can obviously exit and go back to the default lazygit UI.
     - You can press tab to cycle focus between the A and B comboboxes, Commit Fles, and diff exploration view.
     - Commit Files and Diff Exploration View actually already exist if you notice. So as expected, they'd have the same hotkeys sort of. Especially diff exploration view like `[]` `{}`.
-
-- [ ] Bug: in the diff exploration view, because of the 10s interval I think the position of which I scrolled at also seems to get reset. Ideally not. Just like how the [new] and [old] -- it used to have this bug but I fixed it.
