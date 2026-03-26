@@ -13,8 +13,8 @@ The goal: everything lazygit does, but faster and with opinions I actually agree
 ```sh
 npm install -g lazygitrs  # npm
 bun install -g lazygitrs  # or bun
-cargo binstall lazygitrs            # or cargo-binstall (prebuilt binary, faster)
-cargo install lazygitrs             # or cargo (build from source)
+cargo binstall lazygitrs  # or cargo-binstall (prebuilt binary, faster)
+cargo install lazygitrs   # or cargo (build from source)
 ```
 
 Then run:
