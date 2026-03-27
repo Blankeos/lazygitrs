@@ -1243,8 +1243,21 @@ pub fn render_selection_overlay(frame: &mut Frame, diff_view: &mut DiffViewState
     let buf = frame.buffer_mut();
     let buf_area = *buf.area();
 
-    // --- Click state: just show the "e edit" tooltip, no text highlighting ---
+    // --- Click state: highlight the clicked cell and show "e edit" tooltip ---
     if is_click {
+        // Highlight the single clicked cell
+        if top_row >= pl.inner_y && top_row < pl.inner_end_y
+            && top_col >= content_start && top_col < content_end
+            && top_row < buf_area.y + buf_area.height
+        {
+            let highlight_style = Style::default()
+                .bg(Color::Rgb(100, 140, 200))
+                .fg(Color::Rgb(20, 20, 30));
+            if let Some(cell) = buf.cell_mut((top_col, top_row)) {
+                cell.set_style(highlight_style);
+            }
+        }
+
         if diff_view.file_exists_on_disk {
             let tooltip_style = Style::default()
                 .bg(Color::Rgb(60, 60, 70))

@@ -284,6 +284,18 @@ impl DiffViewState {
         Some(content_num + offset)
     }
 
+    /// Get the filename that a given line index belongs to.
+    /// For single-file diffs, returns `self.filename`.
+    /// For multi-file diffs, walks backwards to find the nearest file header.
+    pub fn file_at_line(&self, line_idx: usize) -> &str {
+        for i in (0..=line_idx).rev() {
+            if let Some(ref header) = self.lines.get(i).and_then(|l| l.file_header.as_ref()) {
+                return header;
+            }
+        }
+        &self.filename
+    }
+
     /// Activate search mode with an empty query.
     pub fn start_search(&mut self) {
         self.search_active = true;

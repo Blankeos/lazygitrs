@@ -407,7 +407,7 @@ fn handle_diff_exploration_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
                 let sel_ref = gui.diff_view.selection.as_ref().unwrap();
                 let line = sel_ref.edit_line_number;
                 // Compute column from terminal position using the same layout as the mouse handler
-                let (_, top_col, _, _) = sel_ref.normalized();
+                let (top_row, top_col, _, _) = sel_ref.normalized();
                 let area = ratatui::layout::Rect::new(0, 0, gui.layout.width, gui.layout.height);
                 let outer = ratatui::layout::Layout::default()
                     .direction(ratatui::layout::Direction::Vertical)
@@ -425,10 +425,17 @@ fn handle_diff_exploration_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
                 } else {
                     1
                 };
+                // Resolve the actual filename for multi-file diffs
+                let line_idx = if top_row >= pl.inner_y {
+                    gui.diff_view.scroll_offset + (top_row - pl.inner_y) as usize
+                } else {
+                    0
+                };
+                let filename = gui.diff_view.file_at_line(line_idx).to_string();
                 gui.diff_view.selection = None;
-                let filename = gui.diff_view.filename.clone();
-                if !filename.is_empty() {
-                    let abs_path = gui.git.repo_path().join(&filename).to_string_lossy().to_string();
+                let abs_path = gui.git.repo_path().join(&filename);
+                if !filename.is_empty() && abs_path.exists() {
+                    let abs_path = abs_path.to_string_lossy().to_string();
                     let os = &gui.config.user_config.os;
                     if let Some(ln) = line {
                         let tpl = if !os.edit_at_line.is_empty() { &os.edit_at_line } else { &os.edit };

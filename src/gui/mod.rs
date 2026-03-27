@@ -698,7 +698,7 @@ impl Gui {
                                 self.diff_view = DiffViewState::new();
                             } else {
                                 self.diff_view.load_from_diff_output(&dir_name, &combined_diff);
-                                self.diff_view.file_exists_on_disk = false;
+                                self.diff_view.file_exists_on_disk = true;
                             }
                         } else {
                             drop(model);
@@ -1319,7 +1319,7 @@ impl Gui {
                     let sel_ref = self.diff_view.selection.as_ref().unwrap();
                     let line = sel_ref.edit_line_number;
                     // Compute column from terminal position using the same layout as the mouse handler
-                    let (_, top_col, _, _) = sel_ref.normalized();
+                    let (top_row, top_col, _, _) = sel_ref.normalized();
                     let main_panel = self.compute_main_panel_rect();
                     let pl = DiffPanelLayout::compute(main_panel, &self.diff_view);
                     let (content_start, _) = pl.content_range(sel_ref.panel);
@@ -1328,10 +1328,17 @@ impl Gui {
                     } else {
                         1
                     };
+                    // Resolve the actual filename for multi-file diffs
+                    let line_idx = if top_row >= pl.inner_y {
+                        self.diff_view.scroll_offset + (top_row - pl.inner_y) as usize
+                    } else {
+                        0
+                    };
+                    let filename = self.diff_view.file_at_line(line_idx).to_string();
                     self.diff_view.selection = None;
-                    let filename = self.diff_view.filename.clone();
-                    if !filename.is_empty() {
-                        let abs_path = self.git.repo_path().join(&filename).to_string_lossy().to_string();
+                    let abs_path = self.git.repo_path().join(&filename);
+                    if !filename.is_empty() && abs_path.exists() {
+                        let abs_path = abs_path.to_string_lossy().to_string();
                         let os = &self.config.user_config.os;
                         if let Some(ln) = line {
                             let tpl = if !os.edit_at_line.is_empty() { &os.edit_at_line } else { &os.edit };

@@ -128,5 +128,5 @@
 - [x] Pressing 'e' to edit.
 - [x] Pressing 'e' to edit w/ 'column'
 - [ ] Persist the ` file tree view setting.
-- [ ] Emit config commands in the 'Command Log'
+- [x] Emit config commands in the 'Command Log'
 - [x] Diff hunks now have offsetted line numbers.
