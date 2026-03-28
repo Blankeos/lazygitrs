@@ -51,11 +51,13 @@ if [ -f "npm/package.json" ]; then
     git add npm/package.json
 fi
 
+# Update Cargo.lock to reflect the new version
+echo "🦋 Updating Cargo.lock..."
+cargo generate-lockfile
+
 # Commit
 echo "🦋 Committing version bump ${NEW}..."
-sleep 3 # wait a 3 secs because Cargo.lock will get updated
 git add .
-sleep 3 # wait a 3 secs because Cargo.lock will get updated
 git commit -m "release: ${NAME} v${NEW}"
 
 # ============================================
