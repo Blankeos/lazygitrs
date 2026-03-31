@@ -132,7 +132,51 @@ pub fn build_file_tree(files: &[File], collapsed_dirs: &HashSet<String>) -> Vec<
         last_dirs = dir_parts.iter().map(|s| s.to_string()).collect();
     }
 
+    compress_single_child_dirs(&mut nodes);
     nodes
+}
+
+/// Compress single-child directory chains into combined path nodes.
+/// e.g., `apps` → `nextjs` → `src` becomes `apps/nextjs/src` as one node.
+fn compress_single_child_dirs(nodes: &mut Vec<FileTreeNode>) {
+    let mut i = 0;
+    while i < nodes.len() {
+        if !nodes[i].is_dir {
+            i += 1;
+            continue;
+        }
+
+        let d = nodes[i].depth;
+
+        // Check if next node is a single dir child at depth d+1
+        if i + 1 < nodes.len() && nodes[i + 1].is_dir && nodes[i + 1].depth == d + 1 {
+            // Ensure no sibling at depth d+1 (only one direct child)
+            let has_sibling = (i + 2..nodes.len())
+                .take_while(|&j| nodes[j].depth > d)
+                .any(|j| nodes[j].depth == d + 1);
+
+            if !has_sibling {
+                let child = nodes.remove(i + 1);
+                if nodes[i].name == "." {
+                    nodes[i].name = child.name;
+                } else {
+                    nodes[i].name = format!("{}/{}", nodes[i].name, child.name);
+                }
+                nodes[i].path = child.path;
+                nodes[i].child_file_indices = child.child_file_indices;
+
+                // Decrease depth of all descendants by 1
+                let mut j = i + 1;
+                while j < nodes.len() && nodes[j].depth > d {
+                    nodes[j].depth -= 1;
+                    j += 1;
+                }
+                continue; // re-check same node for further merges
+            }
+        }
+
+        i += 1;
+    }
 }
 
 /// Sort path parts so directories appear before files at each level,
@@ -273,5 +317,45 @@ pub fn build_commit_file_tree(
         last_dirs = dir_parts.iter().map(|s| s.to_string()).collect();
     }
 
+    compress_single_child_commit_dirs(&mut nodes);
     nodes
+}
+
+/// Compress single-child directory chains for commit file trees.
+fn compress_single_child_commit_dirs(nodes: &mut Vec<CommitFileTreeNode>) {
+    let mut i = 0;
+    while i < nodes.len() {
+        if !nodes[i].is_dir {
+            i += 1;
+            continue;
+        }
+
+        let d = nodes[i].depth;
+
+        if i + 1 < nodes.len() && nodes[i + 1].is_dir && nodes[i + 1].depth == d + 1 {
+            let has_sibling = (i + 2..nodes.len())
+                .take_while(|&j| nodes[j].depth > d)
+                .any(|j| nodes[j].depth == d + 1);
+
+            if !has_sibling {
+                let child = nodes.remove(i + 1);
+                if nodes[i].name == "." {
+                    nodes[i].name = child.name;
+                } else {
+                    nodes[i].name = format!("{}/{}", nodes[i].name, child.name);
+                }
+                nodes[i].path = child.path;
+                nodes[i].child_file_indices = child.child_file_indices;
+
+                let mut j = i + 1;
+                while j < nodes.len() && nodes[j].depth > d {
+                    nodes[j].depth -= 1;
+                    j += 1;
+                }
+                continue;
+            }
+        }
+
+        i += 1;
+    }
 }
