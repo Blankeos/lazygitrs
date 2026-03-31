@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::ListItem;
 
@@ -54,7 +54,7 @@ pub fn render_file_tree<'a>(
                 let dir_style = if all_staged {
                     theme.file_staged
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(theme.text_strong)
                 };
 
                 let is_root = node.path == ".";
@@ -90,7 +90,7 @@ fn file_name_style(file: &crate::model::File, theme: &Theme) -> Style {
     if file.has_staged_changes && !file.has_unstaged_changes {
         theme.file_staged
     } else {
-        Style::default().fg(Color::White)
+        Style::default().fg(theme.text_strong)
     }
 }
 

@@ -1,6 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
@@ -50,10 +50,10 @@ pub fn render(
     render_diff_panel(frame, content[1], state, diff_view, theme);
 
     // Text selection highlight overlay and tooltip (must be before popups/dropdowns)
-    crate::gui::views::render_selection_overlay(frame, diff_view, content[1]);
+    crate::gui::views::render_selection_overlay(frame, diff_view, content[1], theme);
 
     // Status bar
-    render_status_bar(frame, outer[1], state);
+    render_status_bar(frame, outer[1], state, theme);
 
     // Render combobox dropdown overlay on top of the sidebar
     if state.editing.is_some() {
@@ -89,7 +89,7 @@ fn render_selector(
     let border = if focused || editing {
         theme.active_border
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.text_dimmed)
     };
     let block = Block::default()
         .title(number_label)
@@ -110,9 +110,9 @@ fn render_selector(
             display.as_str()
         };
         let style = if display.is_empty() {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(theme.text_dimmed)
         } else {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(theme.accent)
         };
         let widget = Paragraph::new(Span::styled(format!(" {}", text), style)).block(block);
         frame.render_widget(widget, area);
@@ -129,7 +129,7 @@ fn render_commit_files(
     let border = if focused {
         theme.active_border
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.text_dimmed)
     };
     let tree_indicator = if state.show_tree { " (tree)" } else { "" };
     let title = format!(" 3 Commit Files ({}{}) ", state.diff_files.len(), tree_indicator);
@@ -146,7 +146,7 @@ fn render_commit_files(
         };
         let widget = Paragraph::new(Span::styled(
             format!(" {}", msg),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.text_dimmed),
         ))
         .block(block);
         frame.render_widget(widget, area);
@@ -175,7 +175,7 @@ fn render_commit_files(
                 let (status_style, status_icon) = commit_file_status_display(file, theme);
                 let line = Line::from(vec![
                     Span::styled(format!(" {} ", status_icon), status_style),
-                    Span::styled(file.name.clone(), Style::default().fg(Color::White)),
+                    Span::styled(file.name.clone(), Style::default().fg(theme.text_strong)),
                 ]);
                 ListItem::new(line)
             })
@@ -203,9 +203,9 @@ fn render_tree_node<'a>(
         let line = Line::from(vec![
             Span::styled(
                 format!("  {}{}", indent, icon),
-                Style::default().fg(Color::White),
+                Style::default().fg(theme.text_strong),
             ),
-            Span::styled(node.name.clone(), Style::default().fg(Color::White)),
+            Span::styled(node.name.clone(), Style::default().fg(theme.text_strong)),
         ]);
         ListItem::new(line)
     } else if let Some(file_idx) = node.file_index {
@@ -214,7 +214,7 @@ fn render_tree_node<'a>(
             let line = Line::from(vec![
                 Span::styled(format!(" {} ", status_icon), status_style),
                 Span::raw(indent),
-                Span::styled(node.name.clone(), Style::default().fg(Color::White)),
+                Span::styled(node.name.clone(), Style::default().fg(theme.text_strong)),
             ]);
             ListItem::new(line)
         } else {
@@ -236,13 +236,13 @@ fn render_diff_panel(
 
     if !diff_view.is_empty() {
         side_by_side::render_diff(frame, area, diff_view, theme, focused);
-        side_by_side::render_diff_search_highlights(frame, area, diff_view);
-        side_by_side::render_diff_search_bar(frame, area, diff_view);
+        side_by_side::render_diff_search_highlights(frame, area, diff_view, theme);
+        side_by_side::render_diff_search_bar(frame, area, diff_view, theme);
     } else {
         let border = if focused {
             theme.active_border
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(theme.text_dimmed)
         };
         let block = Block::default()
             .title(" 4 Diff ")
@@ -250,14 +250,14 @@ fn render_diff_panel(
             .border_style(border);
         let widget = Paragraph::new(Span::styled(
             " Select a file to view diff",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.text_dimmed),
         ))
         .block(block);
         frame.render_widget(widget, area);
     }
 }
 
-fn render_status_bar(frame: &mut Frame, area: Rect, state: &DiffModeState) {
+fn render_status_bar(frame: &mut Frame, area: Rect, state: &DiffModeState, theme: &Theme) {
     // If search is active or has results, show search bar instead of hints
     if state.file_search_active {
         if let Some(ref ta) = state.file_search_textarea {
@@ -278,7 +278,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &DiffModeState) {
             let ta_width = area.width.saturating_sub(prefix_width + suffix_width);
 
             let prefix_rect = Rect::new(area.x, area.y, prefix_width, 1);
-            let prefix = Paragraph::new(Span::styled(" /", Style::default().fg(Color::Yellow)));
+            let prefix = Paragraph::new(Span::styled(" /", Style::default().fg(theme.accent_secondary)));
             frame.render_widget(prefix, prefix_rect);
 
             let ta_rect = Rect::new(area.x + prefix_width, area.y, ta_width, 1);
@@ -286,7 +286,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &DiffModeState) {
 
             if !match_info.is_empty() {
                 let suffix_rect = Rect::new(area.x + prefix_width + ta_width, area.y, suffix_width, 1);
-                let suffix = Paragraph::new(Span::styled(match_info, Style::default().fg(Color::Yellow)));
+                let suffix = Paragraph::new(Span::styled(match_info, Style::default().fg(theme.accent_secondary)));
                 frame.render_widget(suffix, suffix_rect);
             }
             return;
@@ -304,7 +304,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &DiffModeState) {
         };
         let bar = Paragraph::new(Span::styled(
             format!(" /{}{}", state.file_search_query, match_info),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(theme.accent_secondary),
         ));
         frame.render_widget(bar, area);
         return;
@@ -328,9 +328,9 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &DiffModeState) {
     };
 
     let key_style = Style::default()
-        .fg(Color::Gray)
+        .fg(theme.text)
         .add_modifier(Modifier::BOLD);
-    let desc_style = Style::default().fg(Color::DarkGray);
+    let desc_style = Style::default().fg(theme.text_dimmed);
     let spans: Vec<Span> = hints
         .iter()
         .flat_map(|(key, desc)| {
@@ -391,18 +391,18 @@ fn render_dropdown(
         .take(visible_end - scroll)
         .map(|candidate| {
             let kind_label = match candidate.kind {
-                RefKind::RawRef => Span::styled("[ref] ", Style::default().fg(Color::White)),
-                RefKind::Branch => Span::styled("[branch] ", Style::default().fg(Color::Green)),
+                RefKind::RawRef => Span::styled("[ref] ", Style::default().fg(theme.text_strong)),
+                RefKind::Branch => Span::styled("[branch] ", Style::default().fg(theme.ref_local)),
                 RefKind::RemoteBranch => {
-                    Span::styled("[remote] ", Style::default().fg(Color::Magenta))
+                    Span::styled("[remote] ", Style::default().fg(theme.ref_remote))
                 }
-                RefKind::Tag => Span::styled("[tag] ", Style::default().fg(Color::Yellow)),
-                RefKind::Commit => Span::styled("[commit] ", Style::default().fg(Color::Blue)),
+                RefKind::Tag => Span::styled("[tag] ", Style::default().fg(theme.ref_tag)),
+                RefKind::Commit => Span::styled("[commit] ", Style::default().fg(theme.reflog_hash)),
             };
             let line = Line::from(vec![
                 Span::raw(" "),
                 kind_label,
-                Span::styled(candidate.display.clone(), Style::default().fg(Color::White)),
+                Span::styled(candidate.display.clone(), Style::default().fg(theme.text_strong)),
             ]);
             ListItem::new(line)
         })
@@ -426,10 +426,10 @@ fn render_dropdown(
 fn commit_file_status_display<'a>(file: &CommitFile, theme: &Theme) -> (Style, &'a str) {
     match file.status {
         FileChangeStatus::Added => (theme.file_staged, "A "),
-        FileChangeStatus::Deleted => (Style::default().fg(Color::Red), "D "),
+        FileChangeStatus::Deleted => (Style::default().fg(theme.change_deleted), "D "),
         FileChangeStatus::Modified => (theme.file_unstaged, "M "),
-        FileChangeStatus::Renamed => (Style::default().fg(Color::Yellow), "R "),
-        FileChangeStatus::Copied => (Style::default().fg(Color::Cyan), "C "),
-        FileChangeStatus::Unmerged => (Style::default().fg(Color::Red), "U "),
+        FileChangeStatus::Renamed => (Style::default().fg(theme.change_renamed), "R "),
+        FileChangeStatus::Copied => (Style::default().fg(theme.change_copied), "C "),
+        FileChangeStatus::Unmerged => (Style::default().fg(theme.change_unmerged), "U "),
     }
 }

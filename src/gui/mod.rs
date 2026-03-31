@@ -156,6 +156,8 @@ pub struct Gui {
     pub commit_history_idx: Option<usize>,
     /// Stashed current draft when cycling through history.
     commit_history_draft: String,
+    /// Current color theme index into COLOR_THEMES.
+    pub current_theme_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,6 +197,18 @@ impl Gui {
         git.load_model_streaming(&initial_load_tx);
 
         let commit_history = Self::load_commit_history(&config);
+
+        // Resolve saved color theme
+        let current_theme_index = config
+            .app_state
+            .color_theme
+            .as_deref()
+            .and_then(|id| {
+                crate::config::COLOR_THEMES
+                    .iter()
+                    .position(|t| t.id == id)
+            })
+            .unwrap_or(0);
 
         Ok(Self {
             config: Arc::new(config),
@@ -258,7 +272,16 @@ impl Gui {
             commit_message_history: commit_history,
             commit_history_idx: None,
             commit_history_draft: String::new(),
+            current_theme_index,
         })
+    }
+
+    /// Get the currently active theme.
+    pub fn active_theme(&self) -> crate::config::Theme {
+        crate::config::COLOR_THEMES
+            .get(self.current_theme_index)
+            .map(|ct| ct.to_theme())
+            .unwrap_or_default()
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -342,9 +365,9 @@ impl Gui {
             self.spinner_frame = self.spinner_frame.wrapping_add(1);
 
             // Render
+            let theme = self.active_theme();
             terminal.draw(|frame| {
                 if self.rebase_mode.active {
-                    let theme = self.config.user_config.theme();
                     presentation::rebase_mode::render(
                         frame,
                         &self.rebase_mode,
@@ -352,10 +375,9 @@ impl Gui {
                     );
                     // Render popup overlay on top of rebase mode
                     if self.popup != PopupState::None {
-                        views::render_popup(frame, &self.popup, frame.area(), self.spinner_frame);
+                        views::render_popup(frame, &self.popup, frame.area(), self.spinner_frame, &theme);
                     }
                 } else if self.diff_mode.active {
-                    let theme = self.config.user_config.theme();
                     presentation::diff_mode::render(
                         frame,
                         &self.diff_mode,
@@ -364,7 +386,7 @@ impl Gui {
                     );
                     // Render popup overlay on top of diff mode (for ? help, errors, etc.)
                     if self.popup != PopupState::None {
-                        views::render_popup(frame, &self.popup, frame.area(), self.spinner_frame);
+                        views::render_popup(frame, &self.popup, frame.area(), self.spinner_frame, &theme);
                     }
                 } else {
                     let model = self.model.lock().unwrap();
@@ -385,6 +407,7 @@ impl Gui {
                         &self.layout,
                         &self.popup,
                         &self.config,
+                        &theme,
                         &mut self.diff_view,
                         self.screen_mode,
                         self.show_file_tree,
@@ -2037,17 +2060,20 @@ impl Gui {
             }
             PopupState::Help { .. } => {}
             PopupState::RefPicker { .. } => {}
+            PopupState::ThemePicker { .. } => {}
             PopupState::None => {}
         }
 
-        // Help popup is handled separately to avoid borrow conflicts
+        // These are handled separately to avoid borrow conflicts.
+        // Use else-if so that a handler that transitions to another popup
+        // (e.g. Help → ThemePicker on Enter) does not also fire the new
+        // popup's handler with the same key event.
         if matches!(self.popup, PopupState::Help { .. }) {
             self.handle_help_popup_key(key);
-        }
-
-        // RefPicker popup is handled separately to avoid borrow conflicts
-        if matches!(self.popup, PopupState::RefPicker { .. }) {
+        } else if matches!(self.popup, PopupState::RefPicker { .. }) {
             self.handle_ref_picker_key(key)?;
+        } else if matches!(self.popup, PopupState::ThemePicker { .. }) {
+            self.handle_theme_picker_key(key);
         }
 
         Ok(())
@@ -2095,6 +2121,8 @@ impl Gui {
             }).sum()
         }
 
+        let mut open_theme_picker = false;
+
         if let PopupState::Help { sections, selected, search_textarea, scroll_offset } = &mut self.popup {
             use crossterm::event::KeyModifiers;
             let search = search_textarea.lines().join("");
@@ -2108,6 +2136,29 @@ impl Gui {
                 KeyCode::Esc | KeyCode::Char('?') if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
                     self.popup = PopupState::None;
                     return;
+                }
+                KeyCode::Enter => {
+                    // Check if the selected entry is "Color theme..."
+                    let has_search = !search_lower.is_empty();
+                    let mut ei = 0usize;
+                    let mut found_desc = String::new();
+                    'outer: for section in sections.iter() {
+                        for entry in &section.entries {
+                            let vis = !has_search
+                                || entry.key.to_lowercase().contains(&search_lower)
+                                || entry.description.to_lowercase().contains(&search_lower);
+                            if vis {
+                                if ei == *selected {
+                                    found_desc = entry.description.clone();
+                                    break 'outer;
+                                }
+                                ei += 1;
+                            }
+                        }
+                    }
+                    if found_desc == "Color theme..." {
+                        open_theme_picker = true;
+                    }
                 }
                 KeyCode::Down | KeyCode::Char('j') if key.modifiers.is_empty() => {
                     let total = count_visible(sections, &search_lower);
@@ -2141,6 +2192,11 @@ impl Gui {
                     }
                 }
             }
+        }
+
+        if open_theme_picker {
+            self.popup = PopupState::None;
+            self.show_theme_picker();
         }
     }
 
@@ -2269,6 +2325,73 @@ impl Gui {
         Ok(())
     }
 
+    fn handle_theme_picker_key(&mut self, key: KeyEvent) {
+        let theme_count = crate::config::COLOR_THEMES.len();
+
+        if let PopupState::ThemePicker { selected, scroll_offset, original_theme_index } = &mut self.popup {
+            let h = self.layout.height as usize;
+            let popup_h = (h * 60 / 100).max(10).min(h.saturating_sub(4));
+            let list_height = popup_h.saturating_sub(2).saturating_sub(1); // borders + hint
+
+            match key.code {
+                KeyCode::Esc => {
+                    // Revert to original theme
+                    self.current_theme_index = *original_theme_index;
+                    self.popup = PopupState::None;
+                    return;
+                }
+                KeyCode::Enter => {
+                    // Confirm selection — save to state
+                    let idx = *selected;
+                    self.popup = PopupState::None;
+                    self.current_theme_index = idx;
+                    if let Some(ct) = crate::config::COLOR_THEMES.get(idx) {
+                        let mut state = self.config.app_state.clone();
+                        state.color_theme = Some(ct.id.to_string());
+                        let _ = state.save(&self.config.state_path);
+                    }
+                    return;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if theme_count > 0 {
+                        *selected = (*selected + 1) % theme_count;
+                    }
+                    // Live preview
+                    self.current_theme_index = *selected;
+                    if *selected >= *scroll_offset + list_height {
+                        *scroll_offset = selected.saturating_sub(list_height - 1);
+                    }
+                    if *selected == 0 {
+                        *scroll_offset = 0;
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if theme_count > 0 {
+                        *selected = if *selected == 0 { theme_count - 1 } else { *selected - 1 };
+                    }
+                    // Live preview
+                    self.current_theme_index = *selected;
+                    if *selected < *scroll_offset {
+                        *scroll_offset = *selected;
+                    }
+                    if *selected == theme_count - 1 {
+                        *scroll_offset = theme_count.saturating_sub(list_height);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn show_theme_picker(&mut self) {
+        let original = self.current_theme_index;
+        self.popup = PopupState::ThemePicker {
+            selected: original,
+            scroll_offset: 0,
+            original_theme_index: original,
+        };
+    }
+
     pub fn show_interactive_rebase_picker(&mut self) {
         use crate::gui::popup::{RefPickerItem, make_help_search_textarea};
 
@@ -2373,6 +2496,7 @@ impl Gui {
                 HelpEntry { key: "I".into(), description: "Interactive rebase onto...".into() },
                 HelpEntry { key: "1-5".into(), description: "Jump to panel".into() },
                 HelpEntry { key: "?".into(), description: "Show this help".into() },
+                HelpEntry { key: "▸".into(), description: "Color theme...".into() },
             ],
         };
 
@@ -2585,6 +2709,7 @@ impl Gui {
                 HelpEntry { key: "1-5".into(), description: "Jump to sidebar panel".into() },
                 HelpEntry { key: "esc".into(), description: "Return to sidebar".into() },
                 HelpEntry { key: "?".into(), description: "Show this help".into() },
+                HelpEntry { key: "▸".into(), description: "Color theme...".into() },
             ],
         };
 
@@ -3184,6 +3309,32 @@ impl Gui {
                     let list_height = popup_h.saturating_sub(2).saturating_sub(3);
                     if di >= *scroll_offset + list_height {
                         *scroll_offset = di.saturating_sub(list_height - 1);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        // ThemePicker popup intercepts mouse scroll
+        if let PopupState::ThemePicker { selected, scroll_offset, .. } = &mut self.popup {
+            let total = crate::config::COLOR_THEMES.len();
+            let h = self.layout.height as usize;
+            let popup_h = (h * 60 / 100).max(10).min(h.saturating_sub(4));
+            let list_height = popup_h.saturating_sub(2).saturating_sub(1);
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    *selected = selected.saturating_sub(1);
+                    self.current_theme_index = *selected;
+                    if *selected < *scroll_offset {
+                        *scroll_offset = *selected;
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    *selected = (*selected + 1).min(total.saturating_sub(1));
+                    self.current_theme_index = *selected;
+                    if *selected >= *scroll_offset + list_height {
+                        *scroll_offset = selected.saturating_sub(list_height - 1);
                     }
                 }
                 _ => {}

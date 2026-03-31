@@ -1,11 +1,11 @@
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::ListItem;
 
 use crate::config::Theme;
 use crate::model::Model;
 
-pub fn render_remote_list<'a>(model: &Model, _theme: &Theme) -> Vec<ListItem<'a>> {
+pub fn render_remote_list<'a>(model: &Model, theme: &Theme) -> Vec<ListItem<'a>> {
     model
         .remotes
         .iter()
@@ -16,13 +16,13 @@ pub fn render_remote_list<'a>(model: &Model, _theme: &Theme) -> Vec<ListItem<'a>
             let line = Line::from(vec![
                 Span::styled(
                     format!(" {} ", remote.name),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(theme.remote_name),
                 ),
                 Span::styled(
                     format!("({} branches) ", branch_count),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.text_dimmed),
                 ),
-                Span::styled(url, Style::default().fg(Color::White)),
+                Span::styled(url, Style::default().fg(theme.remote_url)),
             ]);
 
             ListItem::new(line)

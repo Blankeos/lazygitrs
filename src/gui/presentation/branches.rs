@@ -1,4 +1,4 @@
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::ListItem;
 
@@ -37,7 +37,7 @@ pub fn render_branch_list<'a>(
                     0,
                     Span::styled(
                         format!("{:>3} ", branch.recency),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme.text_dimmed),
                     ),
                 );
             }
@@ -48,12 +48,12 @@ pub fn render_branch_list<'a>(
                     let spinner = SPINNER_CHARS[(spinner_frame / 8) % SPINNER_CHARS.len()];
                     spans.push(Span::styled(
                         format!(" {} {}", label, spinner),
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(theme.accent_secondary),
                     ));
                 } else if remote_op_success {
                     spans.push(Span::styled(
                         " ✓".to_string(),
-                        Style::default().fg(Color::Green),
+                        Style::default().fg(theme.accent),
                     ));
                 }
             }
@@ -70,7 +70,7 @@ pub fn render_branch_list<'a>(
                     if !indicator.is_empty() {
                         spans.push(Span::styled(
                             indicator,
-                            Style::default().fg(Color::Yellow),
+                            Style::default().fg(theme.accent_secondary),
                         ));
                     }
                 }

@@ -84,6 +84,13 @@ pub enum PopupState {
         scroll_offset: usize,
         on_confirm: RefPickerAction,
     },
+    /// Color theme picker with live preview.
+    ThemePicker {
+        selected: usize,
+        scroll_offset: usize,
+        /// The theme index before opening the picker (for cancel/revert).
+        original_theme_index: usize,
+    },
 }
 
 pub type ChecklistAction = Box<dyn FnOnce(&mut Gui, Vec<String>) -> Result<()>>;

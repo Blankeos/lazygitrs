@@ -1,4 +1,4 @@
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::ListItem;
 
@@ -7,7 +7,7 @@ use crate::model::RemoteBranch;
 
 pub fn render_remote_branch_list<'a>(
     branches: &[RemoteBranch],
-    _theme: &Theme,
+    theme: &Theme,
 ) -> Vec<ListItem<'a>> {
     branches
         .iter()
@@ -15,11 +15,11 @@ pub fn render_remote_branch_list<'a>(
             let line = Line::from(vec![
                 Span::styled(
                     format!("  {} ", branch.name),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(theme.remote_branch_name),
                 ),
                 Span::styled(
                     branch.hash.clone(),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.remote_branch_detail),
                 ),
             ]);
             ListItem::new(line)

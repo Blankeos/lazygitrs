@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::ListItem;
 
@@ -17,7 +17,7 @@ pub fn render_commit_file_list<'a>(model: &Model, theme: &Theme) -> Vec<ListItem
             let (status_style, status_icon) = commit_file_status_display(file, theme);
             let line = Line::from(vec![
                 Span::styled(format!(" {} ", status_icon), status_style),
-                Span::styled(file.name.clone(), Style::default().fg(Color::White)),
+                Span::styled(file.name.clone(), Style::default().fg(theme.text_strong)),
             ]);
             ListItem::new(line)
         })
@@ -44,15 +44,15 @@ pub fn render_commit_file_tree<'a>(
                 let line = if is_root {
                     Line::from(Span::styled(
                         format!("{}", icon.trim_end()),
-                        Style::default().fg(Color::White),
+                        Style::default().fg(theme.text_strong),
                     ))
                 } else {
                     Line::from(vec![
                         Span::styled(
                             format!("{}{}", indent, icon),
-                            Style::default().fg(Color::White),
+                            Style::default().fg(theme.text_strong),
                         ),
-                        Span::styled(node.name.clone(), Style::default().fg(Color::White)),
+                        Span::styled(node.name.clone(), Style::default().fg(theme.text_strong)),
                     ])
                 };
                 ListItem::new(line)
@@ -65,7 +65,7 @@ pub fn render_commit_file_tree<'a>(
                 let line = Line::from(vec![
                     Span::styled(format!("{} ", status_icon), status_style),
                     Span::raw(indent),
-                    Span::styled(node.name.clone(), Style::default().fg(Color::White)),
+                    Span::styled(node.name.clone(), Style::default().fg(theme.text_strong)),
                 ]);
                 ListItem::new(line)
             } else {
@@ -78,10 +78,10 @@ pub fn render_commit_file_tree<'a>(
 fn commit_file_status_display<'a>(file: &CommitFile, theme: &Theme) -> (Style, &'a str) {
     match file.status {
         FileChangeStatus::Added => (theme.file_staged, "A "),
-        FileChangeStatus::Deleted => (Style::default().fg(Color::Red), "D "),
+        FileChangeStatus::Deleted => (Style::default().fg(theme.change_deleted), "D "),
         FileChangeStatus::Modified => (theme.file_unstaged, "M "),
-        FileChangeStatus::Renamed => (Style::default().fg(Color::Yellow), "R "),
-        FileChangeStatus::Copied => (Style::default().fg(Color::Cyan), "C "),
-        FileChangeStatus::Unmerged => (Style::default().fg(Color::Red), "U "),
+        FileChangeStatus::Renamed => (Style::default().fg(theme.change_renamed), "R "),
+        FileChangeStatus::Copied => (Style::default().fg(theme.change_copied), "C "),
+        FileChangeStatus::Unmerged => (Style::default().fg(theme.change_unmerged), "U "),
     }
 }

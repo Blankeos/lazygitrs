@@ -7,31 +7,31 @@ use std::path::Path;
 use ratatui::prelude::*;
 use tree_sitter_highlight::{HighlightEvent, Highlighter};
 
+use crate::config::Theme;
+
 use config::{LanguageConfig, CONFIGS, HIGHLIGHT_NAMES};
 
-/// Map a highlight index to a ratatui Color.
-pub fn highlight_color(index: usize) -> Color {
+/// Map a highlight index to a ratatui Color using the active theme.
+pub fn highlight_color(index: usize, theme: &Theme) -> Color {
     match HIGHLIGHT_NAMES.get(index) {
-        Some(&"comment") => Color::Rgb(106, 115, 125),    // gray
-        Some(&"keyword") => Color::Rgb(255, 123, 114),    // red/pink
-        Some(&"string" | &"string.special") => Color::Rgb(158, 203, 255), // light blue
-        Some(&"number" | &"constant" | &"constant.builtin") => Color::Rgb(121, 192, 255), // blue
-        Some(&"function" | &"function.builtin" | &"function.method") => {
-            Color::Rgb(210, 168, 255) // purple
-        }
-        Some(&"function.macro") => Color::Rgb(240, 160, 240), // light magenta
-        Some(&"type" | &"type.builtin" | &"constructor") => Color::Rgb(255, 203, 107), // orange
-        Some(&"variable.builtin") => Color::Rgb(255, 123, 114), // red
-        Some(&"variable.member" | &"property") => Color::Rgb(121, 192, 255), // blue
-        Some(&"module") => Color::Rgb(255, 203, 107),     // orange
-        Some(&"operator") => Color::Rgb(255, 123, 114),   // red
-        Some(&"tag") => Color::Rgb(126, 231, 135),        // green
-        Some(&"attribute") => Color::Rgb(210, 168, 255),  // purple
-        Some(&"label") => Color::Rgb(255, 203, 107),      // orange
+        Some(&"comment") => theme.syntax_comment,
+        Some(&"keyword") => theme.syntax_keyword,
+        Some(&"string" | &"string.special") => theme.syntax_string,
+        Some(&"number" | &"constant" | &"constant.builtin") => theme.syntax_number,
+        Some(&"function" | &"function.builtin" | &"function.method") => theme.syntax_function,
+        Some(&"function.macro") => theme.syntax_function_macro,
+        Some(&"type" | &"type.builtin" | &"constructor") => theme.syntax_type,
+        Some(&"variable.builtin") => theme.syntax_variable_builtin,
+        Some(&"variable.member" | &"property") => theme.syntax_variable_member,
+        Some(&"module") => theme.syntax_module,
+        Some(&"operator") => theme.syntax_operator,
+        Some(&"tag") => theme.syntax_tag,
+        Some(&"attribute") => theme.syntax_attribute,
+        Some(&"label") => theme.syntax_label,
         Some(&"punctuation" | &"punctuation.bracket" | &"punctuation.delimiter") => {
-            Color::Rgb(150, 160, 170) // gray-ish
+            theme.syntax_punctuation
         }
-        _ => Color::Rgb(201, 209, 217), // default text
+        _ => theme.syntax_default,
     }
 }
 
@@ -122,9 +122,9 @@ impl FileHighlighter {
     }
 
     /// Get highlighted spans for a specific line (1-based line number).
-    pub fn get_line_spans<'a>(&self, line_number: usize, bg: Option<Color>) -> Vec<Span<'a>> {
+    pub fn get_line_spans<'a>(&self, line_number: usize, bg: Option<Color>, theme: &Theme) -> Vec<Span<'a>> {
         let bg_color = bg.unwrap_or(Color::Reset);
-        let default_fg = Color::Rgb(201, 209, 217);
+        let default_fg = theme.syntax_default;
 
         self.line_highlights
             .get(&line_number)
@@ -133,7 +133,7 @@ impl FileHighlighter {
                     .iter()
                     .filter(|(text, _)| *text != "\n")
                     .map(|(text, highlight_idx)| {
-                        let fg = highlight_idx.map(highlight_color).unwrap_or(default_fg);
+                        let fg = highlight_idx.map(|i| highlight_color(i, theme)).unwrap_or(default_fg);
                         Span::styled(text.clone(), Style::default().fg(fg).bg(bg_color))
                     })
                     .collect()

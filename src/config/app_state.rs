@@ -16,6 +16,8 @@ pub struct AppState {
     pub show_file_tree: Option<bool>,
     #[serde(rename = "diffLineWrap", skip_serializing_if = "Option::is_none")]
     pub diff_line_wrap: Option<bool>,
+    #[serde(rename = "colorTheme", skip_serializing_if = "Option::is_none")]
+    pub color_theme: Option<String>,
 }
 
 impl AppState {

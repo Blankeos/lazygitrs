@@ -9,7 +9,7 @@ use anyhow::Result;
 
 pub use app_state::AppState;
 pub use keybindings::KeybindingConfig;
-pub use theme::Theme;
+pub use theme::{Theme, ColorTheme, COLOR_THEMES};
 pub use user_config::UserConfig;
 
 /// Top-level application configuration.

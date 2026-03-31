@@ -690,7 +690,7 @@ pub fn render_diff(
                 .file_line_number(line_idx, show_panel)
                 .map(|n| format!("{:>4} ", n))
                 .unwrap_or_else(|| "     ".to_string());
-            let gutter_style = Style::default().fg(Color::DarkGray).bg(bg);
+            let gutter_style = Style::default().fg(theme.diff_gutter).bg(bg);
 
             if state.wrap && line_data.is_some() {
                 let spans = build_content_spans(
@@ -777,9 +777,9 @@ pub fn render_diff(
                 .unwrap_or((&default_hl, &default_hl));
 
             let (left_bg, right_bg) = line_bg_colors(diff_line.change_type, theme);
-            let gutter_style = Style::default().fg(Color::DarkGray).bg(left_bg);
-            let right_gutter_style = Style::default().fg(Color::DarkGray).bg(right_bg);
-            let divider_style = Style::default().fg(Color::DarkGray);
+            let gutter_style = Style::default().fg(theme.diff_gutter).bg(left_bg);
+            let right_gutter_style = Style::default().fg(theme.diff_gutter).bg(right_bg);
+            let divider_style = Style::default().fg(theme.diff_gutter);
 
             let left_num = state
                 .file_line_number(line_idx, DiffPanel::Old)
@@ -848,7 +848,7 @@ pub fn render_diff(
                     if is_insert {
                         let slash: String = std::iter::repeat('/').take(panel_width as usize).collect();
                         buf_write_str(buf, inner.x + gutter_width, y, &slash,
-                            Style::default().fg(Color::Rgb(60, 60, 60)).bg(left_bg), panel_width);
+                            Style::default().fg(theme.diff_line_number).bg(left_bg), panel_width);
                     } else if let Some(chunk) = left_wrapped.get(chunk_idx) {
                         buf_write_spans(buf, inner.x + gutter_width, y, chunk, panel_width, 0);
                     } else {
@@ -865,7 +865,7 @@ pub fn render_diff(
                     if is_delete {
                         let slash: String = std::iter::repeat('/').take(right_content_width as usize).collect();
                         buf_write_str(buf, right_content_x, y, &slash,
-                            Style::default().fg(Color::Rgb(60, 60, 60)).bg(right_bg), right_content_width);
+                            Style::default().fg(theme.diff_line_number).bg(right_bg), right_content_width);
                     } else if let Some(chunk) = right_wrapped.get(chunk_idx) {
                         buf_write_spans(buf, right_content_x, y, chunk, right_content_width, 0);
                     } else {
@@ -887,7 +887,7 @@ pub fn render_diff(
                     let slash_fill: String = std::iter::repeat('/').take(panel_width as usize).collect();
                     vec![Span::styled(
                         slash_fill,
-                        Style::default().fg(Color::Rgb(60, 60, 60)).bg(left_bg),
+                        Style::default().fg(theme.diff_line_number).bg(left_bg),
                     )]
                 } else {
                     build_content_spans(
@@ -914,7 +914,7 @@ pub fn render_diff(
                     let slash_fill: String = std::iter::repeat('/').take(panel_width as usize).collect();
                     vec![Span::styled(
                         slash_fill,
-                        Style::default().fg(Color::Rgb(60, 60, 60)).bg(right_bg),
+                        Style::default().fg(theme.diff_line_number).bg(right_bg),
                     )]
                 } else {
                     build_content_spans(
@@ -937,15 +937,15 @@ pub fn render_diff(
 }
 
 /// Render a file header separator line spanning the full width.
-fn render_file_header(buf: &mut Buffer, x: u16, y: u16, width: u16, filename: &str, _theme: &Theme) {
+fn render_file_header(buf: &mut Buffer, x: u16, y: u16, width: u16, filename: &str, theme: &Theme) {
     let buf_area = buf.area();
     if y < buf_area.y || y >= buf_area.y + buf_area.height {
         return;
     }
 
     let header_style = Style::default()
-        .fg(Color::Rgb(158, 203, 255))
-        .bg(Color::Rgb(30, 40, 55))
+        .fg(theme.diff_selection_fg)
+        .bg(theme.diff_selection_bg)
         .add_modifier(Modifier::BOLD);
 
     // Build header text: "── filename ──────..."
@@ -1121,7 +1121,7 @@ fn build_content_spans<'a>(
     }
 
     // Otherwise, try syntax highlighting
-    let highlighted = highlighter.get_line_spans(line_num, Some(bg));
+    let highlighted = highlighter.get_line_spans(line_num, Some(bg), theme);
     if !highlighted.is_empty() {
         return highlighted;
     }
@@ -1130,7 +1130,7 @@ fn build_content_spans<'a>(
     let fg = match change_type {
         ChangeType::Delete => theme.diff_remove.fg.unwrap_or(Color::Red),
         ChangeType::Insert => theme.diff_add.fg.unwrap_or(Color::Green),
-        _ => Color::White,
+        _ => theme.syntax_default,
     };
 
     let display = if text.len() > max_width {
@@ -1171,11 +1171,11 @@ fn build_word_diff_spans<'a>(
                     seg.text.clone(),
                     Style::default()
                         .bg(emphasis_bg)
-                        .fg(Color::White)
+                        .fg(theme.text_strong)
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
-                Span::styled(seg.text.clone(), Style::default().bg(bg).fg(Color::White))
+                Span::styled(seg.text.clone(), Style::default().bg(bg).fg(theme.syntax_default))
             }
         })
         .collect()
@@ -1188,6 +1188,7 @@ pub fn render_diff_search_highlights(
     frame: &mut Frame,
     area: Rect,
     state: &DiffViewState,
+    theme: &Theme,
 ) {
     if state.search_query.is_empty() || state.search_matches.is_empty() {
         return;
@@ -1217,10 +1218,10 @@ pub fn render_diff_search_highlights(
     };
 
     let visible_height = area.height.saturating_sub(2) as usize; // -2 for borders
-    let highlight_style = Style::default().bg(Color::Rgb(120, 100, 30)).fg(Color::White);
+    let highlight_style = Style::default().bg(theme.diff_search_highlight_bg).fg(theme.diff_search_highlight_fg);
     let current_highlight_style = Style::default()
-        .bg(Color::Rgb(200, 170, 40))
-        .fg(Color::Black)
+        .bg(theme.diff_search_cursor_bg)
+        .fg(theme.diff_search_cursor_fg)
         .add_modifier(Modifier::BOLD);
 
     for row_offset in 0..visible_height {
@@ -1274,6 +1275,7 @@ pub fn render_diff_search_bar(
     frame: &mut Frame,
     area: Rect,
     state: &DiffViewState,
+    theme: &Theme,
 ) {
     // Only render if search is active (typing) or has a query (dismissed but results shown)
     if !state.search_active && state.search_query.is_empty() {
@@ -1296,7 +1298,7 @@ pub fn render_diff_search_bar(
     for x in bar_rect.x..bar_rect.x + bar_rect.width {
         if let Some(cell) = buf.cell_mut((x, bar_y)) {
             cell.set_char(' ');
-            cell.set_style(Style::default().bg(Color::Rgb(40, 40, 50)));
+            cell.set_style(Style::default().bg(theme.diff_grid_bg));
         }
     }
 
@@ -1321,7 +1323,7 @@ pub fn render_diff_search_bar(
         let prefix_rect = Rect::new(bar_rect.x, bar_y, prefix_width, 1);
         let prefix = Paragraph::new(Span::styled(
             " /",
-            Style::default().fg(Color::Yellow).bg(Color::Rgb(40, 40, 50)),
+            Style::default().fg(theme.diff_grid_fg).bg(theme.diff_grid_bg),
         ));
         frame.render_widget(prefix, prefix_rect);
 
@@ -1334,14 +1336,14 @@ pub fn render_diff_search_bar(
             let suffix_rect = Rect::new(bar_rect.x + prefix_width + ta_width, bar_y, suffix_width, 1);
             let suffix = Paragraph::new(Span::styled(
                 match_info,
-                Style::default().fg(Color::Yellow).bg(Color::Rgb(40, 40, 50)),
+                Style::default().fg(theme.diff_grid_fg).bg(theme.diff_grid_bg),
             ));
             frame.render_widget(suffix, suffix_rect);
         }
     } else {
         // Dismissed search — show query + match info
         let text = format!(" /{}{}", state.search_query, match_info);
-        let style = Style::default().fg(Color::Yellow).bg(Color::Rgb(40, 40, 50));
+        let style = Style::default().fg(theme.diff_grid_fg).bg(theme.diff_grid_bg);
         buf_write_str(
             frame.buffer_mut(),
             bar_rect.x,

@@ -7,21 +7,10 @@
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 
-/// Graph colors — each column gets a rotating color.
-/// These match lazygit's palette.
-const GRAPH_COLORS: &[Color] = &[
-    Color::Cyan,
-    Color::Green,
-    Color::Yellow,
-    Color::Magenta,
-    Color::Blue,
-    Color::Red,
-    Color::LightCyan,
-    Color::LightGreen,
-];
+use crate::config::Theme;
 
-pub fn col_color(col: usize) -> Color {
-    GRAPH_COLORS[col % GRAPH_COLORS.len()]
+pub fn col_color(col: usize, theme: &Theme) -> Color {
+    theme.graph_colors[col % theme.graph_colors.len()]
 }
 
 /// The computed graph data for one commit row.
@@ -192,40 +181,40 @@ pub fn compute_graph(commits: &[(String, Vec<String>)]) -> Vec<GraphRow> {
 /// to match lazygit's spacing.
 ///
 /// `is_head` — when true the node uses a hollow circle (◯); otherwise a solid one (⬤).
-pub fn render_graph_spans(row: &GraphRow, max_width: usize, is_head: bool) -> Vec<Span<'static>> {
+pub fn render_graph_spans(row: &GraphRow, max_width: usize, is_head: bool, theme: &Theme) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
 
     for (i, cell) in row.cells.iter().enumerate() {
         let (ch, style) = match cell {
             GraphCell::Node => {
-                let color = col_color(row.commit_col);
+                let color = col_color(row.commit_col, theme);
                 let glyph = if is_head { "⬤" } else { "◯" };
                 (glyph, Style::default().fg(color))
             }
             GraphCell::Pipe => {
-                let color = col_color(i);
+                let color = col_color(i, theme);
                 ("┃", Style::default().fg(color))
             }
             GraphCell::MergeRight => {
-                let color = col_color(i);
+                let color = col_color(i, theme);
                 ("╮", Style::default().fg(color))
             }
             GraphCell::ConvergeFromRight => {
                 // Pipe from above bends left: ╯
-                let color = col_color(i);
+                let color = col_color(i, theme);
                 ("╯", Style::default().fg(color))
             }
             GraphCell::ConvergeFromLeft => {
                 // Pipe from above bends right: ╰
-                let color = col_color(i);
+                let color = col_color(i, theme);
                 ("╰", Style::default().fg(color))
             }
             GraphCell::MergeLeft => {
-                let color = col_color(i);
+                let color = col_color(i, theme);
                 ("╯", Style::default().fg(color))
             }
             GraphCell::Horizontal => {
-                let color = col_color(row.commit_col);
+                let color = col_color(row.commit_col, theme);
                 ("━", Style::default().fg(color))
             }
             GraphCell::Empty => (" ", Style::default()),

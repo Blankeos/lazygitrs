@@ -1,11 +1,11 @@
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::ListItem;
 
 use crate::config::Theme;
 use crate::model::Model;
 
-pub fn render_tag_list<'a>(model: &Model, _theme: &Theme) -> Vec<ListItem<'a>> {
+pub fn render_tag_list<'a>(model: &Model, theme: &Theme) -> Vec<ListItem<'a>> {
     model
         .tags
         .iter()
@@ -13,18 +13,18 @@ pub fn render_tag_list<'a>(model: &Model, _theme: &Theme) -> Vec<ListItem<'a>> {
             let mut spans = vec![
                 Span::styled(
                     format!(" {} ", tag.name),
-                    Style::default().fg(Color::Green),
+                    Style::default().fg(theme.tag_name),
                 ),
                 Span::styled(
                     format!("{} ", &tag.hash),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(theme.tag_hash),
                 ),
             ];
 
             if !tag.message.is_empty() {
                 spans.push(Span::styled(
                     tag.message.clone(),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(theme.tag_message),
                 ));
             }
 

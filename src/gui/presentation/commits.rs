@@ -1,4 +1,4 @@
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::ListItem;
 
@@ -46,7 +46,7 @@ fn render_commits<'a>(
 
             // Start with graph spans.
             let mut spans: Vec<Span<'a>> = if let Some(row) = graph_row {
-                graph::render_graph_spans(row, max_graph_width, is_head)
+                graph::render_graph_spans(row, max_graph_width, is_head, theme)
             } else {
                 vec![Span::raw(" ".repeat(max_graph_width * 2))]
             };
@@ -54,13 +54,13 @@ fn render_commits<'a>(
             // Hash — color by push status, overridden to cyan+bold if cherry-picked
             let is_cherry_picked = cherry_picked.iter().any(|h| *h == commit.hash);
             let hash_style = if is_cherry_picked {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
             } else {
                 match commit.status {
-                    CommitStatus::Unpushed => Style::default().fg(Color::Yellow),
-                    CommitStatus::Pushed => Style::default().fg(Color::Rgb(102, 102, 102)),
-                    CommitStatus::Merged => Style::default().fg(Color::Rgb(80, 80, 80)),
-                    _ => Style::default().fg(Color::Yellow),
+                    CommitStatus::Unpushed => theme.commit_hash,
+                    CommitStatus::Pushed => Style::default().fg(theme.commit_hash_pushed),
+                    CommitStatus::Merged => Style::default().fg(theme.commit_hash_merged),
+                    _ => theme.commit_hash,
                 }
             };
             spans.push(Span::styled(
@@ -71,15 +71,15 @@ fn render_commits<'a>(
             // Ref decorations (HEAD -> main, origin/main, etc.)
             for r in &commit.refs {
                 let (label, color) = if r.starts_with("HEAD -> ") {
-                    (r.clone(), Color::Cyan)
+                    (r.clone(), theme.ref_head)
                 } else if r == "HEAD" {
-                    (r.clone(), Color::Cyan)
+                    (r.clone(), theme.ref_head)
                 } else if r.contains('/') {
                     // Remote ref like origin/main
-                    (r.clone(), Color::Red)
+                    (r.clone(), theme.ref_remote)
                 } else {
                     // Local branch
-                    (r.clone(), Color::Green)
+                    (r.clone(), theme.ref_local)
                 };
                 spans.push(Span::styled(
                     format!("({}) ", label),
@@ -91,14 +91,14 @@ fn render_commits<'a>(
             for tag in &commit.tags {
                 spans.push(Span::styled(
                     format!("[{}] ", tag),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.ref_tag).add_modifier(Modifier::BOLD),
                 ));
             }
 
             // Commit message
             spans.push(Span::styled(
                 commit.name.clone(),
-                Style::default().fg(Color::White),
+                Style::default().fg(theme.text_strong),
             ));
 
             // Author (compact)
