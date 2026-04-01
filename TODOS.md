@@ -136,3 +136,12 @@
 - [x] Make the combobox work with mouse (in diff_mode)
 - [x] In diff_mode, show the 'current branch' as the first option.
 - [x] ~In 'Commits' view, pressing 'd' to drop a commit.~ Just recommend using 'g' maybe?
+
+- [x] Improve and standardize list-view mouse interaction behaviors:
+  - Keyboard
+    - Pressing down, Only start scrolling down when selected/cursor is on the last viewable element (I think this behavior is already behaved by all)
+    - Pressing up, Only start scrolling up when the selected/cursor is already on the first viewable element (not followed by '2 Files', '3 Branches', '4 Commits', '5 Stash' etc. - currently even if I'm on the last element, it will still scroll up when I press up)
+  - Mouse
+    - Clicking a list item - just essentially skips cursor to select the item as the new selected/cursor. Shouldn't really imitate 'enter', it just changes the selection. Currently works in '2 Files' tab. i.e. 'Keybindings' (?), Interactive rebase (I), Checkout (c on branches), Color Theme.
+    - Scroll down - should have the same behavior as pressing down on any of the cmdk-style components
+    - Scroll up - should have the same behavior as pressing up.
