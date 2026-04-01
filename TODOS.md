@@ -135,3 +135,5 @@
 
 - [x] Make the combobox work with mouse (in diff_mode)
 - [x] In diff_mode, show the 'current branch' as the first option.
+
+asda
