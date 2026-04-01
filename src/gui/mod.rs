@@ -198,6 +198,25 @@ pub enum ScreenMode {
     Full,
 }
 
+/// Synthesize a unified diff for a new (untracked) file from its raw content.
+/// This allows untracked files to be included in combined multi-file diffs.
+fn synthesize_new_file_diff(filename: &str, content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let count = lines.len();
+    let mut diff = String::new();
+    diff.push_str(&format!("diff --git a/{f} b/{f}\n", f = filename));
+    diff.push_str("new file mode 100644\n");
+    diff.push_str(&format!("--- /dev/null\n"));
+    diff.push_str(&format!("+++ b/{}\n", filename));
+    diff.push_str(&format!("@@ -0,0 +1,{} @@\n", count));
+    for line in &lines {
+        diff.push('+');
+        diff.push_str(line);
+        diff.push('\n');
+    }
+    diff
+}
+
 impl Gui {
     pub fn new(config: AppConfig, git: GitCommands) -> Result<Self> {
         let (diff_tx, diff_rx) = mpsc::channel();
@@ -816,12 +835,18 @@ impl Gui {
                                     if gen_counter.load(Ordering::Relaxed) != generation {
                                         return;
                                     }
-                                    let diff = if *has_unstaged {
+                                    let diff = if !tracked {
+                                        // Untracked file: synthesize a unified diff from raw content
+                                        let content = git.file_content(name).unwrap_or_default();
+                                        if content.is_empty() {
+                                            String::new()
+                                        } else {
+                                            synthesize_new_file_diff(name, &content)
+                                        }
+                                    } else if *has_unstaged {
                                         git.diff_file(name).unwrap_or_default()
                                     } else if *has_staged {
                                         git.diff_file_staged(name).unwrap_or_default()
-                                    } else if !tracked {
-                                        git.file_content(name).unwrap_or_default()
                                     } else {
                                         String::new()
                                     };

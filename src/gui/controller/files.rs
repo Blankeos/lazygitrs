@@ -125,12 +125,10 @@ fn toggle_stage(gui: &mut Gui) -> Result<()> {
                     .collect();
                 drop(model);
 
-                for name in &names {
-                    if any_unstaged {
-                        gui.git.stage_file(name)?;
-                    } else {
-                        gui.git.unstage_file(name)?;
-                    }
+                if any_unstaged {
+                    gui.git.stage_files(&names)?;
+                } else {
+                    gui.git.unstage_files(&names)?;
                 }
                 gui.needs_files_refresh = true;
                 return Ok(());

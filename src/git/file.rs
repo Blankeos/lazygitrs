@@ -7,7 +7,7 @@ impl GitCommands {
     pub fn load_files(&self) -> Result<Vec<File>> {
         let result = self
             .git()
-            .args(&["status", "--porcelain", "-u"])
+            .args(&["status", "--porcelain", "-uall"])
             .run_expecting_success()?;
 
         let mut files = Vec::new();
@@ -53,10 +53,34 @@ impl GitCommands {
         Ok(())
     }
 
+    /// Stage multiple files in a single git command.
+    pub fn stage_files(&self, paths: &[String]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let mut args = vec!["add", "--"];
+        let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+        args.extend(refs);
+        self.git().args(&args).run_expecting_success()?;
+        Ok(())
+    }
+
     pub fn unstage_file(&self, path: &str) -> Result<()> {
         self.git()
             .args(&["reset", "HEAD", "--", path])
             .run_expecting_success()?;
+        Ok(())
+    }
+
+    /// Unstage multiple files in a single git command.
+    pub fn unstage_files(&self, paths: &[String]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let mut args = vec!["reset", "HEAD", "--"];
+        let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+        args.extend(refs);
+        self.git().args(&args).run_expecting_success()?;
         Ok(())
     }
 
