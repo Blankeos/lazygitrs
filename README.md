@@ -51,6 +51,7 @@ lazygitrs
   - [ ] `git reset` and then asks, what branch/commit, has quick search.
   - [x] `git diff/compare` and then asks what branch/commit A and B, has quick search.
   - [x] `git rebase` and then asks rebase on top of what branch/commit.
+  - [x] 🎨 Themes!
 
 <!-- GEN_BENCHMARKS_START -->
 
