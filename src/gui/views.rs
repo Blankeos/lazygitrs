@@ -933,6 +933,7 @@ fn render_status_main(
     lines.push(Line::from(format!(" Branch: {}", branch_name)));
     lines.push(Line::from(format!(" Commits: {}", model.commits.len())));
     lines.push(Line::from(format!(" Files: {}", model.files.len())));
+    lines.push(Line::from(format!(" Version: v{}", env!("CARGO_PKG_VERSION"))));
 
     // In-progress operation banners
     if model.is_rebasing {
