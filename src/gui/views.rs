@@ -49,6 +49,8 @@ pub fn render(
     remote_op_success: bool,
     cherry_pick_clipboard: &[String],
     range_select_anchor: Option<usize>,
+    diff_loading: bool,
+    diff_loading_show: bool,
 ) {
     let area = frame.area();
     let panel_count = SideWindow::ALL.len();
@@ -73,9 +75,20 @@ pub fn render(
         if diff_focused {
             // Diff is focused: show diff fullscreen
             if !diff_view.is_empty() {
-                side_by_side::render_diff(frame, fl.main_panel, diff_view, theme, true);
+                side_by_side::render_diff(frame, fl.main_panel, diff_view, theme, true, diff_loading_show);
                 side_by_side::render_diff_search_highlights(frame, fl.main_panel, diff_view, theme);
                 side_by_side::render_diff_search_bar(frame, fl.main_panel, diff_view, theme);
+            } else if diff_loading {
+                let block = Block::default()
+                    .title(" Diff ")
+                    .borders(Borders::ALL)
+                    .border_style(theme.active_border);
+                if diff_loading_show {
+                    let widget = Paragraph::new(" Loading diff...").block(block);
+                    frame.render_widget(widget, fl.main_panel);
+                } else {
+                    frame.render_widget(block, fl.main_panel);
+                }
             } else {
                 let block = Block::default()
                     .title(" Diff ")
@@ -486,9 +499,21 @@ pub fn render(
         // Status view: show logo + copyright in the main content area
         render_status_main(frame, fl.main_panel, model, config, theme);
     } else if !diff_view.is_empty() {
-        side_by_side::render_diff(frame, fl.main_panel, diff_view, theme, diff_focused);
+        side_by_side::render_diff(frame, fl.main_panel, diff_view, theme, diff_focused, diff_loading_show);
         side_by_side::render_diff_search_highlights(frame, fl.main_panel, diff_view, theme);
         side_by_side::render_diff_search_bar(frame, fl.main_panel, diff_view, theme);
+    } else if diff_loading {
+        // Diff is being loaded — show empty panel during grace period, then "Loading..." after delay
+        let block = Block::default()
+            .title(" Diff ")
+            .borders(Borders::ALL)
+            .border_style(theme.inactive_border);
+        if diff_loading_show {
+            let widget = Paragraph::new(" Loading diff...").block(block);
+            frame.render_widget(widget, fl.main_panel);
+        } else {
+            frame.render_widget(block, fl.main_panel);
+        }
     } else {
         // Fallback: show info about selected item
         let block = Block::default()

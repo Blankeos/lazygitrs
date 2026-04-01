@@ -76,6 +76,8 @@ enum DiffPayload {
     Content { filename: String, old: String, new: String },
     /// Unified diff output from git.
     UnifiedDiff { filename: String, diff_output: String },
+    /// Pre-parsed diff ready to apply (parsing done on background thread).
+    Parsed(crate::pager::side_by_side::ParsedDiff),
     /// No diff to show.
     Empty,
 }
@@ -109,6 +111,10 @@ pub struct Gui {
     pub collapsed_dirs: HashSet<String>,
     /// Whether the diff/main panel is focused (entered via Enter on a file).
     pub diff_focused: bool,
+    /// Whether a diff is currently being loaded on a background thread.
+    pub diff_loading: bool,
+    /// When the current diff load started (for delayed "Loading..." display).
+    diff_loading_since: Option<Instant>,
     /// Track what we last loaded a diff for, to avoid reloading on every frame.
     last_diff_key: String,
     /// Generation counter — incremented on each diff request, used to discard stale results.
@@ -264,6 +270,8 @@ impl Gui {
             file_tree_nodes: Vec::new(),
             collapsed_dirs: HashSet::new(),
             diff_focused: false,
+            diff_loading: false,
+            diff_loading_since: None,
             last_diff_key: String::new(),
             diff_generation: Arc::new(AtomicU64::new(0)),
             diff_rx,
@@ -458,6 +466,11 @@ impl Gui {
                             .unwrap_or(false),
                         &self.cherry_pick_clipboard,
                         self.range_select_anchor,
+                        self.diff_loading,
+                        // Only show "Loading diff..." text after a short delay to avoid jitter on fast loads
+                        self.diff_loading && self.diff_loading_since
+                            .map(|t| t.elapsed() >= std::time::Duration::from_millis(50))
+                            .unwrap_or(false),
                     );
                 }
             })?;
@@ -516,6 +529,8 @@ impl Gui {
             if result.generation != current_gen {
                 continue;
             }
+            self.diff_loading = false;
+            self.diff_loading_since = None;
             match result.payload {
                 DiffPayload::Content { filename, old, new } => {
                     self.diff_view.load(&filename, &old, &new);
@@ -526,6 +541,9 @@ impl Gui {
                     self.diff_view.load_from_diff_output(&filename, &diff_output);
                     self.diff_view.file_exists_on_disk =
                         self.git.repo_path().join(&filename).exists();
+                }
+                DiffPayload::Parsed(parsed) => {
+                    self.diff_view.apply_parsed(parsed);
                 }
                 DiffPayload::Empty => {
                     self.diff_view = DiffViewState::new();
@@ -700,16 +718,22 @@ impl Gui {
         if diff_key == self.last_diff_key && !self.needs_diff_refresh {
             return;
         }
+        let selection_changed = diff_key != self.last_diff_key;
         self.last_diff_key = diff_key.clone();
         self.needs_diff_refresh = false;
 
         // Bump generation to invalidate any in-flight results
         let generation = self.diff_generation.fetch_add(1, Ordering::Relaxed) + 1;
 
+        // Clear stale diff when selection changes so user sees "Loading..." instead of old content
+        if selection_changed {
+            self.diff_view = DiffViewState::new();
+        }
+
         let model = self.model.lock().unwrap();
         match active {
             ContextId::Files => {
-                // Files panel: load synchronously (usually fast, small diffs)
+                // Files panel: load and parse async on background thread
                 let file_idx = if self.show_file_tree {
                     self.file_tree_nodes.get(selected).and_then(|n| n.file_index)
                 } else {
@@ -722,35 +746,50 @@ impl Gui {
                     let tracked = file.tracked;
                     drop(model);
 
-                    let diff_result = if has_unstaged {
-                        self.git.diff_file(&name)
-                    } else if has_staged {
-                        self.git.diff_file_staged(&name)
-                    } else {
-                        Ok(String::new())
-                    };
+                    let git = Arc::clone(&self.git);
+                    let tx = self.diff_tx.clone();
+                    let gen_counter = Arc::clone(&self.diff_generation);
 
-                    if let Ok(diff) = diff_result {
-                        if diff.is_empty() && !tracked {
-                            if let Ok(content) = self.git.file_content(&name) {
-                                if !content.is_empty() {
-                                    self.diff_view.load(&name, "", &content);
-                                    self.diff_view.file_exists_on_disk =
-                                        self.git.repo_path().join(&name).exists();
-                                } else {
-                                    self.diff_view = DiffViewState::new();
+                    self.diff_loading = true;
+                    self.diff_loading_since = Some(Instant::now());
+                    std::thread::spawn(move || {
+                        if gen_counter.load(Ordering::Relaxed) != generation {
+                            return;
+                        }
+                        let diff_result = if has_unstaged {
+                            git.diff_file(&name)
+                        } else if has_staged {
+                            git.diff_file_staged(&name)
+                        } else {
+                            Ok(String::new())
+                        };
+
+                        let exists = git.repo_path().join(&name).exists();
+                        let payload = match diff_result {
+                            Ok(diff) if diff.is_empty() && !tracked => {
+                                match git.file_content(&name) {
+                                    Ok(content) if !content.is_empty() => {
+                                        DiffPayload::Parsed(DiffViewState::parse_content(
+                                            &name, "", &content, 4, exists,
+                                        ))
+                                    }
+                                    _ => DiffPayload::Empty,
                                 }
                             }
-                        } else if diff.is_empty() {
-                            self.diff_view = DiffViewState::new();
-                        } else {
-                            self.diff_view.load_from_diff_output(&name, &diff);
-                            self.diff_view.file_exists_on_disk =
-                                self.git.repo_path().join(&name).exists();
-                        }
-                    }
+                            Ok(diff) if diff.is_empty() => DiffPayload::Empty,
+                            Ok(diff) => DiffPayload::Parsed(DiffViewState::parse_diff_output(
+                                &name, &diff, 4, exists,
+                            )),
+                            Err(_) => DiffPayload::Empty,
+                        };
+                        let _ = tx.send(DiffResult {
+                            generation,
+                            diff_key,
+                            payload,
+                        });
+                    });
                 } else if self.show_file_tree {
-                    // Directory node: show combined diff of all child files
+                    // Directory node: show combined diff of all child files (async)
                     if let Some(node) = self.file_tree_nodes.get(selected) {
                         if node.is_dir && !node.child_file_indices.is_empty() {
                             let child_names: Vec<(String, bool, bool, bool)> = node
@@ -762,31 +801,51 @@ impl Gui {
                             let dir_name = node.name.clone();
                             drop(model);
 
-                            let mut combined_diff = String::new();
-                            for (name, has_unstaged, has_staged, tracked) in &child_names {
-                                let diff = if *has_unstaged {
-                                    self.git.diff_file(name).unwrap_or_default()
-                                } else if *has_staged {
-                                    self.git.diff_file_staged(name).unwrap_or_default()
-                                } else if !tracked {
-                                    self.git.file_content(name).unwrap_or_default()
-                                } else {
-                                    String::new()
-                                };
-                                if !diff.is_empty() {
-                                    if !combined_diff.is_empty() {
-                                        combined_diff.push('\n');
-                                    }
-                                    combined_diff.push_str(&diff);
-                                }
-                            }
+                            let git = Arc::clone(&self.git);
+                            let tx = self.diff_tx.clone();
+                            let gen_counter = Arc::clone(&self.diff_generation);
 
-                            if combined_diff.is_empty() {
-                                self.diff_view = DiffViewState::new();
-                            } else {
-                                self.diff_view.load_from_diff_output(&dir_name, &combined_diff);
-                                self.diff_view.file_exists_on_disk = true;
-                            }
+                            self.diff_loading = true;
+                    self.diff_loading_since = Some(Instant::now());
+                            std::thread::spawn(move || {
+                                if gen_counter.load(Ordering::Relaxed) != generation {
+                                    return;
+                                }
+                                let mut combined_diff = String::new();
+                                for (name, has_unstaged, has_staged, tracked) in &child_names {
+                                    if gen_counter.load(Ordering::Relaxed) != generation {
+                                        return;
+                                    }
+                                    let diff = if *has_unstaged {
+                                        git.diff_file(name).unwrap_or_default()
+                                    } else if *has_staged {
+                                        git.diff_file_staged(name).unwrap_or_default()
+                                    } else if !tracked {
+                                        git.file_content(name).unwrap_or_default()
+                                    } else {
+                                        String::new()
+                                    };
+                                    if !diff.is_empty() {
+                                        if !combined_diff.is_empty() {
+                                            combined_diff.push('\n');
+                                        }
+                                        combined_diff.push_str(&diff);
+                                    }
+                                }
+
+                                let payload = if combined_diff.is_empty() {
+                                    DiffPayload::Empty
+                                } else {
+                                    DiffPayload::Parsed(DiffViewState::parse_diff_output(
+                                        &dir_name, &combined_diff, 4, true,
+                                    ))
+                                };
+                                let _ = tx.send(DiffResult {
+                                    generation,
+                                    diff_key,
+                                    payload,
+                                });
+                            });
                         } else {
                             drop(model);
                             self.diff_view = DiffViewState::new();
@@ -801,7 +860,7 @@ impl Gui {
                 }
             }
             ContextId::Commits => {
-                // Commits: load async on background thread (can be slow for large diffs)
+                // Commits: load and parse async on background thread
                 if let Some(commit) = model.commits.get(selected) {
                     let hash = commit.hash.clone();
                     drop(model);
@@ -810,14 +869,17 @@ impl Gui {
                     let tx = self.diff_tx.clone();
                     let gen_counter = Arc::clone(&self.diff_generation);
 
+                    self.diff_loading = true;
+                    self.diff_loading_since = Some(Instant::now());
                     std::thread::spawn(move || {
-                        // Check if still relevant before doing work
                         if gen_counter.load(Ordering::Relaxed) != generation {
                             return;
                         }
                         let payload = if let Ok(diff) = git.diff_commit(&hash) {
                             let filename = format!("commit:{}", &hash[..7.min(hash.len())]);
-                            DiffPayload::UnifiedDiff { filename, diff_output: diff }
+                            DiffPayload::Parsed(DiffViewState::parse_diff_output(
+                                &filename, &diff, 4, false,
+                            ))
                         } else {
                             DiffPayload::Empty
                         };
@@ -830,7 +892,7 @@ impl Gui {
                 }
             }
             ContextId::Reflog => {
-                // Reflog: load commit diff async
+                // Reflog: load and parse commit diff async
                 if let Some(commit) = model.reflog_commits.get(selected) {
                     let hash = commit.hash.clone();
                     drop(model);
@@ -839,13 +901,17 @@ impl Gui {
                     let tx = self.diff_tx.clone();
                     let gen_counter = Arc::clone(&self.diff_generation);
 
+                    self.diff_loading = true;
+                    self.diff_loading_since = Some(Instant::now());
                     std::thread::spawn(move || {
                         if gen_counter.load(Ordering::Relaxed) != generation {
                             return;
                         }
                         let payload = if let Ok(diff) = git.diff_commit(&hash) {
                             let filename = format!("reflog:{}", &hash[..7.min(hash.len())]);
-                            DiffPayload::UnifiedDiff { filename, diff_output: diff }
+                            DiffPayload::Parsed(DiffViewState::parse_diff_output(
+                                &filename, &diff, 4, false,
+                            ))
                         } else {
                             DiffPayload::Empty
                         };
@@ -858,7 +924,7 @@ impl Gui {
                 }
             }
             ContextId::Stash => {
-                // Stash: also load async
+                // Stash: load and parse async
                 if let Some(entry) = model.stash_entries.get(selected) {
                     let index = entry.index;
                     drop(model);
@@ -867,6 +933,8 @@ impl Gui {
                     let tx = self.diff_tx.clone();
                     let gen_counter = Arc::clone(&self.diff_generation);
 
+                    self.diff_loading = true;
+                    self.diff_loading_since = Some(Instant::now());
                     std::thread::spawn(move || {
                         if gen_counter.load(Ordering::Relaxed) != generation {
                             return;
@@ -876,7 +944,10 @@ impl Gui {
                                 DiffPayload::Empty
                             } else {
                                 let filename = format!("stash@{{{}}}", index);
-                                DiffPayload::UnifiedDiff { filename, diff_output: diff }
+                                let exists = git.repo_path().join(&filename).exists();
+                                DiffPayload::Parsed(DiffViewState::parse_diff_output(
+                                    &filename, &diff, 4, exists,
+                                ))
                             }
                         } else {
                             DiffPayload::Empty
@@ -892,7 +963,7 @@ impl Gui {
                 }
             }
             ContextId::BranchCommits => {
-                // BranchCommits: load commit diff for the selected commit
+                // BranchCommits: load and parse commit diff async
                 if let Some(commit) = model.sub_commits.get(selected) {
                     let hash = commit.hash.clone();
                     drop(model);
@@ -901,13 +972,17 @@ impl Gui {
                     let tx = self.diff_tx.clone();
                     let gen_counter = Arc::clone(&self.diff_generation);
 
+                    self.diff_loading = true;
+                    self.diff_loading_since = Some(Instant::now());
                     std::thread::spawn(move || {
                         if gen_counter.load(Ordering::Relaxed) != generation {
                             return;
                         }
                         let payload = if let Ok(diff) = git.diff_commit(&hash) {
                             let filename = format!("commit:{}", &hash[..7.min(hash.len())]);
-                            DiffPayload::UnifiedDiff { filename, diff_output: diff }
+                            DiffPayload::Parsed(DiffViewState::parse_diff_output(
+                                &filename, &diff, 4, false,
+                            ))
                         } else {
                             DiffPayload::Empty
                         };
@@ -922,7 +997,7 @@ impl Gui {
                 }
             }
             ContextId::CommitFiles | ContextId::StashFiles | ContextId::BranchCommitFiles => {
-                // CommitFiles/StashFiles/BranchCommitFiles: load diff for the selected file within the commit/stash
+                // CommitFiles/StashFiles/BranchCommitFiles: load and parse diff async
                 let file_idx = if self.show_commit_file_tree {
                     self.commit_file_tree_nodes.get(selected).and_then(|n| n.file_index)
                 } else {
@@ -937,6 +1012,8 @@ impl Gui {
                     let tx = self.diff_tx.clone();
                     let gen_counter = Arc::clone(&self.diff_generation);
 
+                    self.diff_loading = true;
+                    self.diff_loading_since = Some(Instant::now());
                     std::thread::spawn(move || {
                         if gen_counter.load(Ordering::Relaxed) != generation {
                             return;
@@ -945,7 +1022,10 @@ impl Gui {
                             if diff.is_empty() {
                                 DiffPayload::Empty
                             } else {
-                                DiffPayload::UnifiedDiff { filename: name, diff_output: diff }
+                                let exists = git.repo_path().join(&name).exists();
+                                DiffPayload::Parsed(DiffViewState::parse_diff_output(
+                                    &name, &diff, 4, exists,
+                                ))
                             }
                         } else {
                             DiffPayload::Empty
@@ -974,12 +1054,17 @@ impl Gui {
                             let tx = self.diff_tx.clone();
                             let gen_counter = Arc::clone(&self.diff_generation);
 
+                            self.diff_loading = true;
+                    self.diff_loading_since = Some(Instant::now());
                             std::thread::spawn(move || {
                                 if gen_counter.load(Ordering::Relaxed) != generation {
                                     return;
                                 }
                                 let mut combined_diff = String::new();
                                 for name in &child_names {
+                                    if gen_counter.load(Ordering::Relaxed) != generation {
+                                        return;
+                                    }
                                     if let Ok(diff) = git.diff_commit_file(&hash, name) {
                                         if !diff.is_empty() {
                                             if !combined_diff.is_empty() {
@@ -992,10 +1077,9 @@ impl Gui {
                                 let payload = if combined_diff.is_empty() {
                                     DiffPayload::Empty
                                 } else {
-                                    DiffPayload::UnifiedDiff {
-                                        filename: dir_name,
-                                        diff_output: combined_diff,
-                                    }
+                                    DiffPayload::Parsed(DiffViewState::parse_diff_output(
+                                        &dir_name, &combined_diff, 4, true,
+                                    ))
                                 };
                                 let _ = tx.send(DiffResult {
                                     generation,

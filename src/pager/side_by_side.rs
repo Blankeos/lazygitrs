@@ -11,9 +11,22 @@ use super::highlight::FileHighlighter;
 use super::{ChangeType, DiffLine, InlineSegment};
 
 /// A section of a multi-file diff with its own highlighters.
-struct FileSection {
-    old_highlighter: FileHighlighter,
-    new_highlighter: FileHighlighter,
+pub struct FileSection {
+    pub old_highlighter: FileHighlighter,
+    pub new_highlighter: FileHighlighter,
+}
+
+/// Pre-parsed diff data that can be sent across threads.
+/// Contains all the expensive-to-compute results (diff algorithm, tree-sitter highlighting).
+pub struct ParsedDiff {
+    pub filename: String,
+    pub old_content: String,
+    pub new_content: String,
+    pub lines: Vec<DiffLine>,
+    pub hunk_starts: Vec<usize>,
+    pub hunk_line_offsets: Vec<(usize, usize, usize)>,
+    pub sections: Vec<FileSection>,
+    pub file_exists_on_disk: bool,
 }
 
 /// Which panel of the side-by-side diff the selection is in.
@@ -402,6 +415,117 @@ impl DiffViewState {
         }
     }
 
+    /// Parse old/new content into a ParsedDiff on any thread (no &self needed).
+    pub fn parse_content(filename: &str, old: &str, new: &str, tab_width: usize, file_exists_on_disk: bool) -> ParsedDiff {
+        let lines = super::diff_algo::compute_side_by_side(old, new, tab_width);
+        let hunk_starts = super::diff_algo::find_hunk_starts(&lines);
+        let sections = vec![FileSection {
+            old_highlighter: FileHighlighter::new(old, filename),
+            new_highlighter: FileHighlighter::new(new, filename),
+        }];
+        ParsedDiff {
+            filename: filename.to_string(),
+            old_content: old.to_string(),
+            new_content: new.to_string(),
+            lines,
+            hunk_starts,
+            hunk_line_offsets: Vec::new(),
+            sections,
+            file_exists_on_disk,
+        }
+    }
+
+    /// Parse raw diff output into a ParsedDiff on any thread (no &self needed).
+    pub fn parse_diff_output(filename: &str, diff_output: &str, tab_width: usize, file_exists_on_disk: bool) -> ParsedDiff {
+        let file_diffs = parse_multi_file_diff(diff_output);
+
+        if file_diffs.len() <= 1 {
+            let (old, new) = parse_unified_diff(diff_output);
+            let actual_name = file_diffs
+                .first()
+                .map(|(name, _)| name.as_str())
+                .unwrap_or(filename);
+            let mut parsed = Self::parse_content(actual_name, &old, &new, tab_width, file_exists_on_disk);
+            let hunks = parse_hunk_headers(diff_output);
+            parsed.hunk_line_offsets = build_hunk_line_offsets(&hunks, &parsed.lines, 0);
+            parsed
+        } else {
+            let file_count = file_diffs.len();
+            let new_filename = format!("{} ({} files)", filename, file_count);
+            let mut lines = Vec::new();
+            let mut sections = Vec::new();
+            let mut hunk_line_offsets = Vec::new();
+
+            for (section_idx, (file_name, file_diff)) in file_diffs.iter().enumerate() {
+                let (old, new) = parse_unified_diff(file_diff);
+
+                lines.push(DiffLine {
+                    old_line: None,
+                    new_line: None,
+                    change_type: ChangeType::Equal,
+                    old_segments: None,
+                    new_segments: None,
+                    file_header: Some(file_name.clone()),
+                    section_index: section_idx,
+                });
+
+                let section_start = lines.len();
+                let mut section_lines =
+                    super::diff_algo::compute_side_by_side(&old, &new, tab_width);
+                for line in &mut section_lines {
+                    line.section_index = section_idx;
+                }
+                lines.append(&mut section_lines);
+
+                let hunks = parse_hunk_headers(file_diff);
+                let section_offsets = build_hunk_line_offsets(&hunks, &lines[section_start..], 0);
+                for (idx, old_off, new_off) in section_offsets {
+                    hunk_line_offsets.push((section_start + idx, old_off, new_off));
+                }
+
+                sections.push(FileSection {
+                    old_highlighter: FileHighlighter::new(&old, file_name),
+                    new_highlighter: FileHighlighter::new(&new, file_name),
+                });
+            }
+
+            let hunk_starts = super::diff_algo::find_hunk_starts(&lines);
+
+            ParsedDiff {
+                filename: new_filename,
+                old_content: String::new(),
+                new_content: String::new(),
+                lines,
+                hunk_starts,
+                hunk_line_offsets,
+                sections,
+                file_exists_on_disk,
+            }
+        }
+    }
+
+    /// Apply a pre-parsed diff result, preserving scroll position for same-file reloads.
+    pub fn apply_parsed(&mut self, parsed: ParsedDiff) {
+        let same_file = self.filename == parsed.filename;
+        self.filename = parsed.filename;
+        self.old_content = parsed.old_content;
+        self.new_content = parsed.new_content;
+        self.lines = parsed.lines;
+        self.hunk_starts = parsed.hunk_starts;
+        self.hunk_line_offsets = parsed.hunk_line_offsets;
+        self.sections = parsed.sections;
+        self.file_exists_on_disk = parsed.file_exists_on_disk;
+        if same_file {
+            let max = self.lines.len().saturating_sub(1);
+            self.scroll_offset = self.scroll_offset.min(max);
+        } else {
+            self.scroll_offset = 0;
+            self.horizontal_scroll = 0;
+            self.selection = None;
+            self.clear_search();
+        }
+    }
+
     /// Load a diff from old/new content (single file).
     pub fn load(&mut self, filename: &str, old: &str, new: &str) {
         // Preserve scroll position when reloading the same file (e.g. periodic refresh)
@@ -577,6 +701,7 @@ pub fn render_diff(
     state: &DiffViewState,
     theme: &Theme,
     focused: bool,
+    diff_loading: bool,
 ) {
     let border_style = if focused {
         theme.active_border
@@ -585,11 +710,16 @@ pub fn render_diff(
     };
 
     if state.is_empty() {
+        let msg = if diff_loading {
+            " Loading diff..."
+        } else {
+            " No changes to display"
+        };
         let block = Block::default()
             .title(" Diff ")
             .borders(Borders::ALL)
             .border_style(border_style);
-        let widget = Paragraph::new(" No changes to display");
+        let widget = Paragraph::new(msg);
         frame.render_widget(widget.block(block), area);
         return;
     }
