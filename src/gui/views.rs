@@ -2108,251 +2108,201 @@ pub fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_f
             ]);
             frame.render_widget(Paragraph::new(hint), hint_area);
         }
-        PopupState::RefPicker {
-            title,
-            items,
-            selected,
-            search_textarea,
-            scroll_offset,
-            ..
-        } => {
-            let search = search_textarea.lines().join("");
-            let search_lower = search.to_lowercase();
-
-            // All items are always shown (no filtering) — typing jumps to match
-            // Group by category for display
-            let mut display: Vec<(bool, String, String)> = Vec::new(); // (is_header, label, value)
-            let mut last_cat = String::new();
-            for item in items.iter() {
-                if item.category != last_cat {
-                    display.push((true, item.category.clone(), String::new()));
-                    last_cat = item.category.clone();
-                }
-                display.push((false, item.label.clone(), item.value.clone()));
-            }
-
-            let popup_width = (area.width * 70 / 100).min(72).max(36);
-            // Fixed max height — always scrollable for consistency
-            let max_popup = (area.height * 60 / 100).max(10);
-            let popup_height = max_popup.min(area.height.saturating_sub(4));
-            let x = (area.width.saturating_sub(popup_width)) / 2;
-            let y = (area.height.saturating_sub(popup_height)) / 2;
-            let popup_rect = Rect::new(x, y, popup_width, popup_height);
-            frame.render_widget(Clear, popup_rect);
-
-            let block = Block::default()
-                .title(format!(" {} ", title))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent));
-            frame.render_widget(block, popup_rect);
-
-            let inner = popup_rect.inner(ratatui::layout::Margin {
-                horizontal: 1,
-                vertical: 1,
-            });
-            if inner.height < 3 {
-                return;
-            }
-
-            // Search bar
-            let prefix_width = 2u16;
-            let prefix_rect = Rect::new(inner.x, inner.y, prefix_width, 1);
-            let prefix_style = if search.is_empty() {
-                Style::default().fg(theme.text_dimmed)
-            } else {
-                Style::default().fg(theme.accent_secondary)
-            };
-            frame.render_widget(
-                Paragraph::new(Span::styled("  ", prefix_style)),
-                prefix_rect,
+        PopupState::RefPicker { title, core, .. } => {
+            render_list_picker(
+                frame, area, theme, core,
+                title,
+                70, 72, 36,
+                &[("↑↓", "navigate"), ("type", "jump to"), ("enter", "select"), ("esc", "cancel")],
             );
-            let ta_width = inner.width.saturating_sub(prefix_width);
-            let ta_rect = Rect::new(inner.x + prefix_width, inner.y, ta_width, 1);
-            frame.render_widget(&*search_textarea, ta_rect);
-
-            // Separator
-            let sep_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
-            let sep = "─".repeat(inner.width as usize);
-            frame.render_widget(
-                Paragraph::new(Span::styled(sep, Style::default().fg(theme.text_dimmed))),
-                sep_area,
-            );
-
-            // Content area
-            let list_start = inner.y + 2;
-            let list_height = inner.height.saturating_sub(3) as usize;
-            let list_area = Rect::new(inner.x, list_start, inner.width, list_height as u16);
-
-            let max_scroll = display.len().saturating_sub(list_height);
-            let so = *scroll_offset;
-            let effective_scroll = if so > max_scroll { max_scroll } else { so };
-
-            let visible_display: Vec<&(bool, String, String)> = display
-                .iter()
-                .skip(effective_scroll)
-                .take(list_height)
-                .collect();
-
-            let mut entry_idx = 0usize;
-            for (is_header, _, _) in display.iter().take(effective_scroll) {
-                if !is_header {
-                    entry_idx += 1;
-                }
-            }
-
-            let mut list_items: Vec<ListItem> = Vec::new();
-            for (is_header, label, _value) in visible_display {
-                if *is_header {
-                    let line = Line::from(vec![Span::styled(
-                        format!(" {} ", label),
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
-                    )]);
-                    list_items.push(ListItem::new(line));
-                } else {
-                    let is_selected = entry_idx == *selected;
-                    entry_idx += 1;
-
-                    let base_fg = if is_selected { theme.text_strong } else { theme.text };
-                    let highlight_fg = theme.accent_secondary;
-
-                    // Build spans with search match highlighting
-                    let mut spans = vec![Span::styled("  ", Style::default().fg(base_fg))];
-                    if !search_lower.is_empty() {
-                        let label_lower = label.to_lowercase();
-                        if let Some(pos) = label_lower.find(&search_lower) {
-                            let before = &label[..pos];
-                            let matched = &label[pos..pos + search_lower.len()];
-                            let after = &label[pos + search_lower.len()..];
-                            if !before.is_empty() {
-                                spans.push(Span::styled(before.to_string(), Style::default().fg(base_fg)));
-                            }
-                            let match_style = Style::default().fg(highlight_fg).add_modifier(Modifier::BOLD);
-                            spans.push(Span::styled(matched.to_string(), match_style));
-                            if !after.is_empty() {
-                                spans.push(Span::styled(after.to_string(), Style::default().fg(base_fg)));
-                            }
-                        } else {
-                            spans.push(Span::styled(label.clone(), Style::default().fg(base_fg)));
-                        }
-                    } else {
-                        let style = if is_selected {
-                            Style::default().fg(base_fg).add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(base_fg)
-                        };
-                        spans.push(Span::styled(label.clone(), style));
-                    }
-
-                    let line = Line::from(spans);
-
-                    if is_selected {
-                        list_items.push(ListItem::new(line).style(Style::default().bg(theme.selected_bg)));
-                    } else {
-                        list_items.push(ListItem::new(line));
-                    }
-                }
-            }
-
-            let list = List::new(list_items);
-            frame.render_widget(list, list_area);
-
-            // Hint bar at bottom
-            let hint_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
-            let hint = Line::from(vec![
-                Span::styled(" ↑↓", Style::default().fg(theme.accent_secondary)),
-                Span::styled(": navigate  ", Style::default().fg(theme.text_dimmed)),
-                Span::styled("type", Style::default().fg(theme.accent_secondary)),
-                Span::styled(": jump to  ", Style::default().fg(theme.text_dimmed)),
-                Span::styled("enter", Style::default().fg(theme.accent_secondary)),
-                Span::styled(": select  ", Style::default().fg(theme.text_dimmed)),
-                Span::styled("esc", Style::default().fg(theme.accent_secondary)),
-                Span::styled(": cancel", Style::default().fg(theme.text_dimmed)),
-            ]);
-            frame.render_widget(Paragraph::new(hint), hint_area);
         }
-        PopupState::ThemePicker {
-            selected,
-            scroll_offset,
-            ..
-        } => {
-            let themes = crate::config::COLOR_THEMES;
-
-            let popup_width = (area.width * 50 / 100).min(50).max(30);
-            let max_popup = (area.height * 60 / 100).max(10);
-            let popup_height = max_popup.min(area.height.saturating_sub(4));
-            let x = (area.width.saturating_sub(popup_width)) / 2;
-            let y = (area.height.saturating_sub(popup_height)) / 2;
-            let popup_rect = Rect::new(x, y, popup_width, popup_height);
-            frame.render_widget(Clear, popup_rect);
-
-            let block = Block::default()
-                .title(" Color Theme ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.popup_border));
-            frame.render_widget(block, popup_rect);
-
-            let inner = popup_rect.inner(ratatui::layout::Margin {
-                horizontal: 1,
-                vertical: 1,
-            });
-            if inner.height < 3 {
-                return;
-            }
-
-            // Content area
-            let list_height = inner.height.saturating_sub(1) as usize; // -1 for hint
-            let list_area = Rect::new(inner.x, inner.y, inner.width, list_height as u16);
-
-            let max_scroll = themes.len().saturating_sub(list_height);
-            let so = *scroll_offset;
-            let effective_scroll = if so > max_scroll { max_scroll } else { so };
-
-            let visible: Vec<(usize, &crate::config::ColorTheme)> = themes
-                .iter()
-                .enumerate()
-                .skip(effective_scroll)
-                .take(list_height)
-                .collect();
-
-            let mut list_items: Vec<ListItem> = Vec::new();
-            for (idx, ct) in &visible {
-                let is_selected = *idx == *selected;
-                let marker = if is_selected { "▸ " } else { "  " };
-                let name_style = if is_selected {
-                    Style::default()
-                        .fg(theme.text_strong)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme.text)
-                };
-                let line = Line::from(vec![
-                    Span::styled(marker, Style::default().fg(theme.accent_secondary)),
-                    Span::styled(ct.name, name_style),
-                ]);
-                if is_selected {
-                    list_items.push(ListItem::new(line).style(Style::default().bg(theme.selected_bg)));
-                } else {
-                    list_items.push(ListItem::new(line));
-                }
-            }
-
-            let list = List::new(list_items);
-            frame.render_widget(list, list_area);
-
-            // Hint bar at bottom
-            let hint_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
-            let hint = Line::from(vec![
-                Span::styled(" ↑↓", Style::default().fg(theme.accent_secondary)),
-                Span::styled(": preview  ", Style::default().fg(theme.text_dimmed)),
-                Span::styled("enter", Style::default().fg(theme.accent_secondary)),
-                Span::styled(": apply  ", Style::default().fg(theme.text_dimmed)),
-                Span::styled("esc", Style::default().fg(theme.accent_secondary)),
-                Span::styled(": cancel", Style::default().fg(theme.text_dimmed)),
-            ]);
-            frame.render_widget(Paragraph::new(hint), hint_area);
+        PopupState::ThemePicker { core, .. } => {
+            render_list_picker(
+                frame, area, theme, core,
+                "Color Theme",
+                50, 50, 30,
+                &[("↑↓", "preview"), ("type", "filter"), ("enter", "apply"), ("esc", "cancel")],
+            );
         }
         PopupState::None => {}
     }
+}
+
+use super::popup::ListPickerCore;
+
+/// Shared rendering for searchable list picker popups (RefPicker, ThemePicker, etc.).
+fn render_list_picker(
+    frame: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    core: &ListPickerCore,
+    title: &str,
+    width_pct: u16,
+    width_max: u16,
+    width_min: u16,
+    hints: &[(&str, &str)],
+) {
+    let search = core.search_textarea.lines().join("");
+    let search_lower = search.to_lowercase();
+
+    // Build display rows: interleave category headers with items
+    let has_categories = core.items.iter().any(|i| !i.category.is_empty());
+    let mut display: Vec<(bool, String)> = Vec::new(); // (is_header, label)
+    if has_categories {
+        let mut last_cat = String::new();
+        for item in core.items.iter() {
+            if !item.category.is_empty() && item.category != last_cat {
+                display.push((true, item.category.clone()));
+                last_cat = item.category.clone();
+            }
+            display.push((false, item.label.clone()));
+        }
+    } else {
+        for item in core.items.iter() {
+            display.push((false, item.label.clone()));
+        }
+    }
+
+    // Popup frame
+    let popup_width = (area.width * width_pct / 100).min(width_max).max(width_min);
+    let max_popup = (area.height * 60 / 100).max(10);
+    let popup_height = max_popup.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_rect = Rect::new(x, y, popup_width, popup_height);
+    frame.render_widget(Clear, popup_rect);
+
+    let block = Block::default()
+        .title(format!(" {} ", title))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent));
+    frame.render_widget(block, popup_rect);
+
+    let inner = popup_rect.inner(ratatui::layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    if inner.height < 3 {
+        return;
+    }
+
+    // Search bar
+    let prefix_width = 2u16;
+    let prefix_rect = Rect::new(inner.x, inner.y, prefix_width, 1);
+    let prefix_style = if search.is_empty() {
+        Style::default().fg(theme.text_dimmed)
+    } else {
+        Style::default().fg(theme.accent_secondary)
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled("  ", prefix_style)),
+        prefix_rect,
+    );
+    let ta_width = inner.width.saturating_sub(prefix_width);
+    let ta_rect = Rect::new(inner.x + prefix_width, inner.y, ta_width, 1);
+    frame.render_widget(&core.search_textarea, ta_rect);
+
+    // Separator
+    let sep_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+    let sep = "─".repeat(inner.width as usize);
+    frame.render_widget(
+        Paragraph::new(Span::styled(sep, Style::default().fg(theme.text_dimmed))),
+        sep_area,
+    );
+
+    // Content area
+    let list_start = inner.y + 2;
+    let list_height = inner.height.saturating_sub(3) as usize; // search + sep + hint
+    let list_area = Rect::new(inner.x, list_start, inner.width, list_height as u16);
+
+    let max_scroll = display.len().saturating_sub(list_height);
+    let effective_scroll = core.scroll_offset.min(max_scroll);
+
+    let visible_display: Vec<&(bool, String)> = display
+        .iter()
+        .skip(effective_scroll)
+        .take(list_height)
+        .collect();
+
+    // Count how many non-header items are before the visible window
+    let mut entry_idx = 0usize;
+    for (is_header, _) in display.iter().take(effective_scroll) {
+        if !is_header {
+            entry_idx += 1;
+        }
+    }
+
+    let mut list_items: Vec<ListItem> = Vec::new();
+    for (is_header, label) in visible_display {
+        if *is_header {
+            let line = Line::from(vec![Span::styled(
+                format!(" {} ", label),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )]);
+            list_items.push(ListItem::new(line));
+        } else {
+            let is_selected = entry_idx == core.selected;
+            entry_idx += 1;
+
+            let base_fg = if is_selected { theme.text_strong } else { theme.text };
+            let highlight_fg = theme.accent_secondary;
+
+            // ▸ marker for selected item
+            let marker = if is_selected { "▸ " } else { "  " };
+            let mut spans = vec![Span::styled(marker, Style::default().fg(theme.accent_secondary))];
+
+            // Build label spans with search match highlighting
+            if !search_lower.is_empty() {
+                let label_lower = label.to_lowercase();
+                if let Some(pos) = label_lower.find(&search_lower) {
+                    let before = &label[..pos];
+                    let matched = &label[pos..pos + search_lower.len()];
+                    let after = &label[pos + search_lower.len()..];
+                    if !before.is_empty() {
+                        spans.push(Span::styled(before.to_string(), Style::default().fg(base_fg)));
+                    }
+                    let match_style = Style::default().fg(highlight_fg).add_modifier(Modifier::BOLD);
+                    spans.push(Span::styled(matched.to_string(), match_style));
+                    if !after.is_empty() {
+                        spans.push(Span::styled(after.to_string(), Style::default().fg(base_fg)));
+                    }
+                } else {
+                    spans.push(Span::styled(label.clone(), Style::default().fg(base_fg)));
+                }
+            } else {
+                let style = if is_selected {
+                    Style::default().fg(base_fg).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(base_fg)
+                };
+                spans.push(Span::styled(label.clone(), style));
+            }
+
+            let line = Line::from(spans);
+
+            if is_selected {
+                list_items.push(ListItem::new(line).style(Style::default().bg(theme.selected_bg)));
+            } else {
+                list_items.push(ListItem::new(line));
+            }
+        }
+    }
+
+    let list = List::new(list_items);
+    frame.render_widget(list, list_area);
+
+    // Hint bar
+    let hint_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+    let mut hint_spans = Vec::new();
+    for (i, (key, desc)) in hints.iter().enumerate() {
+        if i == 0 {
+            hint_spans.push(Span::styled(format!(" {}", key), Style::default().fg(theme.accent_secondary)));
+        } else {
+            hint_spans.push(Span::styled(key.to_string(), Style::default().fg(theme.accent_secondary)));
+        }
+        hint_spans.push(Span::styled(format!(": {}  ", desc), Style::default().fg(theme.text_dimmed)));
+    }
+    frame.render_widget(Paragraph::new(Line::from(hint_spans)), hint_area);
 }

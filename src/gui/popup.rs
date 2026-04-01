@@ -78,16 +78,12 @@ pub enum PopupState {
     /// Searchable ref picker (branches, tags, commits) with a callback.
     RefPicker {
         title: String,
-        items: Vec<RefPickerItem>,
-        selected: usize,
-        search_textarea: TextArea<'static>,
-        scroll_offset: usize,
-        on_confirm: RefPickerAction,
+        core: ListPickerCore,
+        on_confirm: ListPickerAction,
     },
-    /// Color theme picker with live preview.
+    /// Color theme picker with live preview and search.
     ThemePicker {
-        selected: usize,
-        scroll_offset: usize,
+        core: ListPickerCore,
         /// The theme index before opening the picker (for cancel/revert).
         original_theme_index: usize,
     },
@@ -156,14 +152,22 @@ pub struct HelpEntry {
     pub description: String,
 }
 
-pub type RefPickerAction = Box<dyn FnOnce(&mut Gui, &str) -> Result<()>>;
+pub type ListPickerAction = Box<dyn FnOnce(&mut Gui, &str) -> Result<()>>;
 
 #[derive(Debug, Clone)]
-pub struct RefPickerItem {
-    /// The ref name or hash to pass to the callback.
+pub struct ListPickerItem {
+    /// The value to pass to the callback (ref name, hash, theme id, etc.).
     pub value: String,
-    /// Display label (e.g. branch name, tag name, short hash + message).
+    /// Display label shown in the list.
     pub label: String,
-    /// Section/category (e.g. "Branches", "Tags").
+    /// Section/category header (e.g. "Branches", "Tags"). Empty for flat lists.
     pub category: String,
+}
+
+/// Shared state for searchable list picker popups (RefPicker, ThemePicker, etc.).
+pub struct ListPickerCore {
+    pub items: Vec<ListPickerItem>,
+    pub selected: usize,
+    pub search_textarea: TextArea<'static>,
+    pub scroll_offset: usize,
 }

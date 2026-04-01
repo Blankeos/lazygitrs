@@ -113,28 +113,26 @@ fn checkout_previous(gui: &mut Gui) -> Result<()> {
 }
 
 fn checkout_picker(gui: &mut Gui) -> Result<()> {
-    use crate::gui::popup::{RefPickerItem, make_help_search_textarea};
+    use crate::gui::popup::{ListPickerItem, ListPickerCore, make_help_search_textarea};
 
     let model = gui.model.lock().unwrap();
     let mut items = Vec::new();
 
-    // Local branches (skip current)
     for branch in &model.branches {
         if branch.head {
             continue;
         }
-        items.push(RefPickerItem {
+        items.push(ListPickerItem {
             value: branch.name.clone(),
             label: branch.name.clone(),
             category: "Branches".to_string(),
         });
     }
 
-    // Remote branches
     for remote in &model.remotes {
         for branch in &remote.branches {
             let full_name = format!("{}/{}", remote.name, branch.name);
-            items.push(RefPickerItem {
+            items.push(ListPickerItem {
                 value: full_name.clone(),
                 label: full_name,
                 category: "Remote Branches".to_string(),
@@ -142,18 +140,16 @@ fn checkout_picker(gui: &mut Gui) -> Result<()> {
         }
     }
 
-    // Tags
     for tag in &model.tags {
-        items.push(RefPickerItem {
+        items.push(ListPickerItem {
             value: tag.name.clone(),
             label: tag.name.clone(),
             category: "Tags".to_string(),
         });
     }
 
-    // Commits
     for commit in &model.commits {
-        items.push(RefPickerItem {
+        items.push(ListPickerItem {
             value: commit.hash.clone(),
             label: format!("{} {}", commit.short_hash(), commit.name),
             category: "Commits".to_string(),
@@ -164,10 +160,12 @@ fn checkout_picker(gui: &mut Gui) -> Result<()> {
 
     gui.popup = PopupState::RefPicker {
         title: "Checkout".to_string(),
-        items,
-        selected: 0,
-        search_textarea: make_help_search_textarea(),
-        scroll_offset: 0,
+        core: ListPickerCore {
+            items,
+            selected: 0,
+            search_textarea: make_help_search_textarea(),
+            scroll_offset: 0,
+        },
         on_confirm: Box::new(|gui, ref_name| {
             show_checkout_error_or_refresh(gui, ref_name)?;
             Ok(())
