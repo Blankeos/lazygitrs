@@ -19,6 +19,7 @@ pub struct AppConfig {
     pub user_config: UserConfig,
     pub app_state: AppState,
     pub config_dir: PathBuf,
+    pub state_dir: PathBuf,
     pub state_path: PathBuf,
 }
 
@@ -47,6 +48,7 @@ impl AppConfig {
             user_config,
             app_state,
             config_dir,
+            state_dir,
             state_path,
         })
     }

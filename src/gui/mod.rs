@@ -4099,7 +4099,7 @@ impl Gui {
     }
 
     fn commit_history_path(config: &AppConfig) -> std::path::PathBuf {
-        config.config_dir.join("commit_message_history")
+        config.state_dir.join("commit_message_history")
     }
 
     fn persist_command_log_visibility(&self) {
