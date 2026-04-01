@@ -24,16 +24,19 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn load(debug: bool) -> Result<Self> {
+        let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+
         let config_dir = std::env::var("XDG_CONFIG_HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join(".config")
-            })
+            .unwrap_or_else(|_| home_dir.join(".config"))
             .join("lazygit");
 
-        let state_path = config_dir.join("state.yml");
+        let state_dir = std::env::var("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home_dir.join(".local").join("state"))
+            .join("lazygit");
+
+        let state_path = state_dir.join("state.yml");
 
         let user_config = UserConfig::load(&config_dir)?;
         let app_state = AppState::load(&state_path)?;
