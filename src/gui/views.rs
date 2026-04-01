@@ -2120,7 +2120,7 @@ pub fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_f
             render_list_picker(
                 frame, area, theme, core,
                 "Color Theme",
-                50, 50, 30,
+                65, 70, 36,
                 &[("↑↓", "preview"), ("type", "filter"), ("enter", "apply"), ("esc", "cancel")],
             );
         }
