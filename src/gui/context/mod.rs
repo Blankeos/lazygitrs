@@ -51,6 +51,33 @@ impl SideWindow {
         }
     }
 
+    /// Given an x-coordinate relative to the panel left edge, determine which
+    /// tab was clicked in the title bar.  Returns `None` if the click didn't
+    /// land on a tab label.
+    pub fn tab_at_x(&self, x: u16) -> Option<ContextId> {
+        let tabs = self.tabs();
+        if tabs.len() <= 1 {
+            return None;
+        }
+        // Title layout: " {key} {Tab0} | {Tab1} | {Tab2} "
+        // The border takes 1 char, so content starts at x=1 inside the panel.
+        let key = self.key_label();
+        // " {key} " prefix length
+        let mut cursor: u16 = 1 + key.len() as u16 + 1; // border + key + space
+
+        for (i, ctx) in tabs.iter().enumerate() {
+            if i > 0 {
+                cursor += 3; // " | "
+            }
+            let label_len = ctx.title().len() as u16;
+            if x >= cursor && x < cursor + label_len {
+                return Some(*ctx);
+            }
+            cursor += label_len;
+        }
+        None
+    }
+
     /// Number key label for this window.
     pub fn key_label(&self) -> &'static str {
         match self {
@@ -115,6 +142,8 @@ pub struct ContextManager {
     active: ContextId,
     /// Which tab is active within each window.
     window_tabs: std::collections::HashMap<SideWindow, usize>,
+    /// The last active context per window (including sub-views like BranchCommits).
+    window_last_context: std::collections::HashMap<SideWindow, ContextId>,
     selections: std::collections::HashMap<ContextId, usize>,
     scroll_offsets: std::collections::HashMap<ContextId, usize>,
     /// Override for files list length when tree view is active.
@@ -146,6 +175,7 @@ impl ContextManager {
         Self {
             active: ContextId::Files,
             window_tabs,
+            window_last_context: std::collections::HashMap::new(),
             selections,
             scroll_offsets: std::collections::HashMap::new(),
             files_list_len_override: None,
@@ -159,11 +189,22 @@ impl ContextManager {
 
     pub fn set_active(&mut self, ctx: ContextId) {
         self.active = ctx;
-        // Update the window tab index
         let window = SideWindow::for_context(ctx);
+        // Always remember the last active context for this window (including sub-views).
+        self.window_last_context.insert(window, ctx);
+        // Update the window tab index (only for root tabs).
         if let Some(idx) = window.tabs().iter().position(|c| *c == ctx) {
             self.window_tabs.insert(window, idx);
         }
+    }
+
+    /// Get the last active context for a window, including sub-views.
+    /// Falls back to `active_context_for_window` if no sub-view was recorded.
+    pub fn last_context_for_window(&self, window: SideWindow) -> ContextId {
+        self.window_last_context
+            .get(&window)
+            .copied()
+            .unwrap_or_else(|| self.active_context_for_window(window))
     }
 
     /// Get the active context for a given window.

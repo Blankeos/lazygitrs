@@ -4166,21 +4166,41 @@ impl Gui {
             {
                 self.diff_focused = false;
                 if let Some(&window) = SideWindow::ALL.get(i) {
-                    let ctx = self.context_mgr.active_context_for_window(window);
-                    self.context_mgr.set_active(ctx);
+                    let is_title_bar = row == panel_rect.y;
 
-                    // Calculate which item was clicked (row relative to panel inner area)
-                    let inner_y = row.saturating_sub(panel_rect.y + 1); // +1 for border
-                    let active_ctx = self.context_mgr.active();
-                    let model = self.model.lock().unwrap();
-                    let list_len = self.context_mgr.list_len(&model);
-                    drop(model);
+                    if is_title_bar {
+                        // Title bar click: switch to the clicked tab if identifiable.
+                        let local_x = col.saturating_sub(panel_rect.x);
+                        if let Some(tab_ctx) = window.tab_at_x(local_x) {
+                            self.context_mgr.set_active(tab_ctx);
+                        } else {
+                            // Clicked title area but not on a specific tab label —
+                            // just activate this window (restore last context).
+                            let ctx = self.context_mgr.last_context_for_window(window);
+                            self.context_mgr.set_active(ctx);
+                        }
+                    } else {
+                        // Content area click.
+                        let current_window = self.context_mgr.active_window();
+                        if current_window != window {
+                            // Switching to a different window — restore its last context.
+                            let ctx = self.context_mgr.last_context_for_window(window);
+                            self.context_mgr.set_active(ctx);
+                        }
+                        // Same window: don't call set_active, preserving any sub-view.
 
-                    // Use stored scroll offset (maintained by render)
-                    let scroll_offset = self.context_mgr.scroll_offset(active_ctx);
-                    let clicked_idx = scroll_offset + inner_y as usize;
-                    if clicked_idx < list_len {
-                        self.context_mgr.set_selection(clicked_idx);
+                        // Select the clicked item.
+                        let inner_y = row.saturating_sub(panel_rect.y + 1); // +1 for border
+                        let active_ctx = self.context_mgr.active();
+                        let model = self.model.lock().unwrap();
+                        let list_len = self.context_mgr.list_len(&model);
+                        drop(model);
+
+                        let scroll_offset = self.context_mgr.scroll_offset(active_ctx);
+                        let clicked_idx = scroll_offset + inner_y as usize;
+                        if clicked_idx < list_len {
+                            self.context_mgr.set_selection(clicked_idx);
+                        }
                     }
                 }
                 return;
