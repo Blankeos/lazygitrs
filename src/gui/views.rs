@@ -44,6 +44,7 @@ pub fn render(
     commit_files_message: &str,
     branch_commits_name: &str,
     remote_branches_name: &str,
+    sub_commits_parent_context: ContextId,
     spinner_frame: usize,
     remote_op_label: Option<&str>,
     remote_op_success: bool,
@@ -154,7 +155,7 @@ pub fn render(
                             .title(format!(" Remote Branches ({}) ", remote_branches_name))
                             .borders(Borders::ALL)
                             .border_style(theme.active_border);
-                        let items = presentation::remote_branches::render_remote_branch_list(&model.sub_remote_branches, theme);
+                        let items = presentation::remote_branches::render_remote_branch_list(&model.sub_remote_branches, &model.head_branch_name, theme);
                         render_list_ctx(frame, fl.main_panel, rb_block, items, rb_selected, true, theme, ctx_mgr, ContextId::RemoteBranches);
                     } else {
                         let items = presentation::remotes::render_remote_list(model, theme);
@@ -335,14 +336,52 @@ pub fn render(
                 }
             }
             ContextId::Remotes => {
-                if ctx_mgr.active() == ContextId::RemoteBranches {
+                if ctx_mgr.active() == ContextId::BranchCommitFiles
+                    && sub_commits_parent_context == ContextId::RemoteBranches
+                {
+                    let cf_selected = ctx_mgr.selected(ContextId::BranchCommitFiles);
+                    let cf_title = build_commit_files_title(
+                        ContextId::BranchCommitFiles,
+                        commit_files_hash,
+                        commit_files_message,
+                        theme,
+                    );
+                    let cf_block = Block::default()
+                        .title(cf_title)
+                        .borders(Borders::ALL)
+                        .border_style(border_style);
+                    if show_commit_file_tree {
+                        let items = presentation::commit_files::render_commit_file_tree(
+                            model,
+                            theme,
+                            commit_file_tree_nodes,
+                            commit_files_collapsed_dirs,
+                        );
+                        render_list_ctx(frame, rect, cf_block, items, cf_selected, is_active, theme, ctx_mgr, ContextId::BranchCommitFiles);
+                    } else {
+                        let items =
+                            presentation::commit_files::render_commit_file_list(model, theme);
+                        render_list_ctx(frame, rect, cf_block, items, cf_selected, is_active, theme, ctx_mgr, ContextId::BranchCommitFiles);
+                    }
+                } else if ctx_mgr.active() == ContextId::BranchCommits
+                    && sub_commits_parent_context == ContextId::RemoteBranches
+                {
+                    let bc_selected = ctx_mgr.selected(ContextId::BranchCommits);
+                    let bc_title = build_branch_commits_title(branch_commits_name, theme);
+                    let bc_block = Block::default()
+                        .title(bc_title)
+                        .borders(Borders::ALL)
+                        .border_style(border_style);
+                    let items = presentation::commits::render_sub_commit_list(model, theme);
+                    render_list_ctx(frame, rect, bc_block, items, bc_selected, is_active, theme, ctx_mgr, ContextId::BranchCommits);
+                } else if ctx_mgr.active() == ContextId::RemoteBranches {
                     let rb_selected = ctx_mgr.selected(ContextId::RemoteBranches);
                     let rb_title = format!(" Remote Branches ({}) ", remote_branches_name);
                     let rb_block = Block::default()
                         .title(rb_title)
                         .borders(Borders::ALL)
                         .border_style(border_style);
-                    let items = presentation::remote_branches::render_remote_branch_list(&model.sub_remote_branches, theme);
+                    let items = presentation::remote_branches::render_remote_branch_list(&model.sub_remote_branches, &model.head_branch_name, theme);
                     render_list_ctx(frame, rect, rb_block, items, rb_selected, is_active, theme, ctx_mgr, ContextId::RemoteBranches);
                 } else {
                     let items = presentation::remotes::render_remote_list(model, theme);
@@ -1259,7 +1298,7 @@ fn render_status_bar(
             hints.extend([("enter", "branches"), ("f", "fetch"), ("P", "push"), ("p", "pull")]);
         }
         ContextId::RemoteBranches => {
-            hints.extend([("space", "checkout"), ("M", "merge"), ("r", "rebase"), ("d", "delete")]);
+            hints.extend([("enter", "commits"), ("space", "checkout"), ("M", "merge"), ("r", "rebase"), ("d", "delete")]);
         }
         ContextId::Tags => {
             hints.extend([("n", "new"), ("d", "delete"), ("P", "push")]);

@@ -484,6 +484,7 @@ impl Gui {
                         &self.commit_files_message,
                         &self.branch_commits_name,
                         &self.remote_branches_name,
+                        self.sub_commits_parent_context,
                         self.spinner_frame,
                         self.remote_op_label.as_deref(),
                         self.remote_op_success_at
@@ -2796,6 +2797,7 @@ impl Gui {
             ContextId::RemoteBranches => HelpSection {
                 title: "Remote Branches".into(),
                 entries: vec![
+                    HelpEntry { key: "<enter>".into(), description: "View branch commits".into() },
                     HelpEntry { key: "<space>".into(), description: "Checkout as local branch".into() },
                     HelpEntry { key: kb.branches.merge_into_current_branch.clone(), description: "Merge into current".into() },
                     HelpEntry { key: kb.branches.rebase_branch.clone(), description: "Rebase".into() },
@@ -4294,9 +4296,12 @@ impl Gui {
             }
         }
 
-        // If we're viewing remote branches, re-load them (refresh wipes the model)
-        if self.context_mgr.active() == ContextId::RemoteBranches
-            && !self.remote_branches_name.is_empty()
+        // If we're viewing remote branches (or drilled into commits/files from them), re-load them
+        if !self.remote_branches_name.is_empty()
+            && (self.context_mgr.active() == ContextId::RemoteBranches
+                || ((self.context_mgr.active() == ContextId::BranchCommits
+                    || self.context_mgr.active() == ContextId::BranchCommitFiles)
+                    && self.sub_commits_parent_context == ContextId::RemoteBranches))
         {
             if let Some(remote) = model.remotes.iter().find(|r| r.name == self.remote_branches_name) {
                 model.sub_remote_branches = remote.branches.clone();

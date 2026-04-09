@@ -19,6 +19,11 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return Ok(());
     }
 
+    // Enter: drill into commits for the selected remote branch
+    if key.code == KeyCode::Enter {
+        return enter_remote_branch_commits(gui);
+    }
+
     // Space: checkout remote branch (creates local tracking branch)
     if key.code == KeyCode::Char(' ') {
         return checkout_remote_branch(gui);
@@ -39,6 +44,29 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return delete_remote_branch(gui);
     }
 
+    Ok(())
+}
+
+fn enter_remote_branch_commits(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let model = gui.model.lock().unwrap();
+    if let Some(rb) = model.sub_remote_branches.get(selected) {
+        let full_name = rb.full_name();
+        drop(model);
+
+        // Load commits for this remote branch
+        let commits = gui.git.load_commits_for_branch(&full_name, 300)?;
+        {
+            let mut model = gui.model.lock().unwrap();
+            model.sub_commits = commits;
+        }
+        gui.branch_commits_name = full_name;
+        gui.sub_commits_parent_context = ContextId::RemoteBranches;
+
+        gui.context_mgr.set_active(ContextId::BranchCommits);
+        gui.context_mgr.set_selection(0);
+        gui.needs_diff_refresh = true;
+    }
     Ok(())
 }
 

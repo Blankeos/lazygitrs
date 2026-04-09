@@ -45,8 +45,19 @@ fn enter_remote_branches(gui: &mut Gui) -> Result<()> {
     let model = gui.model.lock().unwrap();
     if let Some(remote) = model.remotes.get(selected) {
         let name = remote.name.clone();
-        let branches = remote.branches.clone();
+        let mut branches = remote.branches.clone();
+        let head_branch = model.head_branch_name.clone();
         drop(model);
+
+        // Put the current branch's remote counterpart first (like local branches)
+        if !head_branch.is_empty() {
+            if let Some(idx) = branches.iter().position(|b| b.name == head_branch) {
+                if idx > 0 {
+                    let head = branches.remove(idx);
+                    branches.insert(0, head);
+                }
+            }
+        }
 
         {
             let mut model = gui.model.lock().unwrap();
