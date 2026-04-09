@@ -337,6 +337,7 @@ fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
             },
         ],
         selected: 0,
+        loading_index: None,
     };
     Ok(())
 }
@@ -435,6 +436,7 @@ fn open_stash_options(gui: &mut Gui) -> Result<()> {
             },
         ],
         selected: 0,
+        loading_index: None,
     };
     Ok(())
 }
@@ -524,6 +526,7 @@ fn discard_file(gui: &mut Gui) -> Result<()> {
                             },
                         ],
                         selected: 0,
+                        loading_index: None,
                     };
                 } else {
                     for (name, added) in &files_info {
@@ -568,6 +571,7 @@ fn discard_file(gui: &mut Gui) -> Result<()> {
                     },
                 ],
                 selected: 0,
+                loading_index: None,
             };
         } else {
             gui.git.discard_file(&name, added)?;
@@ -619,6 +623,7 @@ fn ignore_file(gui: &mut Gui) -> Result<()> {
                 },
             ],
             selected: 0,
+            loading_index: None,
         };
     }
     Ok(())

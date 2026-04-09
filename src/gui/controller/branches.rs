@@ -322,6 +322,7 @@ fn delete_branch(gui: &mut Gui) -> Result<()> {
             title: format!("Delete branch '{}'?", name),
             items,
             selected: 0,
+            loading_index: None,
         };
     }
     Ok(())
@@ -402,6 +403,7 @@ fn rebase_branch(gui: &mut Gui) -> Result<()> {
             title: format!("Rebase '{}'", current_branch),
             items,
             selected: 0,
+            loading_index: None,
         };
     }
     Ok(())
@@ -580,23 +582,18 @@ fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
 
         // PR URL may not be available — try to detect if branch has a PR
         let pr_branch = branch_for_pr.clone();
+        let copy_pr_index = items.len();
         items.push(MenuItem {
             label: "Copy PR URL".to_string(),
             description: "(requires existing PR)".to_string(),
             key: Some("p".to_string()),
             action: Some(Box::new(move |gui| {
-                match gui.git.get_pr_url(&pr_branch) {
-                    Ok(url) => {
-                        Platform::copy_to_clipboard(&url)?;
-                    }
-                    Err(_) => {
-                        gui.popup = PopupState::Message {
-                            title: "No PR found".to_string(),
-                            message: format!("No pull request found for branch '{}'", branch_for_pr),
-                            kind: MessageKind::Info,
-                        };
-                    }
-                }
+                use crate::gui::popup::MenuAsyncResult;
+                let branch = pr_branch.clone();
+                gui.start_menu_async(copy_pr_index, move |git| {
+                    let url = git.get_pr_url(&branch)?;
+                    Ok(MenuAsyncResult::CopyToClipboard(url))
+                });
                 Ok(())
             })),
         });
@@ -605,6 +602,7 @@ fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
             title: "Copy to clipboard".to_string(),
             items,
             selected: 0,
+            loading_index: None,
         };
     }
     Ok(())
@@ -643,23 +641,18 @@ fn open_in_browser_menu(gui: &mut Gui) -> Result<()> {
         ];
 
         let pr_branch = branch_for_pr.clone();
+        let open_pr_index = items.len();
         items.push(MenuItem {
             label: "Open PR URL".to_string(),
             description: "(requires existing PR)".to_string(),
             key: Some("p".to_string()),
             action: Some(Box::new(move |gui| {
-                match gui.git.get_pr_url(&pr_branch) {
-                    Ok(url) => {
-                        Platform::open_file(&url)?;
-                    }
-                    Err(_) => {
-                        gui.popup = PopupState::Message {
-                            title: "No PR found".to_string(),
-                            message: format!("No pull request found for branch '{}'", branch_for_pr),
-                            kind: MessageKind::Info,
-                        };
-                    }
-                }
+                use crate::gui::popup::MenuAsyncResult;
+                let branch = pr_branch.clone();
+                gui.start_menu_async(open_pr_index, move |git| {
+                    let url = git.get_pr_url(&branch)?;
+                    Ok(MenuAsyncResult::OpenUrl(url))
+                });
                 Ok(())
             })),
         });
@@ -668,6 +661,7 @@ fn open_in_browser_menu(gui: &mut Gui) -> Result<()> {
             title: "Open in browser".to_string(),
             items,
             selected: 0,
+            loading_index: None,
         };
     }
     Ok(())

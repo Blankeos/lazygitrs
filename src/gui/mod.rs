@@ -21,6 +21,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use crate::config::{AppConfig, AppState};
+use crate::os::platform::Platform;
 use crate::config::keybindings::parse_key;
 use crate::git::{GitCommands, ModelPart, MODEL_PART_COUNT};
 use crate::model::Model;
@@ -132,6 +133,10 @@ pub struct Gui {
     remote_op_rx: mpsc::Receiver<Result<()>>,
     /// Sender cloned into background threads for remote operations.
     remote_op_tx: mpsc::Sender<Result<()>>,
+    /// Receiver for background menu item operations (e.g. fetching PR URLs).
+    menu_async_rx: mpsc::Receiver<Result<popup::MenuAsyncResult>>,
+    /// Sender cloned into background threads for menu async operations.
+    pub(crate) menu_async_tx: mpsc::Sender<Result<popup::MenuAsyncResult>>,
     /// Undo stack: stores reflog hashes for undo/redo.
     undo_reflog_idx: usize,
     /// Patch building mode state.
@@ -142,6 +147,8 @@ pub struct Gui {
     pub rebase_mode: RebaseModeState,
     /// Stashed commit editor popup while commit menu or AI generation is shown.
     pending_commit_popup: Option<PopupState>,
+    /// Temporarily holds a menu popup during action execution so async actions can restore it.
+    pending_menu_popup: Option<PopupState>,
     /// Search bar textarea (1-line editor for search input).
     search_textarea: Option<tui_textarea::TextArea<'static>>,
     /// Last time a refresh occurred (for 10s background auto-refresh interval).
@@ -223,6 +230,7 @@ impl Gui {
         let (diff_tx, diff_rx) = mpsc::channel();
         let (ai_commit_tx, ai_commit_rx) = mpsc::channel();
         let (remote_op_tx, remote_op_rx) = mpsc::channel();
+        let (menu_async_tx, menu_async_rx) = mpsc::channel();
         let show_file_tree = config
             .app_state
             .show_file_tree
@@ -300,11 +308,14 @@ impl Gui {
             ai_commit_tx,
             remote_op_rx,
             remote_op_tx,
+            menu_async_rx,
+            menu_async_tx,
             undo_reflog_idx: 0,
             patch_building: PatchBuildingState::new(),
             diff_mode: DiffModeState::new(),
             rebase_mode: RebaseModeState::new(),
             pending_commit_popup: None,
+            pending_menu_popup: None,
             search_textarea: None,
             last_refresh_at: Instant::now(),
             commit_branch_filter: Vec::new(),
@@ -413,6 +424,9 @@ impl Gui {
 
             // Check for completed background remote operations
             self.receive_remote_op_results();
+
+            // Check for completed background menu item operations
+            self.receive_menu_async_results();
 
             // Advance spinner animation
             self.spinner_frame = self.spinner_frame.wrapping_add(1);
@@ -680,6 +694,98 @@ impl Gui {
         }
     }
 
+    /// Execute a menu item action. If `override_idx` is Some, use that index;
+    /// otherwise use the currently selected index.
+    fn execute_menu_action(&mut self, override_idx: Option<usize>) {
+        let popup = std::mem::replace(&mut self.popup, PopupState::None);
+        if let PopupState::Menu { ref items, selected, .. } = popup {
+            let idx = override_idx.unwrap_or(selected);
+            let has_action = items.get(idx).and_then(|i| i.action.as_ref()).is_some();
+            if has_action {
+                // Stash the menu so async actions can restore it via start_menu_async.
+                self.pending_menu_popup = Some(popup);
+                // Call the action from the stashed popup.
+                let action_result = {
+                    let menu = self.pending_menu_popup.as_ref().unwrap();
+                    if let PopupState::Menu { items, .. } = menu {
+                        let action = items[idx].action.as_ref().unwrap();
+                        // SAFETY: We hold a shared ref to pending_menu_popup while calling
+                        // action(self). The action may move the popup out of pending_menu_popup
+                        // via start_menu_async (which calls .take()), but it won't invalidate
+                        // the action pointer because the action is inside items which are moved
+                        // as a whole. We use a raw pointer to avoid the borrow conflict.
+                        let action_ptr = action as *const dyn Fn(&mut Gui) -> Result<()>;
+                        unsafe { (*action_ptr)(self) }
+                    } else {
+                        Ok(())
+                    }
+                };
+                match action_result {
+                    Err(e) => {
+                        self.pending_menu_popup = None;
+                        self.popup = PopupState::Message {
+                            title: "Error".to_string(),
+                            message: format!("{}", e),
+                            kind: MessageKind::Error,
+                        };
+                    }
+                    Ok(()) => {
+                        if self.pending_menu_popup.is_some() {
+                            // Action didn't call start_menu_async — it was synchronous.
+                            // Discard the stashed menu (popup stays None = menu closed).
+                            self.pending_menu_popup = None;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Handle results from background menu item operations.
+    fn receive_menu_async_results(&mut self) {
+        if let Ok(result) = self.menu_async_rx.try_recv() {
+            // Only process if the popup is still a menu with loading state.
+            // If the user pressed Esc, the menu is already gone — discard the result.
+            let is_menu_loading = matches!(&self.popup, PopupState::Menu { loading_index: Some(_), .. });
+            if !is_menu_loading {
+                return;
+            }
+            match result {
+                Ok(outcome) => {
+                    // Close the menu
+                    self.popup = PopupState::None;
+                    match outcome {
+                        popup::MenuAsyncResult::CopyToClipboard(url) => {
+                            if let Err(e) = Platform::copy_to_clipboard(&url) {
+                                self.popup = PopupState::Message {
+                                    title: "Error".to_string(),
+                                    message: format!("{}", e),
+                                    kind: MessageKind::Error,
+                                };
+                            }
+                        }
+                        popup::MenuAsyncResult::OpenUrl(url) => {
+                            if let Err(e) = Platform::open_file(&url) {
+                                self.popup = PopupState::Message {
+                                    title: "Error".to_string(),
+                                    message: format!("{}", e),
+                                    kind: MessageKind::Error,
+                                };
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.popup = PopupState::Message {
+                        title: "No PR found".to_string(),
+                        message: format!("{}", e),
+                        kind: MessageKind::Info,
+                    };
+                }
+            }
+        }
+    }
+
     /// Run a remote operation (push/pull/fetch) on a background thread with a loading popup.
     pub fn start_remote_op<F>(&mut self, title: &str, message: &str, op: F)
     where
@@ -700,6 +806,31 @@ impl Gui {
         self.remote_op_success_at = None;
         let git = Arc::clone(&self.git);
         let tx = self.remote_op_tx.clone();
+        std::thread::spawn(move || {
+            let result = op(&git);
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Start an async operation for a menu item. Restores the menu popup with a
+    /// loading spinner on the item at `index` and spawns a background thread.
+    pub fn start_menu_async<F>(&mut self, index: usize, op: F)
+    where
+        F: FnOnce(&crate::git::GitCommands) -> Result<popup::MenuAsyncResult> + Send + 'static,
+    {
+        // Restore the menu popup (stashed by execute_menu_action) with loading_index set.
+        if let Some(menu) = self.pending_menu_popup.take() {
+            if let PopupState::Menu { title, items, selected, .. } = menu {
+                self.popup = PopupState::Menu {
+                    title,
+                    items,
+                    selected,
+                    loading_index: Some(index),
+                };
+            }
+        }
+        let git = Arc::clone(&self.git);
+        let tx = self.menu_async_tx.clone();
         std::thread::spawn(move || {
             let result = op(&git);
             let _ = tx.send(result);
@@ -1759,7 +1890,11 @@ impl Gui {
                 // Any key dismisses the message
                 self.popup = PopupState::None;
             }
-            PopupState::Menu { items, selected, .. } => {
+            PopupState::Menu { items, selected, loading_index, .. } => {
+                // Block all input while a menu item is loading (except Esc)
+                if loading_index.is_some() && key.code != KeyCode::Esc {
+                    return Ok(());
+                }
                 let _items_len = items.len();
                 match key.code {
                     KeyCode::Char('j') | KeyCode::Down => {
@@ -1789,20 +1924,7 @@ impl Gui {
                         }
                     }
                     KeyCode::Enter => {
-                        let popup = std::mem::replace(&mut self.popup, PopupState::None);
-                        if let PopupState::Menu { items, selected, .. } = popup {
-                            if let Some(item) = items.get(selected) {
-                                if let Some(ref action) = item.action {
-                                    if let Err(e) = action(self) {
-                                        self.popup = PopupState::Message {
-                                            title: "Error".to_string(),
-                                            message: format!("{}", e),
-                                            kind: MessageKind::Error,
-                                        };
-                                    }
-                                }
-                            }
-                        }
+                        self.execute_menu_action(None);
                     }
                     KeyCode::Esc => {
                         if let Some(stashed) = self.pending_commit_popup.take() {
@@ -1821,18 +1943,7 @@ impl Gui {
                             // Check if the item has an action (not disabled)
                             let has_action = items[idx].action.is_some();
                             if has_action {
-                                let popup = std::mem::replace(&mut self.popup, PopupState::None);
-                                if let PopupState::Menu { items, .. } = popup {
-                                    if let Some(ref action) = items[idx].action {
-                                        if let Err(e) = action(self) {
-                                            self.popup = PopupState::Message {
-                                                title: "Error".to_string(),
-                                                message: format!("{}", e),
-                                                kind: MessageKind::Error,
-                                            };
-                                        }
-                                    }
-                                }
+                                self.execute_menu_action(Some(idx));
                             }
                             // If disabled, do nothing (stay on menu)
                         }
@@ -2932,6 +3043,7 @@ impl Gui {
             title: "Rebase/Merge options".to_string(),
             items,
             selected: 0,
+            loading_index: None,
         };
         Ok(())
     }
@@ -3063,6 +3175,7 @@ impl Gui {
             title: "Commit menu".to_string(),
             items,
             selected: 0,
+            loading_index: None,
         };
         Ok(())
     }
@@ -3105,6 +3218,7 @@ impl Gui {
             title: "Recent repos".to_string(),
             items,
             selected: 0,
+            loading_index: None,
         };
         Ok(())
     }

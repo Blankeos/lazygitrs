@@ -150,7 +150,10 @@
 
 - [x] Subtab and sub-item menu mouse clicks should work, right now in sidebar, if I go to Branches, find main, press enter (now in commit files), I use my mouse and it goes back to 'Branches'. Maybe because mouseclicks currently on the sidebar usually always register for the root sub-item tab.
 
-- [ ] Loading state in 'actions' for dialogs i.e. Copy PR URL (just freezes the screen while it does the fetch call..., can we maybe add a loading without creating a separate dialog for it, just sort of a loading icon next to it when it's running)
+- [x] Loading state in 'actions' for dialogs i.e. Copy PR URL (just freezes the screen while it does the fetch call..., can we maybe add a loading without creating a separate dialog for it, just sort of a loading icon next to it when it's running). Some I can note of:
+  - Copy PR URL
+  - Open PR URL
+  - Generate AI Commit Message (might be good, but honestly, I already liked what I did with it, so don't touch that.)
 
 - [x] In 'remote branches' improvements and parity.
   - Just like in local branches, you always see the 'current branch' as the first item. Now here, we should be able to see that the first branch is the current branch item you see is the remote version of the current branch, if possible.

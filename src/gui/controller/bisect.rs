@@ -65,6 +65,7 @@ fn show_bisect_start_menu(gui: &mut Gui) -> Result<()> {
             },
         ],
         selected: 0,
+        loading_index: None,
     };
     Ok(())
 }
@@ -128,6 +129,7 @@ fn show_bisect_in_progress_menu(gui: &mut Gui) -> Result<()> {
             },
         ],
         selected: 0,
+        loading_index: None,
     };
     Ok(())
 }

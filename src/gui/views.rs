@@ -1553,6 +1553,8 @@ pub fn render_selection_overlay(frame: &mut Frame, diff_view: &mut DiffViewState
     }
 }
 
+const SPINNER_CHARS: &[char] = &['·', '✻', '✽', '✶', '✳', '✢'];
+
 pub fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame: usize, theme: &Theme) {
     let popup_width = (area.width * 60 / 100).min(60).max(30);
     let x = (area.width.saturating_sub(popup_width)) / 2;
@@ -1802,6 +1804,7 @@ pub fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_f
             title,
             items,
             selected,
+            loading_index,
         } => {
             let height = (items.len() as u16 + 2).min(area.height - 4);
             let my = (area.height.saturating_sub(height)) / 2;
@@ -1818,6 +1821,7 @@ pub fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_f
                 .enumerate()
                 .map(|(i, item)| {
                     let disabled = item.action.is_none();
+                    let is_loading = *loading_index == Some(i);
 
                     let label = if let Some(ref key) = item.key {
                         format!(" {} {}", key, item.label)
@@ -1838,7 +1842,17 @@ pub fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_f
                         } else {
                             Style::default()
                         };
-                        let line = if !item.description.is_empty() {
+                        let line = if is_loading {
+                            let spinner = SPINNER_CHARS[(spinner_frame / 8) % SPINNER_CHARS.len()];
+                            Line::from(vec![
+                                Span::styled(label, Style::default()),
+                                Span::raw(" "),
+                                Span::styled(
+                                    format!("{}", spinner),
+                                    Style::default().fg(theme.accent_secondary),
+                                ),
+                            ])
+                        } else if !item.description.is_empty() {
                             Line::from(vec![
                                 Span::styled(label, Style::default()),
                                 Span::raw(" "),
@@ -1875,7 +1889,6 @@ pub fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_f
             }
         }
         PopupState::Loading { title, message } => {
-            const SPINNER_CHARS: &[char] = &['·', '✻', '✽', '✶', '✳', '✢'];
             // Change symbol every ~8 frames (~128ms at 60fps)
             let spinner = SPINNER_CHARS[(spinner_frame / 8) % SPINNER_CHARS.len()];
 

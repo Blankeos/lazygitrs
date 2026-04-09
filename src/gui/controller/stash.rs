@@ -104,6 +104,7 @@ fn pop_stash(gui: &mut Gui) -> Result<()> {
                 },
             ],
             selected: 0,
+            loading_index: None,
         };
     }
     Ok(())
@@ -138,6 +139,7 @@ fn apply_stash(gui: &mut Gui) -> Result<()> {
                 },
             ],
             selected: 0,
+            loading_index: None,
         };
     }
     Ok(())
@@ -172,6 +174,7 @@ fn drop_stash(gui: &mut Gui) -> Result<()> {
                 },
             ],
             selected: 0,
+            loading_index: None,
         };
     }
     Ok(())

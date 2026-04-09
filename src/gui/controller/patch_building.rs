@@ -71,6 +71,7 @@ pub fn show_patch_menu(gui: &mut Gui) -> Result<()> {
                 },
             ],
             selected: 0,
+            loading_index: None,
         };
     } else {
         // Enter patch building mode

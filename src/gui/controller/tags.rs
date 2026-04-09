@@ -141,6 +141,7 @@ fn show_reset_menu(gui: &mut Gui) -> Result<()> {
                 },
             ],
             selected: 0,
+            loading_index: None,
         };
     }
     Ok(())

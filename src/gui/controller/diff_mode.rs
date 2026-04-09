@@ -371,6 +371,7 @@ fn show_commit_file_copy_menu(gui: &mut Gui) -> Result<()> {
             },
         ],
         selected: 0,
+        loading_index: None,
     };
     Ok(())
 }

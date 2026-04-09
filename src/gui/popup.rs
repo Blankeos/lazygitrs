@@ -7,6 +7,15 @@ pub type ConfirmAction = Box<dyn FnOnce(&mut Gui) -> Result<()>>;
 pub type InputAction = Box<dyn FnOnce(&mut Gui, &str) -> Result<()>>;
 pub type MenuAction = Box<dyn Fn(&mut Gui) -> Result<()>>;
 
+/// Result sent back from a menu item's background operation.
+pub enum MenuAsyncResult {
+    /// Copy the string to the clipboard.
+    CopyToClipboard(String),
+    /// Open the string as a URL/file.
+    OpenUrl(String),
+}
+
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageKind {
     Error,
@@ -48,6 +57,8 @@ pub enum PopupState {
         title: String,
         items: Vec<MenuItem>,
         selected: usize,
+        /// When set, this menu item index is running an async operation (shows inline spinner).
+        loading_index: Option<usize>,
     },
     /// Informational or error message — dismissed by any key press.
     Message {
