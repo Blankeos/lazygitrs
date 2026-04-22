@@ -18,9 +18,16 @@ impl GitCommands {
 
             let x = line.chars().nth(0).unwrap_or(' ');
             let y = line.chars().nth(1).unwrap_or(' ');
-            let name = line[3..].to_string();
+            let raw = &line[3..];
 
             let (has_staged, has_unstaged, tracked, status) = parse_status_codes(x, y);
+
+            let name = if raw.contains(" -> ") {
+                let parts: Vec<&str> = raw.splitn(2, " -> ").collect();
+                format!("{} -> {}", unquote_porcelain_path(parts[0]), unquote_porcelain_path(parts.get(1).copied().unwrap_or("")))
+            } else {
+                unquote_porcelain_path(raw)
+            };
 
             let display_name = if name.contains(" -> ") {
                 // Renamed file: "old -> new"
@@ -145,6 +152,54 @@ impl GitCommands {
         std::fs::write(exclude, contents)?;
         Ok(())
     }
+}
+
+/// Decode a path as emitted by `git status --porcelain`.
+///
+/// Git wraps paths containing special characters in double quotes with
+/// C-style escapes (e.g. `"\303\241.txt"`, `"with\"quote.txt"`). Passing the
+/// literal quoted form to later git commands makes git treat the quotes as
+/// part of the pathspec and fail. This reverses that encoding.
+fn unquote_porcelain_path(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'"' || bytes[bytes.len() - 1] != b'"' {
+        return raw.to_string();
+    }
+    let inner = &bytes[1..bytes.len() - 1];
+    let mut out: Vec<u8> = Vec::with_capacity(inner.len());
+    let mut i = 0;
+    while i < inner.len() {
+        let c = inner[i];
+        if c == b'\\' && i + 1 < inner.len() {
+            let n = inner[i + 1];
+            match n {
+                b'a' => { out.push(0x07); i += 2; }
+                b'b' => { out.push(0x08); i += 2; }
+                b't' => { out.push(b'\t'); i += 2; }
+                b'n' => { out.push(b'\n'); i += 2; }
+                b'v' => { out.push(0x0b); i += 2; }
+                b'f' => { out.push(0x0c); i += 2; }
+                b'r' => { out.push(b'\r'); i += 2; }
+                b'"' => { out.push(b'"'); i += 2; }
+                b'\\' => { out.push(b'\\'); i += 2; }
+                b'0'..=b'7' if i + 3 < inner.len()
+                    && (b'0'..=b'7').contains(&inner[i + 2])
+                    && (b'0'..=b'7').contains(&inner[i + 3]) =>
+                {
+                    let val = ((inner[i + 1] - b'0') << 6)
+                        | ((inner[i + 2] - b'0') << 3)
+                        | (inner[i + 3] - b'0');
+                    out.push(val);
+                    i += 4;
+                }
+                _ => { out.push(c); i += 1; }
+            }
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| raw.to_string())
 }
 
 fn parse_status_codes(x: char, y: char) -> (bool, bool, bool, FileStatus) {
