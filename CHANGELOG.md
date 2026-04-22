@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.15] - 2026-04-22
+
+### Bug Fixes
+
+- Made the commit panel visibility by (.) save to state.
+
 ## [0.0.14] - 2026-04-22
 
 ### Bug Fixes
@@ -10,6 +16,7 @@ All notable changes to this project will be documented in this file.
 
 ### Chores
 
+- Allow-dirty for custom release.yml
 - Added git cliff for changelogs.
 
 ### Documentation
