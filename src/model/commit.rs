@@ -64,3 +64,10 @@ pub enum Divergence {
     Left,
     Right,
 }
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CommitStat {
+    pub files_changed: usize,
+    pub insertions: usize,
+    pub deletions: usize,
+}

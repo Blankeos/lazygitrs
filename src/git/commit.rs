@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use super::GitCommands;
-use crate::model::{Commit, CommitStatus, commit::Divergence};
+use crate::model::{Commit, CommitStatus, commit::{CommitStat, Divergence}};
 
 impl GitCommands {
     /// Load commits from all branches (--all) so the graph shows the full topology.
@@ -298,6 +298,45 @@ impl GitCommands {
             .run_expecting_success()?;
         Ok(())
     }
+
+    /// Fetch the shortstat summary for a commit:
+    /// "N files changed, A insertions(+), D deletions(-)".
+    /// Uses `git log -1 --shortstat` because `git show --shortstat` dumps the
+    /// full patch first (slow on large commits), while `git show --shortstat
+    /// --no-patch` suppresses the stat entirely.  `git log -1` gives us the
+    /// stat without the patch.
+    pub fn commit_stat(&self, hash: &str) -> Result<CommitStat> {
+        let result = self
+            .git()
+            .args(&["log", "-1", "--shortstat", "--format=", hash])
+            .run()?;
+        if !result.success {
+            return Ok(CommitStat::default());
+        }
+        Ok(parse_shortstat(&result.stdout))
+    }
+}
+
+fn parse_shortstat(output: &str) -> CommitStat {
+    let line = output
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+        .unwrap_or("");
+    let mut stat = CommitStat::default();
+    for segment in line.split(',') {
+        let segment = segment.trim();
+        let num_str: String = segment.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let Ok(n) = num_str.parse::<usize>() else { continue };
+        if segment.contains("file") {
+            stat.files_changed = n;
+        } else if segment.contains("insertion") {
+            stat.insertions = n;
+        } else if segment.contains("deletion") {
+            stat.deletions = n;
+        }
+    }
+    stat
 }
 
 fn extract_tags(decoration: &str) -> Vec<String> {

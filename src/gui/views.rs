@@ -7,8 +7,13 @@ use unicode_width::UnicodeWidthStr;
 
 use std::collections::HashSet;
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use crate::config::{AppConfig, Theme};
+use crate::git::GitCommands;
 use crate::model::Model;
+use crate::model::commit::{Commit, CommitStat};
 use crate::model::file_tree::{CommitFileTreeNode, FileTreeNode};
 use crate::pager::side_by_side::{self, DiffPanel, DiffPanelLayout, DiffViewState};
 
@@ -52,6 +57,12 @@ pub fn render(
     range_select_anchor: Option<usize>,
     diff_loading: bool,
     diff_loading_show: bool,
+    commit_stats: &Arc<Mutex<HashMap<String, CommitStat>>>,
+    commit_stats_inflight: &Arc<Mutex<std::collections::HashSet<String>>>,
+    git: &Arc<GitCommands>,
+    commit_details_scroll: &mut u16,
+    commit_details_scroll_hash: &mut String,
+    show_commit_details: bool,
 ) {
     let area = frame.area();
     let panel_count = SideWindow::ALL.len();
@@ -63,12 +74,19 @@ pub fn render(
         .position(|w| *w == active_window)
         .unwrap_or(1); // default to Files
 
-    let fl = layout::compute_layout(
+    // Determine if the commit-details panel should be shown.  We show it when
+    // the active context is a commit-listing context and a commit is selected.
+    let current_commit: Option<&Commit> = resolve_current_commit(model, ctx_mgr, commit_files_hash);
+    let show_details = show_commit_details && current_commit.is_some();
+
+    let fl = layout::compute_layout_with_details(
         area,
         layout_state.side_panel_ratio,
         panel_count,
         active_panel_index,
         screen_mode,
+        show_details,
+        !diff_focused, // sidebar_focused_full: only meaningful in Full mode
     );
 
     // Full screen mode
@@ -199,6 +217,24 @@ pub fn render(
                     frame.render_widget(widget, fl.main_panel);
                 }
             }
+        }
+        // Full-mode details column (sidebar-focused only) — full-size view.
+        if let (Some(details_rect), Some(commit)) = (fl.commit_details_panel, current_commit) {
+            if commit_details_scroll_hash.as_str() != commit.hash.as_str() {
+                *commit_details_scroll = 0;
+                *commit_details_scroll_hash = commit.hash.clone();
+            }
+            render_commit_details_panel(
+                frame,
+                details_rect,
+                commit,
+                commit_stats,
+                commit_stats_inflight,
+                git,
+                theme,
+                false,
+                commit_details_scroll,
+            );
         }
         render_status_bar(frame, fl.status_bar, ctx_mgr, diff_view, theme, model);
         // Render text selection highlight overlay and tooltip (must be before popup)
@@ -563,6 +599,26 @@ pub fn render(
         let info = get_info_content(model, ctx_mgr);
         let widget = Paragraph::new(info).block(block);
         frame.render_widget(widget, fl.main_panel);
+    }
+
+    // Normal/Half mode: compact details box sits at the bottom of the active
+    // sidebar panel (layout carves the rect out of the active side panel).
+    if let (Some(details_rect), Some(commit)) = (fl.commit_details_panel, current_commit) {
+        if commit_details_scroll_hash.as_str() != commit.hash.as_str() {
+            *commit_details_scroll = 0;
+            *commit_details_scroll_hash = commit.hash.clone();
+        }
+        render_commit_details_panel(
+            frame,
+            details_rect,
+            commit,
+            commit_stats,
+            commit_stats_inflight,
+            git,
+            theme,
+            true,
+            commit_details_scroll,
+        );
     }
 
     // Render status bar (or search bar if search is active)
@@ -2426,4 +2482,107 @@ fn render_list_picker(
         hint_spans.push(Span::styled(format!(": {}  ", desc), Style::default().fg(theme.text_dimmed)));
     }
     frame.render_widget(Paragraph::new(Line::from(hint_spans)), hint_area);
+}
+
+/// Resolve the commit to display in the details panel based on the active
+/// context.  Returns `None` when the context isn't commit-listing or nothing
+/// is selected.  For `CommitFiles`/`BranchCommitFiles`/`StashFiles` we look
+/// up the commit by the drilled-in hash.
+fn resolve_current_commit<'a>(
+    model: &'a Model,
+    ctx_mgr: &ContextManager,
+    commit_files_hash: &str,
+) -> Option<&'a Commit> {
+    let ctx = ctx_mgr.active();
+    let sel = ctx_mgr.selected(ctx);
+    match ctx {
+        ContextId::Commits => model.commits.get(sel),
+        ContextId::BranchCommits => model.sub_commits.get(sel),
+        ContextId::Reflog => model.reflog_commits.get(sel),
+        ContextId::CommitFiles | ContextId::BranchCommitFiles | ContextId::StashFiles => {
+            if commit_files_hash.is_empty() {
+                return None;
+            }
+            find_commit_by_hash(model, commit_files_hash)
+        }
+        _ => None,
+    }
+}
+
+fn find_commit_by_hash<'a>(model: &'a Model, hash: &str) -> Option<&'a Commit> {
+    model
+        .commits
+        .iter()
+        .find(|c| c.hash == hash)
+        .or_else(|| model.sub_commits.iter().find(|c| c.hash == hash))
+        .or_else(|| model.reflog_commits.iter().find(|c| c.hash == hash))
+}
+
+/// Look up a cached shortstat, spawning a background worker to fetch it if
+/// missing.  Render never blocks on git — the first frame for a new commit
+/// shows no stat line; the next repaint after the worker finishes will pick
+/// it up from the shared cache.
+fn lookup_or_fetch_stat(
+    cache: &Arc<Mutex<HashMap<String, CommitStat>>>,
+    inflight: &Arc<Mutex<std::collections::HashSet<String>>>,
+    git: &Arc<GitCommands>,
+    hash: &str,
+) -> Option<CommitStat> {
+    if let Ok(map) = cache.lock() {
+        if let Some(s) = map.get(hash) {
+            return Some(*s);
+        }
+    }
+    // Not cached: schedule a background fetch (once) and return None for now.
+    let mut inflight_guard = match inflight.lock() {
+        Ok(g) => g,
+        Err(_) => return None,
+    };
+    if inflight_guard.contains(hash) {
+        return None;
+    }
+    inflight_guard.insert(hash.to_string());
+    drop(inflight_guard);
+
+    let cache = Arc::clone(cache);
+    let inflight = Arc::clone(inflight);
+    let git = Arc::clone(git);
+    let hash_owned = hash.to_string();
+    std::thread::spawn(move || {
+        // Only cache on success.  Errors leave the entry absent so a future
+        // visit can retry; in-flight guard still prevents same-frame spam.
+        if let Ok(stat) = git.commit_stat(&hash_owned) {
+            if let Ok(mut map) = cache.lock() {
+                map.insert(hash_owned.clone(), stat);
+            }
+        }
+        if let Ok(mut set) = inflight.lock() {
+            set.remove(&hash_owned);
+        }
+    });
+    None
+}
+
+fn render_commit_details_panel(
+    frame: &mut Frame,
+    rect: Rect,
+    commit: &Commit,
+    commit_stats: &Arc<Mutex<HashMap<String, CommitStat>>>,
+    commit_stats_inflight: &Arc<Mutex<std::collections::HashSet<String>>>,
+    git: &Arc<GitCommands>,
+    theme: &Theme,
+    compact: bool,
+    scroll: &mut u16,
+) {
+    let stat_owned = lookup_or_fetch_stat(commit_stats, commit_stats_inflight, git, &commit.hash);
+    presentation::commit_details::render_commit_details(
+        frame,
+        rect,
+        commit,
+        stat_owned.as_ref(),
+        None,
+        theme,
+        compact,
+        scroll,
+    );
 }

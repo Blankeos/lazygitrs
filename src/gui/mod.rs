@@ -7,7 +7,7 @@ pub mod presentation;
 pub mod scroll;
 pub mod views;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -197,6 +197,21 @@ pub struct Gui {
     commit_history_draft: String,
     /// Current color theme index into COLOR_THEMES.
     pub current_theme_index: usize,
+    /// Cache of shortstat summaries per commit hash.  Populated asynchronously
+    /// by background threads so the render path never blocks on git.
+    pub commit_stats_cache: std::sync::Arc<std::sync::Mutex<HashMap<String, crate::model::commit::CommitStat>>>,
+    /// Set of commit hashes with an in-flight stat fetch, so we don't spawn
+    /// duplicate workers on each frame.
+    pub commit_stats_inflight: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
+    /// Vertical scroll offset (rows) for the commit-details box.  Reset
+    /// whenever the selected commit hash changes.
+    pub commit_details_scroll: u16,
+    /// Hash the current `commit_details_scroll` value corresponds to.  When
+    /// render sees a different hash, it resets the scroll.
+    pub commit_details_scroll_hash: String,
+    /// Whether the commit-details box is visible.  Toggled with `.` in any
+    /// commit-related context.
+    pub show_commit_details: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -337,6 +352,11 @@ impl Gui {
             commit_history_idx: None,
             commit_history_draft: String::new(),
             current_theme_index,
+            commit_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            commit_stats_inflight: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
+            commit_details_scroll: 0,
+            commit_details_scroll_hash: String::new(),
+            show_commit_details: true,
         })
     }
 
@@ -511,6 +531,12 @@ impl Gui {
                         self.diff_loading && self.diff_loading_since
                             .map(|t| t.elapsed() >= std::time::Duration::from_millis(50))
                             .unwrap_or(false),
+                        &self.commit_stats_cache,
+                        &self.commit_stats_inflight,
+                        &self.git,
+                        &mut self.commit_details_scroll,
+                        &mut self.commit_details_scroll_hash,
+                        self.show_commit_details,
                     );
                 }
             })?;
@@ -1573,6 +1599,14 @@ impl Gui {
         // Universal "I" key: interactive rebase picker
         if key.code == KeyCode::Char('I') {
             self.show_interactive_rebase_picker();
+            return Ok(());
+        }
+
+        // `.` toggles the commit-details box when in any commit-related
+        // context.  Kept outside per-context controllers so the binding is
+        // consistent across Commits / BranchCommits / Reflog / CommitFiles.
+        if key.code == KeyCode::Char('.') && self.context_has_commit_details() {
+            self.show_commit_details = !self.show_commit_details;
             return Ok(());
         }
 
@@ -2827,6 +2861,7 @@ impl Gui {
                 entries: vec![
                     HelpEntry { key: "<enter>".into(), description: "View commit files".into() },
                     HelpEntry { key: "<esc>".into(), description: "Back to branches".into() },
+                    HelpEntry { key: ".".into(), description: "Toggle commit details panel".into() },
                 ],
             },
             ContextId::Commits => HelpSection {
@@ -2854,6 +2889,7 @@ impl Gui {
                     HelpEntry { key: "y".into(), description: "Copy to clipboard menu".into() },
                     HelpEntry { key: kb.commits.interactive_rebase.clone(), description: "Interactive rebase".into() },
                     HelpEntry { key: kb.commits.open_log_menu.clone(), description: "Filter by branch".into() },
+                    HelpEntry { key: ".".into(), description: "Toggle commit details panel".into() },
                 ],
             },
             ContextId::CommitFiles => HelpSection {
@@ -2863,6 +2899,7 @@ impl Gui {
                     HelpEntry { key: "<esc>".into(), description: "Back to commits".into() },
                     HelpEntry { key: kb.files.toggle_tree_view.clone(), description: "Toggle tree view".into() },
                     HelpEntry { key: "y".into(), description: "Copy to clipboard menu".into() },
+                    HelpEntry { key: ".".into(), description: "Toggle commit details panel".into() },
                 ],
             },
             ContextId::Reflog => HelpSection {
@@ -2873,6 +2910,7 @@ impl Gui {
                     HelpEntry { key: kb.commits.view_reset_options.clone(), description: "Reset options".into() },
                     HelpEntry { key: kb.commits.cherry_pick_copy.clone(), description: "Cherry-pick".into() },
                     HelpEntry { key: "y".into(), description: "Copy to clipboard menu".into() },
+                    HelpEntry { key: ".".into(), description: "Toggle commit details panel".into() },
                 ],
             },
             ContextId::Stash => HelpSection {
@@ -3838,6 +3876,10 @@ impl Gui {
                 }
             }
             MouseEventKind::ScrollUp => {
+                if self.is_in_commit_details_panel(mouse.column, mouse.row) {
+                    self.commit_details_scroll = self.commit_details_scroll.saturating_sub(2);
+                    return;
+                }
                 self.diff_view.selection = None;
                 let in_diff = self.diff_focused
                     || (self.screen_mode != ScreenMode::Full
@@ -3860,6 +3902,10 @@ impl Gui {
                 }
             }
             MouseEventKind::ScrollDown => {
+                if self.is_in_commit_details_panel(mouse.column, mouse.row) {
+                    self.commit_details_scroll = self.commit_details_scroll.saturating_add(2);
+                    return;
+                }
                 self.diff_view.selection = None;
                 let in_diff = self.diff_focused
                     || (self.screen_mode != ScreenMode::Full
@@ -3882,6 +3928,9 @@ impl Gui {
                 }
             }
             MouseEventKind::ScrollLeft => {
+                if self.is_in_commit_details_panel(mouse.column, mouse.row) {
+                    return;
+                }
                 if self.diff_focused
                     || (self.screen_mode != ScreenMode::Full
                         && self.is_in_main_panel(mouse.column, mouse.row))
@@ -3890,6 +3939,9 @@ impl Gui {
                 }
             }
             MouseEventKind::ScrollRight => {
+                if self.is_in_commit_details_panel(mouse.column, mouse.row) {
+                    return;
+                }
                 if self.diff_focused
                     || (self.screen_mode != ScreenMode::Full
                         && self.is_in_main_panel(mouse.column, mouse.row))
@@ -4227,21 +4279,15 @@ impl Gui {
     }
 
     fn handle_mouse_click(&mut self, col: u16, row: u16) {
-        let area = ratatui::layout::Rect::new(0, 0, self.layout.width, self.layout.height);
-        let panel_count = SideWindow::ALL.len();
-        let active_window = self.context_mgr.active_window();
-        let active_panel_index = SideWindow::ALL
-            .iter()
-            .position(|w| *w == active_window)
-            .unwrap_or(1);
+        let fl = self.compute_current_frame_layout();
 
-        let fl = layout::compute_layout(
-            area,
-            self.layout.side_panel_ratio,
-            panel_count,
-            active_panel_index,
-            self.screen_mode,
-        );
+        // Commit details panel is non-focusable; swallow clicks that land there
+        // so they don't leak into the diff view / sidebars.
+        if let Some(details_rect) = fl.commit_details_panel
+            && rect_contains(details_rect, col, row)
+        {
+            return;
+        }
 
         // In Full screen mode with sidebar focused, the sidebar is rendered
         // in main_panel — treat clicks there as sidebar item selection.
@@ -4334,8 +4380,17 @@ impl Gui {
         col >= mp.x && col < mp.x + mp.width && row >= mp.y && row < mp.y + mp.height
     }
 
-    /// Compute the exact main panel Rect using the real layout engine.
-    fn compute_main_panel_rect(&self) -> ratatui::layout::Rect {
+    /// True if mouse is over the (non-focusable) commit details panel.
+    fn is_in_commit_details_panel(&self, col: u16, row: u16) -> bool {
+        let fl = self.compute_current_frame_layout();
+        fl.commit_details_panel
+            .map(|r| rect_contains(r, col, row))
+            .unwrap_or(false)
+    }
+
+    /// Compute the current frame layout using the same flags as views::render.
+    /// This must match views.rs so mouse coords map to the rects actually drawn.
+    fn compute_current_frame_layout(&self) -> layout::FrameLayout {
         let area = ratatui::layout::Rect::new(0, 0, self.layout.width, self.layout.height);
         let panel_count = SideWindow::ALL.len();
         let active_window = self.context_mgr.active_window();
@@ -4343,32 +4398,71 @@ impl Gui {
             .iter()
             .position(|w| *w == active_window)
             .unwrap_or(1);
-        let fl = layout::compute_layout(
+
+        // Mirror views.rs: show_details when the active context is a commit
+        // list (or drill-in commit files) with a valid selection.
+        let show_details = self.details_panel_applies();
+
+        layout::compute_layout_with_details(
             area,
             self.layout.side_panel_ratio,
             panel_count,
             active_panel_index,
             self.screen_mode,
-        );
-        fl.main_panel
+            show_details,
+            !self.diff_focused,
+        )
+    }
+
+    /// True when the active context is one where commit-details makes sense
+    /// (drives both the `.` toggle and layout-time `show_details`).
+    fn context_has_commit_details(&self) -> bool {
+        matches!(
+            self.context_mgr.active(),
+            ContextId::Commits
+                | ContextId::BranchCommits
+                | ContextId::Reflog
+                | ContextId::CommitFiles
+                | ContextId::BranchCommitFiles
+                | ContextId::StashFiles
+        )
+    }
+
+    fn details_panel_applies(&self) -> bool {
+        if !self.show_commit_details {
+            return false;
+        }
+        let ctx = self.context_mgr.active();
+        let sel = self.context_mgr.selected(ctx);
+        let model = self.model.lock().unwrap();
+        match ctx {
+            ContextId::Commits => sel < model.commits.len(),
+            ContextId::BranchCommits => sel < model.sub_commits.len(),
+            ContextId::Reflog => sel < model.reflog_commits.len(),
+            ContextId::CommitFiles | ContextId::BranchCommitFiles | ContextId::StashFiles => {
+                let hash = &self.commit_files_hash;
+                !hash.is_empty()
+                    && (model.commits.iter().any(|c| c.hash == *hash)
+                        || model.sub_commits.iter().any(|c| c.hash == *hash)
+                        || model.reflog_commits.iter().any(|c| c.hash == *hash))
+            }
+            _ => false,
+        }
+    }
+
+    /// Compute the exact main panel Rect using the real layout engine.
+    fn compute_main_panel_rect(&self) -> ratatui::layout::Rect {
+        self.compute_current_frame_layout().main_panel
     }
 
     /// Approximate visible height of the active sidebar panel (inner area minus borders).
     fn sidebar_visible_height(&self) -> usize {
-        let area = ratatui::layout::Rect::new(0, 0, self.layout.width, self.layout.height);
-        let panel_count = SideWindow::ALL.len();
+        let fl = self.compute_current_frame_layout();
         let active_window = self.context_mgr.active_window();
         let active_panel_index = SideWindow::ALL
             .iter()
             .position(|w| *w == active_window)
             .unwrap_or(1);
-        let fl = layout::compute_layout(
-            area,
-            self.layout.side_panel_ratio,
-            panel_count,
-            active_panel_index,
-            self.screen_mode,
-        );
         // In Full screen mode with sidebar focused, the list is rendered in main_panel
         let panel_rect = if self.screen_mode == ScreenMode::Full && !self.diff_focused {
             fl.main_panel

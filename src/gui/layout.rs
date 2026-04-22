@@ -34,6 +34,12 @@ pub struct FrameLayout {
     pub status_bar: Rect,
     /// Whether portrait (vertical stack) layout is in effect.
     pub portrait: bool,
+    /// Optional rect for the commit details panel when the active (or last-focused)
+    /// context is a commit-listing context and the terminal is big enough.
+    /// - In Normal/Half mode this sits above the main panel (which holds the diff).
+    /// - In Full mode (sidebar focused) it sits to the right of the sidebar.
+    /// - In Portrait mode it is not shown.
+    pub commit_details_panel: Option<Rect>,
 }
 
 /// Height for the status panel (always compact: 1 content line + 2 border lines).
@@ -45,12 +51,19 @@ fn should_use_portrait(width: u16, height: u16, screen_mode: ScreenMode) -> bool
     screen_mode == ScreenMode::Normal && width <= 84 && height > 45
 }
 
-pub fn compute_layout(
+/// Extended layout that can optionally carve out a commit-details panel:
+/// - `show_details` toggles whether the panel is drawn at all.
+/// - `sidebar_focused_full` is only meaningful in Full mode; when true, the
+///   sidebar is focused (so we want a narrow right column for details)
+///   rather than the diff being fullscreen.
+pub fn compute_layout_with_details(
     area: Rect,
     side_ratio: f64,
     panel_count: usize,
     active_panel_index: usize,
     screen_mode: ScreenMode,
+    show_details: bool,
+    sidebar_focused_full: bool,
 ) -> FrameLayout {
     // Top-level: main area + status bar at bottom
     let outer = Layout::default()
@@ -66,11 +79,32 @@ pub fn compute_layout(
 
     // Full screen mode: no side panel, main takes everything
     if screen_mode == ScreenMode::Full {
+        // Sidebar-focused Full: sidebar expands to full width.  If details are
+        // requested, carve a narrow right column out of main_area for them.
+        if sidebar_focused_full && show_details && main_area.width >= 60 && main_area.height >= 10 {
+            let details_width = (main_area.width as f64 * 0.38).round() as u16;
+            let details_width = details_width.clamp(30, main_area.width.saturating_sub(30));
+            let horizontal = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Min(1),
+                    Constraint::Length(details_width),
+                ])
+                .split(main_area);
+            return FrameLayout {
+                side_panels: Vec::new(),
+                main_panel: horizontal[0],
+                status_bar,
+                portrait: false,
+                commit_details_panel: Some(horizontal[1]),
+            };
+        }
         return FrameLayout {
             side_panels: Vec::new(),
             main_panel: main_area,
             status_bar,
             portrait: false,
+            commit_details_panel: None,
         };
     }
 
@@ -120,6 +154,7 @@ pub fn compute_layout(
             main_panel,
             status_bar,
             portrait: true,
+            commit_details_panel: None,
         };
     }
 
@@ -175,10 +210,46 @@ pub fn compute_layout(
         .split(side_area)
         .to_vec();
 
-    FrameLayout {
-        side_panels,
-        main_panel,
-        status_bar,
-        portrait: false,
+    // Carve a compact commit-details box off the top of main_panel.  Target
+    // size is 7 rows (2 borders + 5 content lines); shrink gracefully on
+    // small terminals so the box never fully disappears as long as there's
+    // room for at least a 3-row box + 3-row diff below it.
+    const DETAILS_TARGET_HEIGHT: u16 = 7;
+    const MIN_DETAILS_HEIGHT: u16 = 3;
+    const MIN_DIFF_HEIGHT: u16 = 3;
+    let details_panel = if show_details && main_panel.width >= 20 {
+        let available = main_panel.height.saturating_sub(MIN_DIFF_HEIGHT);
+        if available >= MIN_DETAILS_HEIGHT {
+            let details_height = DETAILS_TARGET_HEIGHT.min(available).max(MIN_DETAILS_HEIGHT);
+            let parts = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(details_height),
+                    Constraint::Min(1),
+                ])
+                .split(main_panel);
+            Some((parts[0], parts[1]))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    match details_panel {
+        Some((details_rect, rest)) => FrameLayout {
+            side_panels,
+            main_panel: rest,
+            status_bar,
+            portrait: false,
+            commit_details_panel: Some(details_rect),
+        },
+        None => FrameLayout {
+            side_panels,
+            main_panel,
+            status_bar,
+            portrait: false,
+            commit_details_panel: None,
+        },
     }
 }
