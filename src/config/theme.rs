@@ -664,56 +664,54 @@ static CUSTOM_THEMES_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/src/themes");
 
 // ── User theme discovery & loading ──────────────────────────────────────
 
-fn user_themes_dir() -> Option<std::path::PathBuf> {
-    let config_dir = std::env::var("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".config")
-        })
-        .join("lazygit")
-        .join("themes");
-    Some(config_dir)
+fn user_themes_dirs() -> Vec<std::path::PathBuf> {
+    crate::config::config_dir_candidates()
+        .into_iter()
+        .map(|dir| dir.join("themes"))
+        .collect()
 }
 
 fn discover_user_themes() -> Option<Vec<(String, String)>> {
-    let dir = user_themes_dir()?;
-    if !dir.is_dir() {
-        return None;
-    }
-
     let mut result = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                if let Ok(contents) = std::fs::read_to_string(&path) {
-                    if let Ok(theme_json) = serde_json::from_str::<ThemeJson>(&contents) {
-                        result.push((theme_json.id.clone(), theme_json.name.clone()));
+    for dir in user_themes_dirs() {
+        if !dir.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                    if let Ok(contents) = std::fs::read_to_string(&path) {
+                        if let Ok(theme_json) = serde_json::from_str::<ThemeJson>(&contents) {
+                            result.push((theme_json.id.clone(), theme_json.name.clone()));
+                        }
                     }
                 }
             }
         }
     }
 
-    Some(result)
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 fn load_user_theme(id: &str) -> Option<Theme> {
-    let dir = user_themes_dir()?;
-    if !dir.is_dir() {
-        return None;
-    }
-
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                if let Ok(contents) = std::fs::read_to_string(&path) {
-                    if let Ok(theme_json) = serde_json::from_str::<ThemeJson>(&contents) {
-                        if theme_json.id == id {
-                            return Some(theme_json.to_theme());
+    for dir in user_themes_dirs() {
+        if !dir.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                    if let Ok(contents) = std::fs::read_to_string(&path) {
+                        if let Ok(theme_json) = serde_json::from_str::<ThemeJson>(&contents) {
+                            if theme_json.id == id {
+                                return Some(theme_json.to_theme());
+                            }
                         }
                     }
                 }
