@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.17] - 2026-04-27
+
+### Bug Fixes
+
+- Enable clipboard paste in cmdk dialogs.
+- Make push/pull shortcuts work globally, including in diff panel
+
+### Features
+
+- Add quick action to checkout previous branch.
+- Persist commit editor text on Esc and add Clear option.
+- Add copy and open shortcuts to branch commits and reflog.
+- Display files in Zed-style format with filename prominent.
+
 ## [0.0.16] - 2026-04-27
 
 ### Bug Fixes
