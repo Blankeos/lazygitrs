@@ -597,9 +597,9 @@ impl Gui {
                                     *textarea = new_ta;
                                 }
                             }
-                            PopupState::CommitInput { body_textarea, .. } => {
+                            PopupState::CommitInput { body_textarea, body_state, .. } => {
                                 if effective_width > 0 {
-                                    auto_wrap_textarea(body_textarea, effective_width);
+                                    body_state.render_into(body_textarea, effective_width);
                                 }
                             }
                             _ => {}
@@ -687,30 +687,27 @@ impl Gui {
                     let config_width = self.config.user_config.git.commit.auto_wrap_width;
                     let wrap = if config_width > 0 { popup_inner.min(config_width) } else { popup_inner };
 
-                    // Split AI message into summary (first line) and body (rest)
+                    // Split AI message into summary (first line) and body (rest).
+                    // The AI usually emits a hard-wrapped body (~72-char lines); strip those
+                    // wrap-induced breaks so they don't read as user paragraph breaks in the
+                    // soft-wrapped editor.
                     let (summary, body) = match message.find('\n') {
                         Some(idx) => {
                             let s = message[..idx].to_string();
-                            let b = message[idx + 1..].trim_start_matches('\n').to_string();
-                            (s, b)
+                            let raw_body = message[idx + 1..].trim_start_matches('\n').to_string();
+                            (s, popup::unwrap_commit_body(&raw_body))
                         }
                         None => (message.clone(), String::new()),
                     };
 
                     // Helper to populate the two textareas
                     let fill_commit = |stashed: &mut PopupState| {
-                        if let PopupState::CommitInput { summary_textarea, body_textarea, .. } = stashed {
+                        if let PopupState::CommitInput { summary_textarea, body_textarea, body_state, .. } = stashed {
                             summary_textarea.select_all();
                             summary_textarea.cut();
                             summary_textarea.insert_str(&summary);
-                            body_textarea.select_all();
-                            body_textarea.cut();
-                            if !body.is_empty() {
-                                body_textarea.insert_str(&body);
-                                if wrap > 0 {
-                                    auto_wrap_textarea(body_textarea, wrap);
-                                }
-                            }
+                            body_state.set_text(body.clone());
+                            body_state.render_into(body_textarea, wrap);
                         }
                     };
 
@@ -722,15 +719,14 @@ impl Gui {
                         let mut summary_ta = popup::make_commit_summary_textarea();
                         summary_ta.insert_str(&summary);
                         let mut body_ta = popup::make_commit_body_textarea();
+                        let mut body_state = popup::BodySoftWrap::from_text(body.clone());
                         if !body.is_empty() {
-                            body_ta.insert_str(&body);
-                            if wrap > 0 {
-                                auto_wrap_textarea(&mut body_ta, wrap);
-                            }
+                            body_state.render_into(&mut body_ta, wrap);
                         }
                         self.popup = PopupState::CommitInput {
                             summary_textarea: summary_ta,
                             body_textarea: body_ta,
+                            body_state,
                             focus: popup::CommitInputFocus::Summary,
                             on_confirm: Box::new(|gui, msg| {
                                 if !msg.is_empty() {
@@ -2042,7 +2038,7 @@ impl Gui {
                     }
                 }
             }
-            PopupState::CommitInput { focus, summary_textarea, body_textarea, .. } => {
+            PopupState::CommitInput { focus, summary_textarea, body_textarea, body_state, .. } => {
                 match *focus {
                     popup::CommitInputFocus::Summary => {
                         // Split on first newline: first line into summary, rest into body.
@@ -2052,9 +2048,9 @@ impl Gui {
                                 let b = data[idx + 1..].trim_start_matches('\n').to_string();
                                 summary_textarea.insert_str(&s);
                                 if !b.is_empty() {
-                                    body_textarea.insert_str(&b);
+                                    body_state.insert_str(&b);
                                     if effective_width > 0 {
-                                        auto_wrap_textarea(body_textarea, effective_width);
+                                        body_state.render_into(body_textarea, effective_width);
                                     }
                                 }
                             }
@@ -2064,9 +2060,9 @@ impl Gui {
                         }
                     }
                     popup::CommitInputFocus::Body => {
-                        body_textarea.insert_str(&data);
+                        body_state.insert_str(&data);
                         if effective_width > 0 {
-                            auto_wrap_textarea(body_textarea, effective_width);
+                            body_state.render_into(body_textarea, effective_width);
                         }
                     }
                 }
@@ -2339,7 +2335,8 @@ impl Gui {
                 else if (key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT))
                     || (key.code == KeyCode::Char('j') && key.modifiers.contains(KeyModifiers::CONTROL))
                 {
-                    if let PopupState::CommitInput { focus, summary_textarea, body_textarea, .. } = &mut self.popup {
+                    let wrap_width = self.commit_body_wrap_width();
+                    if let PopupState::CommitInput { focus, summary_textarea, body_textarea, body_state, .. } = &mut self.popup {
                         if *focus == popup::CommitInputFocus::Summary {
                             *focus = popup::CommitInputFocus::Body;
                             let visible = ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED);
@@ -2347,26 +2344,16 @@ impl Gui {
                             summary_textarea.set_cursor_style(hidden);
                             body_textarea.set_cursor_style(visible);
                         }
-                        body_textarea.insert_newline();
-                        let popup_width = (self.layout.width * 60 / 100).min(60).max(30);
-                        let popup_inner = popup_width.saturating_sub(4) as usize;
-                        let config_width = self.config.user_config.git.commit.auto_wrap_width;
-                        let effective_width = if config_width > 0 {
-                            popup_inner.min(config_width)
-                        } else {
-                            popup_inner
-                        };
-                        if effective_width > 0 {
-                            auto_wrap_textarea(body_textarea, effective_width);
-                        }
+                        body_state.insert_char('\n');
+                        body_state.render_into(body_textarea, wrap_width);
                     }
                 }
                 // Enter on summary: submit the commit
                 else if focus == popup::CommitInputFocus::Summary && key.code == KeyCode::Enter {
                     let popup = std::mem::replace(&mut self.popup, PopupState::None);
-                    if let PopupState::CommitInput { summary_textarea, body_textarea, on_confirm, .. } = popup {
+                    if let PopupState::CommitInput { summary_textarea, body_state, on_confirm, .. } = popup {
                         let summary = summary_textarea.lines().join("");
-                        let body = body_textarea.lines().join("\n").trim().to_string();
+                        let body = body_state.raw().trim().to_string();
                         let text = if body.is_empty() {
                             summary
                         } else {
@@ -2403,15 +2390,30 @@ impl Gui {
                     && (key.code == KeyCode::Up || key.code == KeyCode::Down)
                     && !self.commit_message_history.is_empty()
                 {
-                    if let PopupState::CommitInput { summary_textarea, body_textarea, .. } = &mut self.popup {
+                    let wrap_width = self.commit_body_wrap_width();
+                    if let PopupState::CommitInput { summary_textarea, body_textarea, body_state, .. } = &mut self.popup {
                         let history_len = self.commit_message_history.len();
+                        let load_msg = |summary_textarea: &mut tui_textarea::TextArea<'static>,
+                                        body_textarea: &mut tui_textarea::TextArea<'static>,
+                                        body_state: &mut popup::BodySoftWrap,
+                                        msg: &str| {
+                            let (summary, body) = split_commit_message(msg);
+                            let mut new_summary = popup::make_commit_summary_textarea();
+                            new_summary.insert_str(&summary);
+                            *summary_textarea = new_summary;
+                            *body_textarea = popup::make_commit_body_textarea();
+                            // History entries were committed with hard wraps — undo them so
+                            // they don't read as paragraph breaks in the soft-wrapped editor.
+                            body_state.set_text(popup::unwrap_commit_body(&body));
+                            body_state.render_into(body_textarea, wrap_width);
+                        };
                         match key.code {
                             KeyCode::Up => {
                                 let new_idx = match self.commit_history_idx {
                                     None => {
                                         // Save current draft
                                         let s = summary_textarea.lines().join("");
-                                        let b = body_textarea.lines().join("\n");
+                                        let b = body_state.raw().to_string();
                                         self.commit_history_draft = if b.trim().is_empty() {
                                             s
                                         } else {
@@ -2422,45 +2424,21 @@ impl Gui {
                                     Some(idx) => (idx + 1).min(history_len - 1),
                                 };
                                 self.commit_history_idx = Some(new_idx);
-                                let msg = &self.commit_message_history[new_idx];
-                                let (summary, body) = split_commit_message(msg);
-                                let mut new_summary = popup::make_commit_summary_textarea();
-                                new_summary.insert_str(&summary);
-                                *summary_textarea = new_summary;
-                                let mut new_body = popup::make_commit_body_textarea();
-                                if !body.is_empty() {
-                                    new_body.insert_str(&body);
-                                }
-                                *body_textarea = new_body;
+                                let msg = self.commit_message_history[new_idx].clone();
+                                load_msg(summary_textarea, body_textarea, body_state, &msg);
                             }
                             KeyCode::Down => {
                                 match self.commit_history_idx {
                                     Some(0) => {
                                         self.commit_history_idx = None;
                                         let draft = self.commit_history_draft.clone();
-                                        let (summary, body) = split_commit_message(&draft);
-                                        let mut new_summary = popup::make_commit_summary_textarea();
-                                        new_summary.insert_str(&summary);
-                                        *summary_textarea = new_summary;
-                                        let mut new_body = popup::make_commit_body_textarea();
-                                        if !body.is_empty() {
-                                            new_body.insert_str(&body);
-                                        }
-                                        *body_textarea = new_body;
+                                        load_msg(summary_textarea, body_textarea, body_state, &draft);
                                     }
                                     Some(idx) => {
                                         let new_idx = idx - 1;
                                         self.commit_history_idx = Some(new_idx);
-                                        let msg = &self.commit_message_history[new_idx];
-                                        let (summary, body) = split_commit_message(msg);
-                                        let mut new_summary = popup::make_commit_summary_textarea();
-                                        new_summary.insert_str(&summary);
-                                        *summary_textarea = new_summary;
-                                        let mut new_body = popup::make_commit_body_textarea();
-                                        if !body.is_empty() {
-                                            new_body.insert_str(&body);
-                                        }
-                                        *body_textarea = new_body;
+                                        let msg = self.commit_message_history[new_idx].clone();
+                                        load_msg(summary_textarea, body_textarea, body_state, &msg);
                                     }
                                     None => {}
                                 }
@@ -2471,24 +2449,44 @@ impl Gui {
                 }
                 // All other keys: forward to the focused textarea
                 else {
-                    if let PopupState::CommitInput { summary_textarea, body_textarea, focus, .. } = &mut self.popup {
+                    let wrap_width = self.commit_body_wrap_width();
+                    if let PopupState::CommitInput { summary_textarea, body_textarea, body_state, focus, .. } = &mut self.popup {
                         match focus {
                             popup::CommitInputFocus::Summary => {
                                 summary_textarea.input(key);
                             }
                             popup::CommitInputFocus::Body => {
-                                body_textarea.input(key);
-                                // Auto-wrap body
-                                let popup_width = (self.layout.width * 60 / 100).min(60).max(30);
-                                let popup_inner = popup_width.saturating_sub(4) as usize;
-                                let config_width = self.config.user_config.git.commit.auto_wrap_width;
-                                let effective_width = if config_width > 0 {
-                                    popup_inner.min(config_width)
-                                } else {
-                                    popup_inner
-                                };
-                                if effective_width > 0 {
-                                    auto_wrap_textarea(body_textarea, effective_width);
+                                // Body is driven by body_state (the unwrapped source of truth);
+                                // body_textarea is just a soft-wrapped projection of it. Translate
+                                // each key into a body_state edit, then re-render.
+                                let mut handled = true;
+                                let alt = key.modifiers.contains(KeyModifiers::ALT);
+                                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                                match key.code {
+                                    KeyCode::Char(c) if !ctrl && !alt => {
+                                        body_state.insert_char(c);
+                                    }
+                                    // Opt+Backspace / Ctrl+W: delete previous word.
+                                    KeyCode::Backspace if alt => body_state.delete_word_left(),
+                                    KeyCode::Char('w') if ctrl => body_state.delete_word_left(),
+                                    KeyCode::Backspace => body_state.backspace(),
+                                    KeyCode::Delete => body_state.delete(),
+                                    // Opt+Left/Right: jump by word (matches the new-branch input
+                                    // and the rest of the readline-style world).
+                                    KeyCode::Left if alt => body_state.move_word_left(),
+                                    KeyCode::Right if alt => body_state.move_word_right(),
+                                    KeyCode::Char('b') if alt => body_state.move_word_left(),
+                                    KeyCode::Char('f') if alt => body_state.move_word_right(),
+                                    KeyCode::Left => body_state.move_left(),
+                                    KeyCode::Right => body_state.move_right(),
+                                    KeyCode::Up => body_state.move_visual_up(wrap_width),
+                                    KeyCode::Down => body_state.move_visual_down(wrap_width),
+                                    KeyCode::Home => body_state.move_home(),
+                                    KeyCode::End => body_state.move_end(),
+                                    _ => handled = false,
+                                }
+                                if handled {
+                                    body_state.render_into(body_textarea, wrap_width);
                                 }
                             }
                         }
@@ -3344,9 +3342,15 @@ impl Gui {
                         on_confirm: Box::new(move |gui, coauthor| {
                             if let Some(mut editor) = stashed {
                                 if !coauthor.is_empty() {
-                                    // Append co-author trailer to the body textarea
-                                    if let PopupState::CommitInput { ref mut body_textarea, .. } = editor {
-                                        body_textarea.insert_str(&format!("\n\nCo-authored-by: {}", coauthor));
+                                    // Append co-author trailer to the body
+                                    if let PopupState::CommitInput { ref mut body_textarea, ref mut body_state, .. } = editor {
+                                        // Move logical cursor to end before appending so the
+                                        // trailer goes at the bottom no matter where the user
+                                        // last clicked.
+                                        body_state.cursor = body_state.raw().chars().count();
+                                        body_state.insert_str(&format!("\n\nCo-authored-by: {}", coauthor));
+                                        let wrap = gui.commit_body_wrap_width();
+                                        body_state.render_into(body_textarea, wrap);
                                     }
                                 }
                                 gui.popup = editor;
@@ -3367,7 +3371,7 @@ impl Gui {
                     if let Some(mut editor) = gui.pending_commit_popup.take() {
                         if let Some(text) = clipboard_text {
                             if !text.is_empty() {
-                                if let PopupState::CommitInput { ref mut summary_textarea, ref mut body_textarea, .. } = editor {
+                                if let PopupState::CommitInput { ref mut summary_textarea, ref mut body_textarea, ref mut body_state, .. } = editor {
                                     // Split pasted text: first line → summary, rest → body
                                     let (summary, body) = match text.find('\n') {
                                         Some(idx) => {
@@ -3380,18 +3384,11 @@ impl Gui {
                                     summary_textarea.select_all();
                                     summary_textarea.cut();
                                     summary_textarea.insert_str(&summary);
-                                    body_textarea.select_all();
-                                    body_textarea.cut();
-                                    if !body.is_empty() {
-                                        body_textarea.insert_str(&body);
-                                        let popup_width = (gui.layout.width * 60 / 100).min(60).max(30);
-                                        let popup_inner = popup_width.saturating_sub(4) as usize;
-                                        let config_width = gui.config.user_config.git.commit.auto_wrap_width;
-                                        let wrap = if config_width > 0 { popup_inner.min(config_width) } else { popup_inner };
-                                        if wrap > 0 {
-                                            auto_wrap_textarea(body_textarea, wrap);
-                                        }
-                                    }
+                                    // Clipboard usually holds an existing commit message that
+                                    // was hard-wrapped — unwrap before loading.
+                                    body_state.set_text(popup::unwrap_commit_body(&body));
+                                    let wrap = gui.commit_body_wrap_width();
+                                    body_state.render_into(body_textarea, wrap);
                                 }
                             }
                         }
@@ -4873,6 +4870,23 @@ impl Gui {
                 .collect(),
             Err(_) => Vec::new(),
         }
+    }
+
+    /// Effective wrap width for the commit-body textarea, derived from popup
+    /// geometry and the user's `git.commit.auto_wrap_width` config.
+    fn commit_body_wrap_width(&self) -> usize {
+        let popup_width = (self.layout.width * 60 / 100)
+            .min(60)
+            .max(30)
+            .min(self.layout.width.max(1));
+        let popup_inner = popup_width.saturating_sub(4) as usize;
+        let config_width = self.config.user_config.git.commit.auto_wrap_width;
+        if config_width > 0 {
+            popup_inner.min(config_width)
+        } else {
+            popup_inner
+        }
+        .max(1)
     }
 
     fn save_commit_history(&self) {
