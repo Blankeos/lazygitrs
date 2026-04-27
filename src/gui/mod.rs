@@ -608,6 +608,9 @@ impl Gui {
                     Event::FocusGained if self.config.user_config.git.auto_refresh => {
                         self.needs_refresh = true;
                     }
+                    Event::Paste(data) => {
+                        self.handle_paste(data);
+                    }
                     _ => {}
                 }
             }
@@ -2003,6 +2006,73 @@ impl Gui {
             _ => {}
         }
         Ok(())
+    }
+
+    fn handle_paste(&mut self, data: String) {
+        if data.is_empty() {
+            return;
+        }
+        let popup_width = (self.layout.width * 60 / 100)
+            .min(60)
+            .max(30)
+            .min(self.layout.width);
+        let popup_inner = popup_width.saturating_sub(4) as usize;
+        let config_width = self.config.user_config.git.commit.auto_wrap_width;
+        let effective_width = if config_width > 0 {
+            popup_inner.min(config_width)
+        } else {
+            popup_inner
+        };
+        match &mut self.popup {
+            PopupState::Input { textarea, is_commit, confirm_focused, .. } => {
+                if *confirm_focused {
+                    return;
+                }
+                if *is_commit {
+                    textarea.insert_str(&data);
+                    if effective_width > 0 {
+                        auto_wrap_textarea(textarea, effective_width);
+                    }
+                } else {
+                    // Single-line input: strip newlines from pasted content.
+                    let cleaned: String = data.replace('\r', "").replace('\n', " ");
+                    textarea.insert_str(&cleaned);
+                    if popup_inner > 0 {
+                        soft_wrap_textarea(textarea, popup_inner);
+                    }
+                }
+            }
+            PopupState::CommitInput { focus, summary_textarea, body_textarea, .. } => {
+                match *focus {
+                    popup::CommitInputFocus::Summary => {
+                        // Split on first newline: first line into summary, rest into body.
+                        match data.find('\n') {
+                            Some(idx) => {
+                                let s = data[..idx].replace('\r', "");
+                                let b = data[idx + 1..].trim_start_matches('\n').to_string();
+                                summary_textarea.insert_str(&s);
+                                if !b.is_empty() {
+                                    body_textarea.insert_str(&b);
+                                    if effective_width > 0 {
+                                        auto_wrap_textarea(body_textarea, effective_width);
+                                    }
+                                }
+                            }
+                            None => {
+                                summary_textarea.insert_str(&data);
+                            }
+                        }
+                    }
+                    popup::CommitInputFocus::Body => {
+                        body_textarea.insert_str(&data);
+                        if effective_width > 0 {
+                            auto_wrap_textarea(body_textarea, effective_width);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     pub(crate) fn handle_popup_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -5062,6 +5132,7 @@ fn setup_terminal() -> Result<(Term, bool)> {
         EnterAlternateScreen,
         crossterm::event::EnableMouseCapture,
         crossterm::event::EnableFocusChange,
+        crossterm::event::EnableBracketedPaste,
         cursor::Hide
     )?;
     let keyboard_enhanced =
@@ -5087,6 +5158,7 @@ fn restore_terminal(terminal: &mut Term, keyboard_enhanced: bool) -> Result<()> 
     }
     execute!(
         terminal.backend_mut(),
+        crossterm::event::DisableBracketedPaste,
         crossterm::event::DisableFocusChange,
         LeaveAlternateScreen,
         crossterm::event::DisableMouseCapture,

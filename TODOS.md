@@ -161,7 +161,7 @@
 
 - [x] When I do shift+enter while on the commit message body part... It's clearing what I typed instead of doing the same behavior as 'enter'. Weird. Expectation, it behaves like 'enter' as in creates a new line too.
 
-- [ ] Another keyboard improvement, when I press 'cmd+v' it doesn't actually paste in 1 frame. It seems to type what I had on my clipboard using the keyboard. so i.e. I pasted something really long, I see it sort of incrementing the text to that point instead of pasting it ' instantly'.
+- [x] Another keyboard improvement, when I press 'cmd+v' it doesn't actually paste in 1 frame. It seems to type what I had on my clipboard using the keyboard. so i.e. I pasted something really long, I see it sort of incrementing the text to that point instead of pasting it ' instantly'.
 
 - [x] When Im on '3 Branches'. I want `y` to have an option to 'copy branch name'.
 
