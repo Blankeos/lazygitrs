@@ -553,11 +553,21 @@ fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
     let model = gui.model.lock().unwrap();
     if let Some(branch) = model.branches.get(selected) {
         let branch_name = branch.name.clone();
+        let branch_for_name = branch_name.clone();
         let branch_for_pr_create = branch_name.clone();
         let branch_for_pr = branch_name.clone();
         drop(model);
 
         let mut items = vec![
+            MenuItem {
+                label: "Copy branch name".to_string(),
+                description: String::new(),
+                key: Some("n".to_string()),
+                action: Some(Box::new(move |_gui| {
+                    Platform::copy_to_clipboard(&branch_for_name)?;
+                    Ok(())
+                })),
+            },
             MenuItem {
                 label: "Copy repo URL".to_string(),
                 description: String::new(),
