@@ -577,26 +577,29 @@ fn open_commit_in_browser_menu(gui: &mut Gui) -> Result<()> {
     if let Some(commit) = model.commits.get(selected) {
         let hash = commit.hash.clone();
         drop(model);
-
-        gui.popup = PopupState::Menu {
-            title: "Open in browser".to_string(),
-            items: vec![
-                MenuItem {
-                    label: "Open commit URL".to_string(),
-                    description: String::new(),
-                    key: Some("c".to_string()),
-                    action: Some(Box::new(move |gui| {
-                        let url = gui.git.get_commit_url(&hash)?;
-                        Platform::open_file(&url)?;
-                        Ok(())
-                    })),
-                },
-            ],
-            selected: 0,
-            loading_index: None,
-        };
+        open_commit_in_browser_menu_for(gui, hash);
     }
     Ok(())
+}
+
+pub fn open_commit_in_browser_menu_for(gui: &mut Gui, hash: String) {
+    gui.popup = PopupState::Menu {
+        title: "Open in browser".to_string(),
+        items: vec![
+            MenuItem {
+                label: "Open commit URL".to_string(),
+                description: String::new(),
+                key: Some("c".to_string()),
+                action: Some(Box::new(move |gui| {
+                    let url = gui.git.get_commit_url(&hash)?;
+                    Platform::open_file(&url)?;
+                    Ok(())
+                })),
+            },
+        ],
+        selected: 0,
+        loading_index: None,
+    };
 }
 
 fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
@@ -606,13 +609,27 @@ fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
         let hash = commit.hash.clone();
         let subject = commit.name.clone();
         let author = commit.author_name.clone();
-        let tags = commit.tags.join(", ");
-        let has_tags = !commit.tags.is_empty();
+        let tags = commit.tags.clone();
+        drop(model);
+        copy_commit_to_clipboard_menu_for(gui, hash, subject, author, tags);
+    }
+    Ok(())
+}
+
+pub fn copy_commit_to_clipboard_menu_for(
+    gui: &mut Gui,
+    hash: String,
+    subject: String,
+    author: String,
+    tag_list: Vec<String>,
+) {
+    {
+        let tags = tag_list.join(", ");
+        let has_tags = !tag_list.is_empty();
         let hash_for_url = hash.clone();
         let hash_for_msg = hash.clone();
         let hash_for_body = hash.clone();
         let hash_for_diff = hash.clone();
-        drop(model);
 
         // Check if commit has a body (for strikethrough on empty)
         let has_body = gui.git.commit_message_body(&hash)
@@ -718,7 +735,6 @@ fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
             loading_index: None,
         };
     }
-    Ok(())
 }
 
 fn show_branch_filter_menu(gui: &mut Gui) -> Result<()> {

@@ -182,3 +182,9 @@
         I also noticed for crashes like this (error not relevant ).. It shows the crash message right? But I cant actually stop the program anymore and just looks like whenever I move my mouse that: 35;1;18M35;1;18M35;2;18M35 (basically prints a bunch of those characters in the terminal making it unusable, that I have to close it)
 
 - [x] Imitate Zed's 'diff' when it comes to listing it in anon-filetree format. it looks like (Image1) while currently it looks like lazygit's.
+
+- [x] In '4 Commits' pressing `y` works, but inside of '3 Branches > (pressed enter, now in Commits)' pressing 'y' does not work. Can you check why and maybe if you can fix something about it? Also other parts where 'commits' are involved where `y` and `o` are useful in those contexts?
+
+- [ ] Quick good change about commit message modal. Like lazygit, let's not get rid of the current input when I press 'Esc' so that I won't lose progress even when I do that. But to make it convenient, add a 'Clear' option when I do ctrl+m so I won't need to manually erase the text inside all the 'Summary' and 'Description' textboxes.
+
+- [ ] I need that even though I'm focusing on 'Diff panel'.. I still want to be able to Shift+P.. So Shift+P (push), is like universal.

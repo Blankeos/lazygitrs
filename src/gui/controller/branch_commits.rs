@@ -25,6 +25,41 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, _keybindings: &KeybindingConfig)
         return enter_branch_commit_files(gui);
     }
 
+    // Open commit in browser
+    if key.code == KeyCode::Char('o') {
+        return open_commit_in_browser(gui);
+    }
+
+    // Copy to clipboard menu
+    if key.code == KeyCode::Char('y') {
+        return copy_to_clipboard(gui);
+    }
+
+    Ok(())
+}
+
+fn open_commit_in_browser(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let model = gui.model.lock().unwrap();
+    if let Some(commit) = model.sub_commits.get(selected) {
+        let hash = commit.hash.clone();
+        drop(model);
+        super::commits::open_commit_in_browser_menu_for(gui, hash);
+    }
+    Ok(())
+}
+
+fn copy_to_clipboard(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let model = gui.model.lock().unwrap();
+    if let Some(commit) = model.sub_commits.get(selected) {
+        let hash = commit.hash.clone();
+        let subject = commit.name.clone();
+        let author = commit.author_name.clone();
+        let tags = commit.tags.clone();
+        drop(model);
+        super::commits::copy_commit_to_clipboard_menu_for(gui, hash, subject, author, tags);
+    }
     Ok(())
 }
 

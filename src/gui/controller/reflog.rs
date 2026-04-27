@@ -33,6 +33,22 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return copy_to_clipboard_menu(gui);
     }
 
+    // Open reflog commit in browser
+    if key.code == crossterm::event::KeyCode::Char('o') {
+        return open_in_browser(gui);
+    }
+
+    Ok(())
+}
+
+fn open_in_browser(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let model = gui.model.lock().unwrap();
+    if let Some(commit) = model.reflog_commits.get(selected) {
+        let hash = commit.hash.clone();
+        drop(model);
+        super::commits::open_commit_in_browser_menu_for(gui, hash);
+    }
     Ok(())
 }
 
