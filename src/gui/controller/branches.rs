@@ -118,6 +118,16 @@ fn checkout_picker(gui: &mut Gui) -> Result<()> {
     let model = gui.model.lock().unwrap();
     let mut items = Vec::new();
 
+    if let Some(prev) = gui.git.previous_branch_name() {
+        items.push(ListPickerItem {
+            value: "-".to_string(),
+            // Label includes both "previous branch" and "prev branch" so that
+            // typing either phrase (or "-") jumps to this entry.
+            label: format!("Go to previous branch — {}", prev),
+            category: "Quick Actions".to_string(),
+        });
+    }
+
     for branch in &model.branches {
         if branch.head {
             continue;

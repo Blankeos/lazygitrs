@@ -190,3 +190,8 @@
 - [x] I need that even though I'm focusing on 'Diff panel'.. I still want to be able to Shift+P.. So Shift+P (push), is like universal.
 
 - [x] Fix: When I'm in cmdk dialogs i.e. 'Keybindings' (?), Checkout (c). cmd+v to paste does not work.
+
+- [x] Feat: In 'Branches' when I 'checkout' search i.e. (c)... if I type `-` OR 'previous branch' OR 'prev branch', Instead of 'ref', let's show... 'Go to previous branch' (if it's possible to show the name of the actually previous branch (i.e. thinking just a command to check).. If it is, show something like '[-] Previous Branch (branch-name-here)'... but if it's too much of a pain to check for it, dont do it!)
+
+- [ ] Change 'Keybindings' panel (?) to 'Keybindings & Commands'. The only command we have currently is 'Color theme...' (change this to 'Color theme' only no ellipses).
+  - Another useful command is

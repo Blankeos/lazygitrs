@@ -222,6 +222,24 @@ impl GitCommands {
         Ok(result.stdout_trimmed().to_string())
     }
 
+    /// Get the name of the previously checked-out branch (`@{-1}`), if any.
+    pub fn previous_branch_name(&self) -> Option<String> {
+        let result = self
+            .git()
+            .args(&["rev-parse", "--abbrev-ref", "@{-1}"])
+            .run()
+            .ok()?;
+        if !result.success {
+            return None;
+        }
+        let name = result.stdout_trimmed().to_string();
+        if name.is_empty() || name == "HEAD" || name == "@{-1}" {
+            None
+        } else {
+            Some(name)
+        }
+    }
+
     /// Get the repo name (last component of path).
     pub fn repo_name(&self) -> String {
         self.repo_path
