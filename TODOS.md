@@ -189,4 +189,4 @@
 
 - [x] I need that even though I'm focusing on 'Diff panel'.. I still want to be able to Shift+P.. So Shift+P (push), is like universal.
 
-- [ ] When I'm in cmdk dialogs i.e. 'Keybindings' (?), Checkout (c). cmd+v to paste does not work.
+- [x] Fix: When I'm in cmdk dialogs i.e. 'Keybindings' (?), Checkout (c). cmd+v to paste does not work.

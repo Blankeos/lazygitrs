@@ -2082,6 +2082,55 @@ impl Gui {
                     }
                 }
             }
+            PopupState::Help { selected, scroll_offset, search_textarea, .. } => {
+                let cleaned: String = data.replace('\r', "").replace('\n', " ");
+                search_textarea.insert_str(&cleaned);
+                *selected = 0;
+                *scroll_offset = 0;
+            }
+            PopupState::RefPicker { core, .. } => {
+                use crate::gui::popup::ListPickerItem;
+                let cleaned: String = data.replace('\r', "").replace('\n', " ");
+                core.search_textarea.insert_str(&cleaned);
+                let new_search = core.search_textarea.lines().join("");
+                if !core.items.is_empty() && core.items[0].category == "[ref]" {
+                    core.items.remove(0);
+                }
+                let new_lower = new_search.to_lowercase();
+                if !new_lower.is_empty() {
+                    core.items.insert(0, ListPickerItem {
+                        value: new_search.trim().to_string(),
+                        label: new_search.trim().to_string(),
+                        category: "[ref]".to_string(),
+                    });
+                    if let Some(idx) = core.items.iter().skip(1).position(|i| {
+                        i.label.to_lowercase().contains(&new_lower)
+                            || i.value.to_lowercase().contains(&new_lower)
+                    }) {
+                        core.selected = idx + 1;
+                    } else {
+                        core.selected = 0;
+                    }
+                } else {
+                    core.selected = 0;
+                }
+                core.scroll_offset = 0;
+            }
+            PopupState::ThemePicker { core, .. } => {
+                let cleaned: String = data.replace('\r', "").replace('\n', " ");
+                core.search_textarea.insert_str(&cleaned);
+                let new_search = core.search_textarea.lines().join("");
+                let new_lower = new_search.to_lowercase();
+                if !new_lower.is_empty() {
+                    if let Some(idx) = core.items.iter().position(|i| {
+                        i.label.to_lowercase().contains(&new_lower)
+                    }) {
+                        core.selected = idx;
+                        self.current_theme_index = idx;
+                        core.scroll_offset = idx;
+                    }
+                }
+            }
             _ => {}
         }
     }
