@@ -140,12 +140,15 @@ pub fn compute_layout_with_details(
         let main_panel = vertical[1];
 
         // Side panels laid out vertically (same as landscape), active expands.
+        // When Status (index 0) is focused it stays compact, so expand Files
+        // (index 1) instead — otherwise the sidebar leaves a large empty gap.
+        let expand_index = if active_panel_index == 0 { 1 } else { active_panel_index };
         let collapsed: u16 = if side_area.height < 21 { 1 } else { 3 };
         let panel_constraints: Vec<Constraint> = (0..panel_count)
             .map(|i| {
                 if i == 0 {
                     Constraint::Length(STATUS_PANEL_HEIGHT)
-                } else if i == active_panel_index {
+                } else if i == expand_index {
                     Constraint::Min(collapsed)
                 } else {
                     Constraint::Length(collapsed)
@@ -202,11 +205,12 @@ pub fn compute_layout_with_details(
     let side_height = side_area.height;
     let collapsed: u16 = if side_height < 21 { 1 } else { 3 };
 
+    let expand_index = if active_panel_index == 0 { 1 } else { active_panel_index };
     let panel_constraints: Vec<Constraint> = (0..panel_count)
         .map(|i| {
             if i == 0 {
                 Constraint::Length(STATUS_PANEL_HEIGHT)
-            } else if i == active_panel_index {
+            } else if i == expand_index {
                 Constraint::Min(collapsed)
             } else {
                 Constraint::Length(collapsed)

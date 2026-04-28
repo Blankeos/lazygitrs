@@ -200,3 +200,5 @@
 
 - [x] When we do shift-,shift+, we have Full View, Default View (as in not doing shift- or shift+), and Half View. When there's enough vertical space and the width is too small... Default View currently has a 'vertical' layout. Half View does not have a 'vertical' layout yet, so I want a vertical layout for half view.
 - [x] The vertical layout has a minimum height it seems.
+
+- [x] When '1 Status' is focused, since its height does not expand, it shows a lot of empty space under it. So when '1 Status' is focused, let's just expand the most important other tab (Files, Branches, Commits, or Stash)
