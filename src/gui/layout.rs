@@ -46,10 +46,9 @@ pub struct FrameLayout {
 const STATUS_PANEL_HEIGHT: u16 = 3;
 
 /// Portrait mode threshold: narrow terminal with enough vertical space.
-/// Matches the original lazygit: width <= 84 && height > 45.
 /// Available in both Normal and Half modes (Full mode stays full-screen).
 fn should_use_portrait(width: u16, height: u16, screen_mode: ScreenMode) -> bool {
-    screen_mode != ScreenMode::Full && width <= 84 && height > 45
+    screen_mode != ScreenMode::Full && width <= 84 && height > 25
 }
 
 /// Extended layout that can optionally carve out a commit-details panel:
