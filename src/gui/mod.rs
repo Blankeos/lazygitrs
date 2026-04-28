@@ -3079,6 +3079,7 @@ impl Gui {
                 HelpEntry { key: kb.universal.quit_alt1.clone(), description: "Quit (alt)".into() },
                 HelpEntry { key: kb.universal.return_key.clone(), description: "Return / Cancel".into() },
                 HelpEntry { key: kb.universal.toggle_panel.clone(), description: "Next panel".into() },
+                HelpEntry { key: kb.universal.toggle_panel_reverse.clone(), description: "Previous panel".into() },
                 HelpEntry { key: kb.universal.prev_item.clone(), description: "Previous item".into() },
                 HelpEntry { key: kb.universal.next_item.clone(), description: "Next item".into() },
                 HelpEntry { key: kb.universal.prev_page.clone(), description: "Page up".into() },
