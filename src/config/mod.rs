@@ -36,21 +36,26 @@ impl AppConfig {
         let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let candidates = config_dir_candidates();
         let config_dir = candidates
-            .into_iter()
+            .iter()
             .find(|dir| dir.join("config.yml").exists())
-            .unwrap_or_else(|| {
-                std::env::var("XDG_CONFIG_HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| home_dir.join(".config"))
-                    .join("lazygitrs")
-            });
+            .cloned()
+            .unwrap_or_else(|| candidates[0].clone());
 
-        let state_dir = std::env::var("XDG_STATE_HOME")
+        let state_base = std::env::var("XDG_STATE_HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| home_dir.join(".local").join("state"))
-            .join("lazygitrs");
-
+            .unwrap_or_else(|_| home_dir.join(".local").join("state"));
+        let state_dir = state_base.join("lazygitrs");
         let state_path = state_dir.join("state.yml");
+
+        // One-shot migration: copy state.yml from legacy lazygit/ if lazygitrs/ has none.
+        // Copy (not move) so users still running real lazygit keep their file.
+        let legacy_state_path = state_base.join("lazygit").join("state.yml");
+        if !state_path.exists() && legacy_state_path.exists() {
+            if let Some(parent) = state_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::copy(&legacy_state_path, &state_path);
+        }
 
         let user_config = UserConfig::load(&config_dir)?;
         let app_state = AppState::load(&state_path)?;
