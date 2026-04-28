@@ -2043,13 +2043,25 @@ impl Gui {
         let abs_path = abs_path_buf.to_string_lossy().to_string();
         let os = &self.config.user_config.os;
 
-        let first_hunk_line = self.diff_view.hunk_starts.first().and_then(|&idx| {
+        // Pick the hunk currently at the top of the viewport (after `{`/`}`
+        // navigation, scroll_offset sits on a hunk start). Fall back to the
+        // most recent hunk before the viewport, then the first hunk.
+        let active_hunk_idx = self
+            .diff_view
+            .hunk_starts
+            .iter()
+            .rev()
+            .find(|&&h| h <= self.diff_view.scroll_offset)
+            .copied()
+            .or_else(|| self.diff_view.hunk_starts.first().copied());
+
+        let active_hunk_line = active_hunk_idx.and_then(|idx| {
             self.diff_view
                 .file_line_number(idx, DiffPanel::New)
                 .or_else(|| self.diff_view.file_line_number(idx, DiffPanel::Old))
         });
 
-        if let Some(line) = first_hunk_line {
+        if let Some(line) = active_hunk_line {
             let tpl = if !os.edit_at_line.is_empty() { &os.edit_at_line } else { &os.edit };
             if !tpl.is_empty() {
                 let _ = crate::config::user_config::OsConfig::run_template_at_line(tpl, &abs_path, line, 1);
