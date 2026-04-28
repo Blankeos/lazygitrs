@@ -12,6 +12,14 @@ pub use keybindings::KeybindingConfig;
 pub use theme::{Theme, ColorTheme, COLOR_THEMES};
 pub use user_config::UserConfig;
 
+pub fn config_dir_candidates() -> Vec<PathBuf> {
+    let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home_dir.join(".config"));
+    vec![base.join("lazygitrs"), base.join("lazygit")]
+}
+
 /// Top-level application configuration.
 pub struct AppConfig {
     pub debug: bool,
@@ -26,16 +34,21 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn load(debug: bool) -> Result<Self> {
         let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-
-        let config_dir = std::env::var("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| home_dir.join(".config"))
-            .join("lazygit");
+        let candidates = config_dir_candidates();
+        let config_dir = candidates
+            .into_iter()
+            .find(|dir| dir.join("config.yml").exists())
+            .unwrap_or_else(|| {
+                std::env::var("XDG_CONFIG_HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| home_dir.join(".config"))
+                    .join("lazygitrs")
+            });
 
         let state_dir = std::env::var("XDG_STATE_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| home_dir.join(".local").join("state"))
-            .join("lazygit");
+            .join("lazygitrs");
 
         let state_path = state_dir.join("state.yml");
 
