@@ -209,3 +209,5 @@
 - [x] When I press `e` on a 'File' - before I press enter and focus the Diff Panel viewer. Meaning just on the Files tab and any other context related to 'Files'. It currently has the same behavior as pressing `o`. Instead, can we make `e` essentially do what we're doing with `e` in diff panel viewer, but pass the line&col params in there... But since we haven't really clicked yet and have no info on that... Let's make the line&col param as the line and col of the first changed hunk
   - [x] Also when focusing the diff viewer panel but no selection yet. Make `o` and `e` work, same behaviors as regular 'File'
   - [x] additionally, when we do `}` or `{` to jump around diffs, we kinda focus a different diff right? What if we made `e` also work with that as in sending the line:col combination so it's more seamless.
+
+- [x] We already have Commit details when focusing commit items in their respective lists. This new change is ONLY related to full view (shift-). I initially made it show on the side.. But isntead, I decided to always make it show above. So now it'll be a vertical layout. THe half view, default view is just fine, no changes on that.

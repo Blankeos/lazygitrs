@@ -37,7 +37,7 @@ pub struct FrameLayout {
     /// Optional rect for the commit details panel when the active (or last-focused)
     /// context is a commit-listing context and the terminal is big enough.
     /// - In Normal/Half mode this sits above the main panel (which holds the diff).
-    /// - In Full mode (sidebar focused) it sits to the right of the sidebar.
+    /// - In Full mode (sidebar focused) it sits above the sidebar (vertical layout).
     /// - In Portrait mode it is not shown.
     pub commit_details_panel: Option<Rect>,
 }
@@ -80,23 +80,22 @@ pub fn compute_layout_with_details(
     // Full screen mode: no side panel, main takes everything
     if screen_mode == ScreenMode::Full {
         // Sidebar-focused Full: sidebar expands to full width.  If details are
-        // requested, carve a narrow right column out of main_area for them.
-        if sidebar_focused_full && show_details && main_area.width >= 60 && main_area.height >= 10 {
-            let details_width = (main_area.width as f64 * 0.38).round() as u16;
-            let details_width = details_width.clamp(30, main_area.width.saturating_sub(30));
-            let horizontal = Layout::default()
-                .direction(Direction::Horizontal)
+        // requested, carve a compact details strip off the top of main_area
+        // (same fixed height as Normal/Half mode — see DETAILS_TARGET_HEIGHT below).
+        if sidebar_focused_full && show_details && main_area.width >= 20 && main_area.height >= 10 {
+            let vertical = Layout::default()
+                .direction(Direction::Vertical)
                 .constraints([
+                    Constraint::Length(7),
                     Constraint::Min(1),
-                    Constraint::Length(details_width),
                 ])
                 .split(main_area);
             return FrameLayout {
                 side_panels: Vec::new(),
-                main_panel: horizontal[0],
+                main_panel: vertical[1],
                 status_bar,
                 portrait: false,
-                commit_details_panel: Some(horizontal[1]),
+                commit_details_panel: Some(vertical[0]),
             };
         }
         return FrameLayout {

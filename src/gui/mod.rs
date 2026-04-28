@@ -217,6 +217,11 @@ pub struct Gui {
     /// Set of commit hashes with an in-flight stat fetch, so we don't spawn
     /// duplicate workers on each frame.
     pub commit_stats_inflight: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
+    /// Cache of full commit messages (subject + body) per hash, fetched
+    /// asynchronously so the details panel can render the full description.
+    pub commit_messages_cache: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
+    /// In-flight guard for full-message fetches.
+    pub commit_messages_inflight: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
     /// Vertical scroll offset (rows) for the commit-details box.  Reset
     /// whenever the selected commit hash changes.
     pub commit_details_scroll: u16,
@@ -375,6 +380,8 @@ impl Gui {
             current_theme_index,
             commit_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             commit_stats_inflight: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
+            commit_messages_cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            commit_messages_inflight: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
             commit_details_scroll: 0,
             commit_details_scroll_hash: String::new(),
             show_commit_details,
@@ -560,6 +567,8 @@ impl Gui {
                             .unwrap_or(false),
                         &self.commit_stats_cache,
                         &self.commit_stats_inflight,
+                        &self.commit_messages_cache,
+                        &self.commit_messages_inflight,
                         &self.git,
                         &mut self.commit_details_scroll,
                         &mut self.commit_details_scroll_hash,

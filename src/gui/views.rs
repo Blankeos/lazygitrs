@@ -59,6 +59,8 @@ pub fn render(
     diff_loading_show: bool,
     commit_stats: &Arc<Mutex<HashMap<String, CommitStat>>>,
     commit_stats_inflight: &Arc<Mutex<std::collections::HashSet<String>>>,
+    commit_messages: &Arc<Mutex<HashMap<String, String>>>,
+    commit_messages_inflight: &Arc<Mutex<std::collections::HashSet<String>>>,
     git: &Arc<GitCommands>,
     commit_details_scroll: &mut u16,
     commit_details_scroll_hash: &mut String,
@@ -218,7 +220,7 @@ pub fn render(
                 }
             }
         }
-        // Full-mode details column (sidebar-focused only) — full-size view.
+        // Full-mode details strip (sidebar-focused only) — compact, above sidebar.
         if let (Some(details_rect), Some(commit)) = (fl.commit_details_panel, current_commit) {
             if commit_details_scroll_hash.as_str() != commit.hash.as_str() {
                 *commit_details_scroll = 0;
@@ -230,9 +232,11 @@ pub fn render(
                 commit,
                 commit_stats,
                 commit_stats_inflight,
+                commit_messages,
+                commit_messages_inflight,
                 git,
                 theme,
-                false,
+                true,
                 commit_details_scroll,
             );
         }
@@ -614,6 +618,8 @@ pub fn render(
             commit,
             commit_stats,
             commit_stats_inflight,
+            commit_messages,
+            commit_messages_inflight,
             git,
             theme,
             true,
@@ -2619,20 +2625,62 @@ fn render_commit_details_panel(
     commit: &Commit,
     commit_stats: &Arc<Mutex<HashMap<String, CommitStat>>>,
     commit_stats_inflight: &Arc<Mutex<std::collections::HashSet<String>>>,
+    commit_messages: &Arc<Mutex<HashMap<String, String>>>,
+    commit_messages_inflight: &Arc<Mutex<std::collections::HashSet<String>>>,
     git: &Arc<GitCommands>,
     theme: &Theme,
     compact: bool,
     scroll: &mut u16,
 ) {
     let stat_owned = lookup_or_fetch_stat(commit_stats, commit_stats_inflight, git, &commit.hash);
+    let message_owned =
+        lookup_or_fetch_message(commit_messages, commit_messages_inflight, git, &commit.hash);
     presentation::commit_details::render_commit_details(
         frame,
         rect,
         commit,
         stat_owned.as_ref(),
-        None,
+        message_owned.as_deref(),
         theme,
         compact,
         scroll,
     );
+}
+
+fn lookup_or_fetch_message(
+    cache: &Arc<Mutex<HashMap<String, String>>>,
+    inflight: &Arc<Mutex<std::collections::HashSet<String>>>,
+    git: &Arc<GitCommands>,
+    hash: &str,
+) -> Option<String> {
+    if let Ok(map) = cache.lock() {
+        if let Some(m) = map.get(hash) {
+            return Some(m.clone());
+        }
+    }
+    let mut inflight_guard = match inflight.lock() {
+        Ok(g) => g,
+        Err(_) => return None,
+    };
+    if inflight_guard.contains(hash) {
+        return None;
+    }
+    inflight_guard.insert(hash.to_string());
+    drop(inflight_guard);
+
+    let cache = Arc::clone(cache);
+    let inflight = Arc::clone(inflight);
+    let git = Arc::clone(git);
+    let hash_owned = hash.to_string();
+    std::thread::spawn(move || {
+        if let Ok(msg) = git.commit_message_full(&hash_owned) {
+            if let Ok(mut map) = cache.lock() {
+                map.insert(hash_owned.clone(), msg);
+            }
+        }
+        if let Ok(mut set) = inflight.lock() {
+            set.remove(&hash_owned);
+        }
+    });
+    None
 }
