@@ -18,11 +18,27 @@ body = """
 ### {{ group | upper_first }}
 {% for commit in commits %}
 - {{ commit.message | upper_first | split(pat="\\n") | first }}\
+    {% if commit.remote.username %} by @{{ commit.remote.username }}\
+    {%- elif commit.author.name %} by {{ commit.author.name }}\
+    {% endif %}\
+    {% if commit.remote.pr_number %} in [#{{ commit.remote.pr_number }}](https://github.com/Blankeos/lazygitrs/pull/{{ commit.remote.pr_number }})\
+    {% endif %}\
 {% endfor %}
-{% endfor %}\n
+{% endfor %}\
+{%- if github.contributors | filter(attribute="is_first_time", value=true) | length > 0 %}
+
+### New Contributors
+{% for contributor in github.contributors | filter(attribute="is_first_time", value=true) %}
+- @{{ contributor.username }} made their first contribution{% if contributor.pr_number %} in [#{{ contributor.pr_number }}](https://github.com/Blankeos/lazygitrs/pull/{{ contributor.pr_number }}){% endif %}
+{%- endfor %}
+{%- endif %}\n
 """
 trim = true
 footer = ""
+
+[remote.github]
+owner = "Blankeos"
+repo = "lazygitrs"
 
 [git]
 conventional_commits = true
