@@ -85,7 +85,7 @@ pub fn render_commit_details(
         ),
     ]));
 
-    if !compact && (!commit.refs.is_empty() || !commit.tags.is_empty()) {
+    if !commit.refs.is_empty() || !commit.tags.is_empty() {
         let mut spans = vec![Span::raw("  ")];
         for r in &commit.refs {
             let color = if r.starts_with("HEAD -> ") || r == "HEAD" {
