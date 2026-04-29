@@ -143,10 +143,11 @@
     - Pressing up, Only start scrolling up when the selected/cursor is already on the first viewable element (not followed by '2 Files', '3 Branches', '4 Commits', '5 Stash' etc. - currently even if I'm on the last element, it will still scroll up when I press up)
   - Mouse
     - Clicking a list item - just essentially skips cursor to select the item as the new selected/cursor. Shouldn't really imitate 'enter', it just changes the selection. Currently works in '2 Files' tab. i.e. 'Keybindings' (?), Interactive rebase (I), Checkout (c on branches), Color Theme.
-    - Scroll down - should have the same behavior as pressing down on any of the cmdk-style components
-    - Scroll up - should have the same behavior as pressing up.
+    - Scroll down - ~should have the same behavior as pressing down on any of the cmdk-style components~ we decided later on that it has its own behavior, scroll down just scrolls the list view, does not change the selection.
+    - Scroll up - ~should have the same behavior as pressing up.~ we decided later on that it has its own behavior, scroll up just scrolls the list view, does not change the selection.
     - [x] In shift- or shift+ (meaning the sizebar is in the only view...), mouse scroll does not work for the list views i.e. Commits, Branches, etc.
     - [x] New change, scrolling up/down with mouse isn't same behavior as pressing down or up. It just scrolls, but doesn't change the current selection. Let's do this!
+    - [x] As of Apr 29, 2026 - noticed that this isn't the behavior of the 'Interactive Rebase' UI.
 
 - [x] Subtab and sub-item menu mouse clicks should work, right now in sidebar, if I go to Branches, find main, press enter (now in commit files), I use my mouse and it goes back to 'Branches'. Maybe because mouseclicks currently on the sidebar usually always register for the root sub-item tab.
 
@@ -212,3 +213,5 @@
   - [x] additionally, when we do `}` or `{` to jump around diffs, we kinda focus a different diff right? What if we made `e` also work with that as in sending the line:col combination so it's more seamless.
 
 - [x] We already have Commit details when focusing commit items in their respective lists. This new change is ONLY related to full view (shift-). I initially made it show on the side.. But isntead, I decided to always make it show above. So now it'll be a vertical layout. THe half view, default view is just fine, no changes on that.
+
+- [ ] Make 'Graph View' a bit more compact, like lazygit/zed. I like the right-padding that the graph adds so it pushes the table to the right. Except that currently, if there's A LOT of branches. It becomes a problematic problem. So now, let's just make it a scrollable piece of kind of column with a max width.

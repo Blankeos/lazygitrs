@@ -50,12 +50,16 @@ fn handle_planning_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
             if gui.rebase_mode.selected + 1 < entry_count {
                 gui.rebase_mode.selected += 1;
             }
+            let vh = gui.rebase_mode.visible_height;
+            gui.rebase_mode.ensure_visible(vh);
             return Ok(());
         }
         KeyCode::Char('k') | KeyCode::Up if !key.modifiers.contains(KeyModifiers::ALT) => {
             if gui.rebase_mode.selected > 0 {
                 gui.rebase_mode.selected -= 1;
             }
+            let vh = gui.rebase_mode.visible_height;
+            gui.rebase_mode.ensure_visible(vh);
             return Ok(());
         }
         _ => {}
@@ -108,6 +112,8 @@ fn handle_planning_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         && key.modifiers.contains(KeyModifiers::ALT)
     {
         gui.rebase_mode.move_up();
+        let vh = gui.rebase_mode.visible_height;
+        gui.rebase_mode.ensure_visible(vh);
         return Ok(());
     }
 
@@ -116,28 +122,38 @@ fn handle_planning_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         && key.modifiers.contains(KeyModifiers::ALT)
     {
         gui.rebase_mode.move_down();
+        let vh = gui.rebase_mode.visible_height;
+        gui.rebase_mode.ensure_visible(vh);
         return Ok(());
     }
 
     // [ : swap selected entry with previous (move action up, keep selection)
     if key.code == KeyCode::Char('[') {
         gui.rebase_mode.move_up();
+        let vh = gui.rebase_mode.visible_height;
+        gui.rebase_mode.ensure_visible(vh);
         return Ok(());
     }
 
     // ] : swap selected entry with next (move action down, keep selection)
     if key.code == KeyCode::Char(']') {
         gui.rebase_mode.move_down();
+        let vh = gui.rebase_mode.visible_height;
+        gui.rebase_mode.ensure_visible(vh);
         return Ok(());
     }
 
     // g: jump to top, G: jump to bottom
     if key.code == KeyCode::Char('g') {
         gui.rebase_mode.selected = 0;
+        let vh = gui.rebase_mode.visible_height;
+        gui.rebase_mode.ensure_visible(vh);
         return Ok(());
     }
     if key.code == KeyCode::Char('G') {
         gui.rebase_mode.selected = entry_count.saturating_sub(1);
+        let vh = gui.rebase_mode.visible_height;
+        gui.rebase_mode.ensure_visible(vh);
         return Ok(());
     }
 
@@ -199,6 +215,8 @@ fn handle_in_progress_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         }
         _ => {}
     }
+    let vh = gui.rebase_mode.visible_height;
+    gui.rebase_mode.ensure_visible(vh);
 
     Ok(())
 }

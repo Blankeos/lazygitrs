@@ -54,6 +54,9 @@ pub struct RebaseModeState {
     pub selected: usize,
     /// Scroll offset for the list.
     pub scroll: usize,
+    /// Height of the list viewport in rows. Updated on each render so that
+    /// keyboard / mouse handlers can scroll relative to the actual rendered size.
+    pub visible_height: usize,
     // Progress counters for InProgress phase
     pub done_count: usize,
     pub total_count: usize,
@@ -71,6 +74,7 @@ impl RebaseModeState {
             entries: Vec::new(),
             selected: 0,
             scroll: 0,
+            visible_height: 0,
             done_count: 0,
             total_count: 0,
         }
@@ -237,15 +241,21 @@ impl RebaseModeState {
             .collect()
     }
 
-    /// Ensure scroll keeps selected item visible.
+    /// Ensure scroll keeps selected item visible. When selected is the last
+    /// entry, also keep the trailing base-commit row visible (rendered just
+    /// below the last entry as a dim "onto" target).
     pub fn ensure_visible(&mut self, visible_height: usize) {
         if visible_height == 0 {
             return;
         }
+        // Treat the row below the selected entry as also-needed-visible when
+        // selected is the last entry, so the base commit doesn't get clipped.
+        let on_last = !self.entries.is_empty() && self.selected + 1 == self.entries.len();
+        let bottom_target = if on_last { self.selected + 1 } else { self.selected };
         if self.selected < self.scroll {
             self.scroll = self.selected;
-        } else if self.selected >= self.scroll + visible_height {
-            self.scroll = self.selected + 1 - visible_height;
+        } else if bottom_target >= self.scroll + visible_height {
+            self.scroll = bottom_target + 1 - visible_height;
         }
     }
 

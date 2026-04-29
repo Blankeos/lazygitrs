@@ -23,7 +23,7 @@ fn action_color(action: RebaseAction, theme: &Theme) -> Color {
 /// Width of the action label box (e.g. " pick    ") including padding.
 const ACTION_LABEL_WIDTH: usize = 9; // " {:7} " = 1 + 7 + 1
 
-pub fn render(frame: &mut Frame, state: &RebaseModeState, theme: &Theme) {
+pub fn render(frame: &mut Frame, state: &mut RebaseModeState, theme: &Theme) {
     let area = frame.area();
 
     // Layout: Main bordered block (fill) | Status bar (1)
@@ -36,7 +36,7 @@ pub fn render(frame: &mut Frame, state: &RebaseModeState, theme: &Theme) {
     render_status_bar(frame, outer[1], state, theme);
 }
 
-fn render_main_block(frame: &mut Frame, area: Rect, state: &RebaseModeState, theme: &Theme) {
+fn render_main_block(frame: &mut Frame, area: Rect, state: &mut RebaseModeState, theme: &Theme) {
     // Build title line for the bordered block
     let mut title_spans = vec![
         Span::raw(" "),
@@ -96,6 +96,15 @@ fn render_main_block(frame: &mut Frame, area: Rect, state: &RebaseModeState, the
     render_info_line(frame, sections[0], state, theme);
     if has_banner {
         render_progress_banner(frame, sections[1], state, theme);
+    }
+    // Persist the actual list viewport height so keyboard/mouse handlers
+    // scroll relative to what's currently rendered (terminal may resize).
+    state.visible_height = sections[2].height as usize;
+    // Clamp scroll offset against the new viewport size.
+    let list_len = state.entries.len() + 1;
+    let max_offset = list_len.saturating_sub(state.visible_height);
+    if state.scroll > max_offset {
+        state.scroll = max_offset;
     }
     render_list(frame, sections[2], state, theme);
 }
@@ -344,8 +353,12 @@ fn render_list(frame: &mut Frame, area: Rect, state: &RebaseModeState, theme: &T
 
     let list = List::new(items);
 
+    // Note: deliberately *not* calling list_state.select(...) — ratatui's
+    // stateful List adjusts the offset to keep the selected item visible,
+    // which fights our manual scroll model where mouse-scroll just moves
+    // the viewport without changing the selection. Per-item highlighting
+    // is already baked into the items via `is_selected` above.
     let mut list_state = ListState::default();
-    list_state.select(Some(state.selected));
     *list_state.offset_mut() = state.scroll;
 
     frame.render_stateful_widget(list, area, &mut list_state);

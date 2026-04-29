@@ -491,7 +491,7 @@ impl Gui {
                 if self.rebase_mode.active {
                     presentation::rebase_mode::render(
                         frame,
-                        &self.rebase_mode,
+                        &mut self.rebase_mode,
                         &theme,
                     );
                     // Render popup overlay on top of rebase mode
@@ -3979,38 +3979,14 @@ impl Gui {
         // Rebase mode: scroll and click support
         if self.rebase_mode.active {
             match mouse.kind {
-                MouseEventKind::ScrollDown => {
-                    let len = self.rebase_mode.entries.len();
-                    if self.rebase_mode.selected + 1 < len {
-                        self.rebase_mode.selected += 1;
-                        let area = ratatui::layout::Rect::new(0, 0, self.layout.width, self.layout.height);
-                        let outer = ratatui::layout::Layout::default()
-                            .direction(ratatui::layout::Direction::Vertical)
-                            .constraints([ratatui::layout::Constraint::Min(1), ratatui::layout::Constraint::Length(1)])
-                            .split(area);
-                        let block = ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL);
-                        let inner = block.inner(outer[0]);
-                        let has_banner = self.rebase_mode.phase == modes::rebase_mode::RebasePhase::InProgress;
-                        let banner_h: u16 = if has_banner { 2 } else { 0 };
-                        let list_h = inner.height.saturating_sub(1 + banner_h) as usize;
-                        self.rebase_mode.ensure_visible(list_h);
-                    }
-                }
-                MouseEventKind::ScrollUp => {
-                    if self.rebase_mode.selected > 0 {
-                        self.rebase_mode.selected -= 1;
-                        let area = ratatui::layout::Rect::new(0, 0, self.layout.width, self.layout.height);
-                        let outer = ratatui::layout::Layout::default()
-                            .direction(ratatui::layout::Direction::Vertical)
-                            .constraints([ratatui::layout::Constraint::Min(1), ratatui::layout::Constraint::Length(1)])
-                            .split(area);
-                        let block = ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL);
-                        let inner = block.inner(outer[0]);
-                        let has_banner = self.rebase_mode.phase == modes::rebase_mode::RebasePhase::InProgress;
-                        let banner_h: u16 = if has_banner { 2 } else { 0 };
-                        let list_h = inner.height.saturating_sub(1 + banner_h) as usize;
-                        self.rebase_mode.ensure_visible(list_h);
-                    }
+                MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                    // Use the viewport height stored by the renderer so this
+                    // matches what's actually on screen (including resizes).
+                    let list_h = self.rebase_mode.visible_height;
+                    // List length includes entries + the base commit row appended at the bottom.
+                    let list_len = self.rebase_mode.entries.len() + 1;
+                    let delta: isize = if matches!(mouse.kind, MouseEventKind::ScrollDown) { 3 } else { -3 };
+                    scroll::scroll_viewport(&mut self.rebase_mode.scroll, delta, list_len, list_h);
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
                     // Compute the list area to determine which entry was clicked
