@@ -177,7 +177,36 @@ fn toggle_stage_all(gui: &mut Gui) -> Result<()> {
 fn open_commit_prompt(gui: &mut Gui) -> Result<()> {
     let model = gui.model.lock().unwrap();
     let any_staged = model.files.iter().any(|f| f.has_staged_changes);
+    let no_files = model.files.is_empty();
     drop(model);
+
+    if no_files {
+        gui.popup = PopupState::Confirm {
+            title: "No files".to_string(),
+            message: "No files to stage. Create an empty commit?".to_string(),
+            on_confirm: Box::new(|gui| {
+                if let Some(saved) = gui.saved_commit_popup.take() {
+                    gui.popup = saved;
+                } else {
+                    gui.popup = PopupState::CommitInput {
+                        summary_textarea: make_commit_summary_textarea(),
+                        body_textarea: make_commit_body_textarea(),
+                        body_state: crate::gui::popup::BodySoftWrap::new(),
+                        focus: CommitInputFocus::Summary,
+                        on_confirm: Box::new(|gui, message| {
+                            if !message.is_empty() {
+                                gui.git.create_empty_commit(message)?;
+                                gui.needs_refresh = true;
+                            }
+                            Ok(())
+                        }),
+                    };
+                }
+                Ok(())
+            }),
+        };
+        return Ok(());
+    }
 
     if !any_staged {
         // No files staged — ask to commit all, like lazygit
@@ -233,7 +262,17 @@ fn open_commit_prompt(gui: &mut Gui) -> Result<()> {
 fn open_ai_commit_prompt(gui: &mut Gui) -> Result<()> {
     let model = gui.model.lock().unwrap();
     let any_staged = model.files.iter().any(|f| f.has_staged_changes);
+    let no_files = model.files.is_empty();
     drop(model);
+
+    if no_files {
+        gui.popup = PopupState::Message {
+            title: "No files".to_string(),
+            message: "Nothing to diff — AI commit needs file changes.".to_string(),
+            kind: crate::gui::popup::MessageKind::Error,
+        };
+        return Ok(());
+    }
 
     if !any_staged {
         gui.popup = PopupState::Confirm {

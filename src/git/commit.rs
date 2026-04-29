@@ -232,6 +232,13 @@ impl GitCommands {
         Ok(())
     }
 
+    pub fn create_empty_commit(&self, message: &str) -> Result<()> {
+        self.git()
+            .args(&["commit", "--allow-empty", "-m", message])
+            .run_expecting_success()?;
+        Ok(())
+    }
+
     pub fn amend_commit(&self) -> Result<()> {
         self.git()
             .args(&["commit", "--amend", "--no-edit"])
