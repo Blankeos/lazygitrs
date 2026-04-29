@@ -32,10 +32,11 @@ lazygitrs
 - [x] **AI commit messages** — works with whatever agent you already use (claude, opencode, codex, or my minimal shim [modelcli](https://github.com/blankeos/modelcli)). Set `git.commit.generateCommand` (see [Configuration](#configuration)):
 
   ```yml
+  # ~/.config/lazygitrs/config.yml
   git:
     commit:
       # Using claude
-      generateCommand: "claude -p 'Generate a conventional commit message for this diff.'"
+      generateCommand: "claude -p 'Generate a conventional commit message for this diff.' --no-session-persistence "
       # Using opencode
       generateCommand: "opencode run 'Generate a conventional commit message for this diff.'"
       # Using codex

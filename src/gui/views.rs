@@ -65,6 +65,8 @@ pub fn render(
     commit_details_scroll: &mut u16,
     commit_details_scroll_hash: &mut String,
     show_commit_details: bool,
+    ai_button_hovered: bool,
+    ai_configured: bool,
 ) {
     let area = frame.area();
     let panel_count = SideWindow::ALL.len();
@@ -244,7 +246,7 @@ pub fn render(
         // Render text selection highlight overlay and tooltip (must be before popup)
         render_selection_overlay(frame, diff_view, fl.main_panel, theme);
         if *popup != PopupState::None {
-            render_popup(frame, popup, area, spinner_frame, theme);
+            render_popup(frame, popup, area, spinner_frame, theme, ai_button_hovered, ai_configured);
         }
         render_command_log(frame, &fl, command_log, show_command_log, theme);
         return;
@@ -691,7 +693,7 @@ pub fn render(
 
     // Render popup overlay
     if *popup != PopupState::None {
-        render_popup(frame, popup, area, spinner_frame, theme);
+        render_popup(frame, popup, area, spinner_frame, theme, ai_button_hovered, ai_configured);
     }
 
     // Render command log last so it appears above everything
@@ -1632,7 +1634,63 @@ pub fn render_selection_overlay(frame: &mut Frame, diff_view: &mut DiffViewState
 
 const SPINNER_CHARS: &[char] = &['·', '✻', '✽', '✶', '✳', '✢'];
 
-pub fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame: usize, theme: &Theme) {
+/// Geometry of the ✦ AI-generate button shown inside the commit-message popup.
+/// The button sits on the "Summary" label row, right-aligned inside the popup
+/// box (not on the border).
+pub fn commit_ai_button_geometry(popup: &PopupState, area: Rect) -> Option<Rect> {
+    if area.width < 10 || area.height < 6 {
+        return None;
+    }
+    let popup_width = (area.width * 60 / 100).min(60).max(30).min(area.width);
+    if popup_width < 16 {
+        return None;
+    }
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let ta_height: u16 = match popup {
+        PopupState::CommitInput { .. } => 16,
+        _ => return None,
+    };
+    let ta_height = ta_height.min(area.height);
+    if ta_height < 7 {
+        return None;
+    }
+    let ta_y = (area.height.saturating_sub(ta_height)) / 2;
+
+    // Button: 3 cells (" ✦ ") on the Summary label row (inner.y = ta_y + 1),
+    // right-aligned within the inner area (1 col border + 1 col right padding).
+    let btn_w: u16 = 3;
+    let btn_x = x + popup_width.saturating_sub(btn_w + 2);
+    let btn_y = ta_y + 1;
+    Some(Rect::new(btn_x, btn_y, btn_w, 1))
+}
+
+/// Tooltip rect placed one row above the popup, right-aligned with the button.
+fn commit_ai_tooltip_rect(area: Rect, btn_rect: Rect, tip_w: u16) -> Rect {
+    let popup_width = (area.width * 60 / 100).min(60).max(30).min(area.width);
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let ta_height: u16 = 16u16.min(area.height);
+    let ta_y = (area.height.saturating_sub(ta_height)) / 2;
+
+    let mut tip_x = (btn_rect.x + btn_rect.width).saturating_sub(tip_w);
+    // Keep tooltip within the popup's horizontal bounds when possible.
+    let popup_right = x + popup_width;
+    if tip_x + tip_w > popup_right {
+        tip_x = popup_right.saturating_sub(tip_w);
+    }
+    if tip_x + tip_w > area.width {
+        tip_x = area.width.saturating_sub(tip_w);
+    }
+    let tip_y = if ta_y >= 1 {
+        ta_y - 1
+    } else if ta_y + ta_height < area.height {
+        ta_y + ta_height
+    } else {
+        btn_rect.y
+    };
+    Rect::new(tip_x, tip_y, tip_w, 1)
+}
+
+pub fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_frame: usize, theme: &Theme, ai_button_hovered: bool, ai_configured: bool) {
     // Bail out early on terminals too small to host any popup — better than
     // panicking inside a render with an out-of-bounds rect.
     if area.width < 4 || area.height < 4 {
@@ -2356,6 +2414,82 @@ pub fn render_popup(frame: &mut Frame, popup: &PopupState, area: Rect, spinner_f
             );
         }
         PopupState::None => {}
+    }
+
+    // Overlay the ✦ AI-generate button (and tooltip when hovered) inside the
+    // commit-message popup, on the Summary label row.
+    if let Some(btn_rect) = commit_ai_button_geometry(popup, area) {
+        let buf = frame.buffer_mut();
+        // No bg fill — ✦ has off-center bearings in most fonts, so any colored
+        // block exposes the asymmetry. Color/weight change is the hover feedback.
+        let glyph_style = if ai_configured {
+            if ai_button_hovered {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(theme.accent_secondary)
+                    .add_modifier(Modifier::BOLD)
+            }
+        } else if ai_button_hovered {
+            Style::default()
+                .fg(theme.text)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text_dimmed)
+        };
+        let glyph_col = btn_rect.x + 1;
+        if let Some(cell) = buf.cell_mut((glyph_col, btn_rect.y)) {
+            cell.set_char('\u{F0674}'); // Nerd Font: nf-md-creation (sparkle)
+            cell.set_style(glyph_style);
+        }
+
+        if ai_button_hovered {
+            let tip_style = Style::default()
+                .bg(theme.selected_bg)
+                .fg(theme.text_strong);
+            let key_style = Style::default()
+                .bg(theme.selected_bg)
+                .fg(theme.accent_secondary)
+                .add_modifier(Modifier::BOLD);
+            let dim_style = Style::default()
+                .bg(theme.selected_bg)
+                .fg(theme.text_dimmed);
+
+            let parts: Vec<(&str, Style)> = if ai_configured {
+                vec![
+                    (" ", tip_style),
+                    ("c-g", key_style),
+                    (" Generate w/ AI ", tip_style),
+                ]
+            } else {
+                vec![
+                    (" \u{F0674} Generate w/ AI ", tip_style),
+                    ("(needs setup)", dim_style),
+                    (" ", tip_style),
+                ]
+            };
+            let tip_w: u16 = parts.iter().map(|(s, _)| s.chars().count() as u16).sum();
+            let tip_rect = commit_ai_tooltip_rect(area, btn_rect, tip_w);
+
+            let mut col = tip_rect.x;
+            for (text, style) in &parts {
+                for ch in text.chars() {
+                    if col >= tip_rect.x + tip_rect.width {
+                        break;
+                    }
+                    if col >= buf.area.x + buf.area.width {
+                        break;
+                    }
+                    if let Some(cell) = buf.cell_mut((col, tip_rect.y)) {
+                        cell.set_char(ch);
+                        cell.set_style(*style);
+                    }
+                    col += 1;
+                }
+            }
+        }
     }
 }
 

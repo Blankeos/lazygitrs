@@ -231,6 +231,9 @@ pub struct Gui {
     /// Whether the commit-details box is visible.  Toggled with `.` in any
     /// commit-related context.
     pub show_commit_details: bool,
+    /// Whether the mouse is currently hovering the AI-generate button (✦)
+    /// in the commit message popup. Drives tooltip visibility.
+    pub commit_ai_button_hovered: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -385,6 +388,7 @@ impl Gui {
             commit_details_scroll: 0,
             commit_details_scroll_hash: String::new(),
             show_commit_details,
+            commit_ai_button_hovered: false,
         })
     }
 
@@ -511,7 +515,7 @@ impl Gui {
                     );
                     // Render popup overlay on top of rebase mode
                     if self.popup != PopupState::None {
-                        views::render_popup(frame, &self.popup, frame.area(), self.spinner_frame, &theme);
+                        views::render_popup(frame, &self.popup, frame.area(), self.spinner_frame, &theme, self.commit_ai_button_hovered, !self.config.user_config.git.commit.generate_command.trim().is_empty());
                     }
                 } else if self.diff_mode.active {
                     let diff_loading_show = self.diff_loading && self.diff_loading_since
@@ -527,7 +531,7 @@ impl Gui {
                     );
                     // Render popup overlay on top of diff mode (for ? help, errors, etc.)
                     if self.popup != PopupState::None {
-                        views::render_popup(frame, &self.popup, frame.area(), self.spinner_frame, &theme);
+                        views::render_popup(frame, &self.popup, frame.area(), self.spinner_frame, &theme, self.commit_ai_button_hovered, !self.config.user_config.git.commit.generate_command.trim().is_empty());
                     }
                 } else {
                     let model = self.model.lock().unwrap();
@@ -588,6 +592,8 @@ impl Gui {
                         &mut self.commit_details_scroll,
                         &mut self.commit_details_scroll_hash,
                         self.show_commit_details,
+                        self.commit_ai_button_hovered,
+                        !self.config.user_config.git.commit.generate_command.trim().is_empty(),
                     );
                 }
             })?;
@@ -3989,6 +3995,50 @@ impl Gui {
 
         if !self.config.user_config.gui.mouse_events {
             return;
+        }
+
+        // ✦ AI-generate button on commit-message popups: track hover, handle clicks.
+        if matches!(self.popup, PopupState::CommitInput { .. }) {
+            let area = ratatui::layout::Rect::new(0, 0, self.layout.width, self.layout.height);
+            if let Some(btn_rect) = views::commit_ai_button_geometry(&self.popup, area) {
+                let over = rect_contains(btn_rect, mouse.column, mouse.row);
+                match mouse.kind {
+                    MouseEventKind::Moved | MouseEventKind::Drag(_) => {
+                        if self.commit_ai_button_hovered != over {
+                            self.commit_ai_button_hovered = over;
+                        }
+                    }
+                    MouseEventKind::Down(MouseButton::Left) if over => {
+                        self.commit_ai_button_hovered = false;
+                        let configured = !self
+                            .config
+                            .user_config
+                            .git
+                            .commit
+                            .generate_command
+                            .trim()
+                            .is_empty();
+                        if configured {
+                            self.trigger_ai_commit_generation_from_editor();
+                        } else {
+                            let url = "https://github.com/blankeos/lazygitrs#whats-different";
+                            if let Err(e) = crate::os::platform::Platform::open_file(url) {
+                                self.popup = PopupState::Message {
+                                    title: "Error".to_string(),
+                                    message: format!("Could not open browser: {}", e),
+                                    kind: MessageKind::Error,
+                                };
+                            }
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+            } else if self.commit_ai_button_hovered {
+                self.commit_ai_button_hovered = false;
+            }
+        } else if self.commit_ai_button_hovered {
+            self.commit_ai_button_hovered = false;
         }
 
         // Rebase mode: scroll and click support
