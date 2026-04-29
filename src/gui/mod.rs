@@ -2488,6 +2488,7 @@ impl Gui {
                 }
             }
             PopupState::CommitInput { focus, .. } => {
+                use crossterm::event::KeyModifiers;
                 let focus = *focus;
 
                 // Tab toggles focus between summary and body

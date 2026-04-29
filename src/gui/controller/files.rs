@@ -244,6 +244,7 @@ fn open_ai_commit_prompt(gui: &mut Gui) -> Result<()> {
                 gui.popup = PopupState::CommitInput {
                     summary_textarea: make_commit_summary_textarea(),
                     body_textarea: make_commit_body_textarea(),
+                    body_state: crate::gui::popup::BodySoftWrap::new(),
                     focus: CommitInputFocus::Summary,
                     on_confirm: Box::new(|gui, message| {
                         if !message.is_empty() {
@@ -263,6 +264,7 @@ fn open_ai_commit_prompt(gui: &mut Gui) -> Result<()> {
     gui.popup = PopupState::CommitInput {
         summary_textarea: make_commit_summary_textarea(),
         body_textarea: make_commit_body_textarea(),
+        body_state: crate::gui::popup::BodySoftWrap::new(),
         focus: CommitInputFocus::Summary,
         on_confirm: Box::new(|gui, message| {
             if !message.is_empty() {

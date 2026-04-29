@@ -212,7 +212,7 @@ impl Default for FilesKeybinding {
     fn default() -> Self {
         Self {
             commit_changes: "c".into(),
-            generate_ai_commit: "G".into(),
+            generate_ai_commit: "<c-g>".into(),
             commit_changes_without_hook: "w".into(),
             amend_last_commit: "A".into(),
             commit_changes_with_editor: "C".into(),
