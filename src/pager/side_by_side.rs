@@ -445,10 +445,25 @@ impl DiffViewState {
                 .first()
                 .map(|(name, _)| name.as_str())
                 .unwrap_or(filename);
-            let mut parsed = Self::parse_content(actual_name, &old, &new, tab_width, file_exists_on_disk);
+            let lines =
+                super::diff_algo::compute_side_by_side_from_unified_diff(diff_output, tab_width);
+            let hunk_starts = super::diff_algo::find_hunk_starts(&lines);
             let hunks = parse_hunk_headers(diff_output);
-            parsed.hunk_line_offsets = build_hunk_line_offsets(&hunks, &parsed.lines, 0);
-            parsed
+            let hunk_line_offsets = build_hunk_line_offsets(&hunks, &lines, 0);
+            let sections = vec![FileSection {
+                old_highlighter: FileHighlighter::new(&old, actual_name),
+                new_highlighter: FileHighlighter::new(&new, actual_name),
+            }];
+            ParsedDiff {
+                filename: actual_name.to_string(),
+                old_content: old,
+                new_content: new,
+                lines,
+                hunk_starts,
+                hunk_line_offsets,
+                sections,
+                file_exists_on_disk,
+            }
         } else {
             let file_count = file_diffs.len();
             let new_filename = format!("{} ({} files)", filename, file_count);
@@ -471,7 +486,7 @@ impl DiffViewState {
 
                 let section_start = lines.len();
                 let mut section_lines =
-                    super::diff_algo::compute_side_by_side(&old, &new, tab_width);
+                    super::diff_algo::compute_side_by_side_from_unified_diff(file_diff, tab_width);
                 for line in &mut section_lines {
                     line.section_index = section_idx;
                 }
@@ -567,10 +582,32 @@ impl DiffViewState {
                 .first()
                 .map(|(name, _)| name.as_str())
                 .unwrap_or(filename);
-            self.load(actual_name, &old, &new);
-            // Compute hunk line offsets for correct file line numbers
+            // Build lines directly from the unified diff's per-line markers,
+            // bypassing Myers re-diff so multi-hunk content can't alias.
+            let same_file = self.filename == actual_name;
+            self.filename = actual_name.to_string();
+            self.old_content = old.clone();
+            self.new_content = new.clone();
+            self.lines = super::diff_algo::compute_side_by_side_from_unified_diff(
+                diff_output,
+                self.tab_width,
+            );
+            self.hunk_starts = super::diff_algo::find_hunk_starts(&self.lines);
             let hunks = parse_hunk_headers(diff_output);
             self.hunk_line_offsets = build_hunk_line_offsets(&hunks, &self.lines, 0);
+            self.sections = vec![FileSection {
+                old_highlighter: FileHighlighter::new(&old, actual_name),
+                new_highlighter: FileHighlighter::new(&new, actual_name),
+            }];
+            if same_file {
+                let max = self.lines.len().saturating_sub(1);
+                self.scroll_offset = self.scroll_offset.min(max);
+            } else {
+                self.scroll_offset = 0;
+                self.horizontal_scroll = 0;
+                self.selection = None;
+                self.clear_search();
+            }
         } else {
             // Multi-file diff — build per-section lines with highlighters
             let file_count = file_diffs.len();
@@ -607,8 +644,10 @@ impl DiffViewState {
 
                 // Compute diff lines for this file section
                 let section_start = self.lines.len();
-                let mut section_lines =
-                    super::diff_algo::compute_side_by_side(&old, &new, self.tab_width);
+                let mut section_lines = super::diff_algo::compute_side_by_side_from_unified_diff(
+                    file_diff,
+                    self.tab_width,
+                );
                 for line in &mut section_lines {
                     line.section_index = section_idx;
                 }

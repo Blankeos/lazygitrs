@@ -223,3 +223,5 @@
     - The new s,f,d,e behavior (even when 1 or multirange select) in the '4 Commits' tab.
       The original lazygit behavior was for example... Press 's' to squash down - when I press it it shows a 'Are you sure you want to squash the selected commit(s) into the commit below?
     - But actually 1 big UX improvement over original lazygit is just immediately showing the 'Interactive Rebase' tool with it that kinda shows 'squash' for those commits you selected (or the single commit). And obviously it behaves like the regular way of pressing `i` or `I and then picking a ref and enter`. Basically it won't really commit the squash/fixup etc until you press enter.
+
+- [x] Bug: Big bug with git hunks sometimes being misidentified.
