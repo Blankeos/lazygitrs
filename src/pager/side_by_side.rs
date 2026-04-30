@@ -1303,7 +1303,7 @@ fn render_revert_tooltip(buf: &mut Buffer, x: u16, y: u16, max_width: u16, theme
     let parts: Vec<(&str, Style)> = if show_key {
         vec![
             (" ", tip_style),
-            ("c-r", key_style),
+            ("enter", key_style),
             (" Revert hunk ", tip_style),
         ]
     } else {

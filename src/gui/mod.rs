@@ -2052,9 +2052,11 @@ impl Gui {
         }
 
         match key.code {
-            // Escape: clear search first, then unfocus diff
+            // Escape: clear revert-hunk selection first, then search, then unfocus diff
             KeyCode::Esc => {
-                if !self.diff_view.search_query.is_empty() {
+                if self.diff_view.selected_revert_hunk.is_some() {
+                    self.diff_view.selected_revert_hunk = None;
+                } else if !self.diff_view.search_query.is_empty() {
                     self.diff_view.clear_search();
                 } else {
                     self.diff_focused = false;

@@ -1366,14 +1366,14 @@ fn render_status_bar(
     if diff_focused && !diff_view.is_empty() {
         // Diff-focused hint set: only the diff-relevant keys, kept tight.
         // Revert-related keys are grouped together at the front so users see
-        // c-r right next to its cycle keys. c-r itself only appears when a
+        // enter right next to its cycle keys. enter itself only appears when a
         // hunk is actually selected (pressing it otherwise is a no-op).
         if ctx_mgr.active() == ContextId::Files {
             let has_selection = diff_view.selected_revert_hunk.is_some();
             let mut idx = 0;
             if has_selection {
-                hints.insert(idx, ("c-r", "revert hunk"));
-                emphasized.push("c-r");
+                hints.insert(idx, ("enter", "revert hunk"));
+                emphasized.push("enter");
                 idx += 1;
             }
             hints.insert(idx, ("c-j/c-k", "cycle revert"));
