@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, MouseEvent};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, cursor};
@@ -1982,6 +1982,54 @@ impl Gui {
             }
         }
 
+        if matches_key(key, &keybindings.universal.next_revert_block) {
+            if self.context_mgr.active() == ContextId::Files {
+                self.diff_view.select_next_revert_hunk();
+                self.center_selected_revert_block();
+            }
+            return Ok(());
+        }
+        if matches_key(key, &keybindings.universal.prev_revert_block) {
+            if self.context_mgr.active() == ContextId::Files {
+                self.diff_view.select_prev_revert_hunk();
+                self.center_selected_revert_block();
+            }
+            return Ok(());
+        }
+        if matches_key(key, &keybindings.universal.revert_block) {
+            if self.context_mgr.active() == ContextId::Files {
+                let hunk_idx = self
+                    .diff_view
+                    .selected_revert_hunk
+                    .or(self.diff_view.hovered_revert_hunk);
+                if let Some(hunk_idx) = hunk_idx {
+                    self.diff_view.selected_revert_hunk = Some(hunk_idx);
+                    if let Err(err) = self.revert_selected_file_hunk(hunk_idx) {
+                        self.popup = PopupState::Message {
+                            title: "Revert block failed".to_string(),
+                            message: format!("{}", err),
+                            kind: MessageKind::Error,
+                        };
+                    }
+                }
+            }
+            return Ok(());
+        }
+        if matches_key(key, &keybindings.universal.undo_revert_block) {
+            if self.context_mgr.active() == ContextId::Files
+                && !self.diff_view.revert_undo_stack.is_empty()
+            {
+                if let Err(err) = self.undo_last_revert_block() {
+                    self.popup = PopupState::Message {
+                        title: "Undo revert failed".to_string(),
+                        message: format!("{}", err),
+                        kind: MessageKind::Error,
+                    };
+                }
+            }
+            return Ok(());
+        }
+
         // Toggle command log (;)
         if key.code == KeyCode::Char(';') {
             self.show_command_log = !self.show_command_log;
@@ -2018,9 +2066,11 @@ impl Gui {
         }
 
         match key.code {
-            // Escape: clear search first, then unfocus diff
+            // Escape: clear revert-hunk selection first, then search, then unfocus diff
             KeyCode::Esc => {
-                if !self.diff_view.search_query.is_empty() {
+                if self.diff_view.selected_revert_hunk.is_some() {
+                    self.diff_view.selected_revert_hunk = None;
+                } else if !self.diff_view.search_query.is_empty() {
                     self.diff_view.clear_search();
                 } else {
                     self.diff_focused = false;
@@ -3263,6 +3313,10 @@ impl Gui {
                     HelpEntry { key: kb.universal.edit.clone(), description: "Open in editor".into() },
                     HelpEntry { key: kb.universal.open_file.clone(), description: "Open in default program".into() },
                     HelpEntry { key: "y".into(), description: "Copy to clipboard menu".into() },
+                    HelpEntry { key: kb.universal.next_revert_block.clone(), description: "Next revert block in diff".into() },
+                    HelpEntry { key: kb.universal.prev_revert_block.clone(), description: "Previous revert block in diff".into() },
+                    HelpEntry { key: kb.universal.revert_block.clone(), description: "Revert selected block".into() },
+                    HelpEntry { key: kb.universal.undo_revert_block.clone(), description: "Undo last revert (session)".into() },
                 ],
             },
             ContextId::Worktrees => HelpSection {
@@ -3451,6 +3505,21 @@ impl Gui {
                 HelpEntry { key: "PgUp/PgDn".into(), description: "Page up / down".into() },
                 HelpEntry { key: "/".into(), description: "Search in diff".into() },
                 HelpEntry { key: "n/N".into(), description: "Next / previous search match".into() },
+                HelpEntry { key: "<c-j>/<c-k>".into(), description: "Cycle next / previous revert block (Files)".into() },
+                HelpEntry { key: "<enter>".into(), description: "Revert selected block (Files)".into() },
+                HelpEntry { key: "click 󰧛".into(), description: "Click revert icon to revert that block".into() },
+                HelpEntry {
+                    key: "u".into(),
+                    description: if self.diff_view.revert_undo_stack.is_empty() {
+                        "Undo last revert (nothing to undo)".into()
+                    } else {
+                        format!(
+                            "Undo last revert ({}/{})",
+                            self.diff_view.revert_undo_stack.len(),
+                            self.diff_view.revert_undo_high_water,
+                        )
+                    },
+                },
                 HelpEntry { key: "e".into(), description: "Edit file at line".into() },
                 HelpEntry { key: "o".into(), description: "Open file in default program".into() },
                 HelpEntry { key: "y".into(), description: "Copy selected text".into() },
@@ -4302,6 +4371,15 @@ impl Gui {
         let main_panel = self.compute_main_panel_rect();
         let pl = DiffPanelLayout::compute(main_panel, &self.diff_view);
 
+        // Track mouse hover over the revert-block marker (for tooltip).
+        if !self.diff_mode.active {
+            let new_hover =
+                self.revert_hunk_at_position(main_panel, &pl, mouse.column, mouse.row);
+            if self.diff_view.hovered_revert_hunk != new_hover {
+                self.diff_view.hovered_revert_hunk = new_hover;
+            }
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let in_main = main_panel.x <= mouse.column
@@ -4315,6 +4393,10 @@ impl Gui {
                 let full_sidebar = self.screen_mode == ScreenMode::Full && !self.diff_focused;
 
                 if in_main && !self.diff_view.is_empty() && !full_sidebar {
+                    if self.try_handle_revert_block_click(main_panel, pl, mouse.column, mouse.row) {
+                        self.diff_focused = true;
+                        return;
+                    }
                     if let Some(panel) = pl.panel_at_x(mouse.column) {
                         self.diff_view.selection = Some(TextSelection {
                             panel,
@@ -4649,6 +4731,10 @@ impl Gui {
                 // Check if click is in the diff panel — start text selection
                 if rect_contains(diff_rect, col, row) && !self.diff_view.is_empty() {
                     let pl = DiffPanelLayout::compute(diff_rect, &self.diff_view);
+                    if self.try_handle_revert_block_click(diff_rect, pl, col, row) {
+                        self.diff_mode.focus = DiffModeFocus::DiffExploration;
+                        return;
+                    }
                     if let Some(panel) = pl.panel_at_x(col) {
                         self.diff_view.selection = Some(TextSelection {
                             panel,
@@ -4944,6 +5030,161 @@ impl Gui {
     /// Compute the exact main panel Rect using the real layout engine.
     fn compute_main_panel_rect(&self) -> ratatui::layout::Rect {
         self.compute_current_frame_layout().main_panel
+    }
+
+    fn revert_hunk_at_position(
+        &self,
+        panel_rect: ratatui::layout::Rect,
+        layout: &DiffPanelLayout,
+        col: u16,
+        row: u16,
+    ) -> Option<usize> {
+        if self.context_mgr.active() != ContextId::Files {
+            return None;
+        }
+        if self.diff_view.wrap || self.diff_view.is_empty() {
+            return None;
+        }
+        if !rect_contains(panel_rect, col, row) {
+            return None;
+        }
+        let divider_x = layout.divider_x()?;
+        if col != divider_x {
+            return None;
+        }
+        let line_idx = self.diff_view.line_index_at_row(row, layout)?;
+        self.diff_view.hunk_index_for_start_line(line_idx)
+    }
+
+    fn try_handle_revert_block_click(
+        &mut self,
+        panel_rect: ratatui::layout::Rect,
+        layout: DiffPanelLayout,
+        col: u16,
+        row: u16,
+    ) -> bool {
+        if self.diff_mode.active {
+            return false;
+        }
+        let Some(hunk_idx) = self.revert_hunk_at_position(panel_rect, &layout, col, row) else {
+            return false;
+        };
+        self.diff_view.selected_revert_hunk = Some(hunk_idx);
+        if let Err(err) = self.revert_selected_file_hunk(hunk_idx) {
+            self.popup = PopupState::Message {
+                title: "Revert block failed".to_string(),
+                message: format!("{}", err),
+                kind: MessageKind::Error,
+            };
+        }
+        true
+    }
+
+    fn revert_selected_file_hunk(&mut self, hunk_idx: usize) -> Result<()> {
+        let Some(file_idx) = self.selected_file_index() else {
+            return Ok(());
+        };
+
+        let model = self.model.lock().unwrap();
+        let Some(file) = model.files.get(file_idx) else {
+            return Ok(());
+        };
+
+        if !file.has_unstaged_changes {
+            self.popup = PopupState::Message {
+                title: "Revert block".to_string(),
+                message: "Block revert is available only for unstaged changes.".to_string(),
+                kind: MessageKind::Info,
+            };
+            return Ok(());
+        }
+
+        let file_name = file.name.clone();
+        drop(model);
+
+        let Some((want_old, want_new)) = self.diff_view.visual_block_line_ranges(hunk_idx)
+        else {
+            return Ok(());
+        };
+        if want_old.is_none() && want_new.is_none() {
+            return Ok(());
+        }
+
+        let diff = self.git.diff_file(&file_name)?;
+        if diff.is_empty() {
+            return Ok(());
+        }
+
+        // Snapshot the working-tree file before reverting so the user can undo
+        // (`u`) within this session. Only keep the snapshot if the revert
+        // actually succeeds; otherwise we'd leak unrelated state into the stack.
+        let abs_path = self.git.repo_path().join(&file_name);
+        let pre_bytes = std::fs::read(&abs_path).ok();
+
+        self.git
+            .revert_visual_block_in_worktree(&file_name, &diff, want_old, want_new)?;
+
+        if let Some(bytes) = pre_bytes {
+            let stack = &mut self.diff_view.revert_undo_stack;
+            if stack.len() >= crate::pager::side_by_side::REVERT_UNDO_STACK_CAP {
+                stack.remove(0);
+            }
+            stack.push(crate::pager::side_by_side::RevertUndoEntry {
+                file_path: file_name.clone(),
+                pre_revert_bytes: bytes,
+            });
+            self.diff_view.revert_undo_high_water =
+                self.diff_view.revert_undo_high_water.max(stack.len());
+        }
+
+        self.diff_view.selection = None;
+        self.needs_files_refresh = true;
+        self.needs_diff_refresh = true;
+        Ok(())
+    }
+
+    fn undo_last_revert_block(&mut self) -> Result<()> {
+        let Some(entry) = self.diff_view.revert_undo_stack.pop() else {
+            return Ok(());
+        };
+        let abs_path = self.git.repo_path().join(&entry.file_path);
+        std::fs::write(&abs_path, &entry.pre_revert_bytes).with_context(|| {
+            format!("failed to restore {}", entry.file_path)
+        })?;
+        if self.diff_view.revert_undo_stack.is_empty() {
+            self.diff_view.revert_undo_high_water = 0;
+        }
+        self.needs_files_refresh = true;
+        self.needs_diff_refresh = true;
+        Ok(())
+    }
+
+    /// Keep the selected revert marker around the vertical middle of the visible diff area.
+    fn center_selected_revert_block(&mut self) {
+        let Some(sel) = self.diff_view.selected_revert_hunk else {
+            return;
+        };
+        let Some(&line_idx) = self.diff_view.hunk_starts.get(sel) else {
+            return;
+        };
+
+        let main_panel = self.compute_main_panel_rect();
+        let pl = DiffPanelLayout::compute(main_panel, &self.diff_view);
+        let visible_rows = (pl.inner_end_y.saturating_sub(pl.inner_y)) as usize;
+        if visible_rows == 0 {
+            return;
+        }
+
+        let scroll = self.diff_view.scroll_offset;
+        // Already in viewport? Don't scroll. The marker glyph sits on the
+        // hunk's first row, so only that row needs to be visible.
+        if line_idx >= scroll && line_idx < scroll + visible_rows {
+            return;
+        }
+
+        let desired = line_idx.saturating_sub(visible_rows / 2);
+        let max_start = self.diff_view.lines.len().saturating_sub(visible_rows);
+        self.diff_view.scroll_offset = desired.min(max_start);
     }
 
     /// Approximate visible height of the active sidebar panel (inner area minus borders).

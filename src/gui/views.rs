@@ -98,7 +98,8 @@ pub fn render(
         if diff_focused {
             // Diff is focused: show diff fullscreen
             if !diff_view.is_empty() {
-                side_by_side::render_diff(frame, fl.main_panel, diff_view, theme, true, diff_loading_show);
+                let show_revert_markers = ctx_mgr.active() == ContextId::Files;
+                side_by_side::render_diff(frame, fl.main_panel, diff_view, theme, true, diff_loading_show, show_revert_markers);
                 side_by_side::render_diff_search_highlights(frame, fl.main_panel, diff_view, theme);
                 side_by_side::render_diff_search_bar(frame, fl.main_panel, diff_view, theme);
             } else if diff_loading {
@@ -242,7 +243,7 @@ pub fn render(
                 commit_details_scroll,
             );
         }
-        render_status_bar(frame, fl.status_bar, ctx_mgr, diff_view, theme, model);
+        render_status_bar(frame, fl.status_bar, ctx_mgr, diff_view, theme, model, diff_focused);
         // Render text selection highlight overlay and tooltip (must be before popup)
         render_selection_overlay(frame, diff_view, fl.main_panel, theme);
         if *popup != PopupState::None {
@@ -584,7 +585,8 @@ pub fn render(
             .border_style(theme.active_border);
         render_status_main(frame, fl.main_panel, model, config, theme, status_block);
     } else if !diff_view.is_empty() {
-        side_by_side::render_diff(frame, fl.main_panel, diff_view, theme, diff_focused, diff_loading_show);
+        let show_revert_markers = ctx_mgr.active() == ContextId::Files;
+        side_by_side::render_diff(frame, fl.main_panel, diff_view, theme, diff_focused, diff_loading_show, show_revert_markers);
         side_by_side::render_diff_search_highlights(frame, fl.main_panel, diff_view, theme);
         side_by_side::render_diff_search_bar(frame, fl.main_panel, diff_view, theme);
     } else if diff_loading {
@@ -685,7 +687,7 @@ pub fn render(
             frame.render_widget(bar, fl.status_bar);
         }
     } else {
-        render_status_bar(frame, fl.status_bar, ctx_mgr, diff_view, theme, model);
+        render_status_bar(frame, fl.status_bar, ctx_mgr, diff_view, theme, model, diff_focused);
     }
 
     // Render text selection highlight overlay and tooltip
@@ -1347,8 +1349,10 @@ fn render_status_bar(
     diff_view: &DiffViewState,
     _theme: &crate::config::Theme,
     model: &Model,
+    diff_focused: bool,
 ) {
     let mut hints: Vec<(&str, &str)> = Vec::new();
+    let mut emphasized: Vec<&str> = Vec::new();
 
     // When in a special state (rebasing/merging/cherry-picking), show those options prominently
     if model.is_rebasing {
@@ -1359,53 +1363,78 @@ fn render_status_bar(
         hints.push(("m", "continue/abort cherry-pick"));
     }
 
-    // Context-specific hints
-    match ctx_mgr.active() {
-        ContextId::Files => {
-            hints.extend([("c", "commit"), ("a", "stage all"), ("space", "toggle"), ("d", "discard"), ("e", "edit"), ("o", "open")]);
+    if diff_focused && !diff_view.is_empty() {
+        // Diff-focused hint set: only the diff-relevant keys, kept tight.
+        // Revert-related keys are grouped together at the front so users see
+        // enter right next to its cycle keys. enter itself only appears when a
+        // hunk is actually selected (pressing it otherwise is a no-op).
+        if ctx_mgr.active() == ContextId::Files {
+            let has_selection = diff_view.selected_revert_hunk.is_some();
+            let has_undo = !diff_view.revert_undo_stack.is_empty();
+            let mut idx = 0;
+            if has_selection {
+                hints.insert(idx, ("enter", "revert hunk"));
+                emphasized.push("enter");
+                idx += 1;
+            }
+            hints.insert(idx, ("c-j/c-k", "cycle revert"));
+            idx += 1;
+            if has_undo {
+                hints.insert(idx, ("u", "undo revert"));
+            }
         }
-        ContextId::Branches => {
-            hints.extend([("space", "checkout"), ("n", "new"), ("d", "delete"), ("M", "merge"), ("r", "rebase")]);
+        hints.push(("{/}", "prev/next hunk"));
+        hints.push(("[/]", "side view"));
+    } else {
+        // Sidebar-focused: context-specific hints.
+        match ctx_mgr.active() {
+            ContextId::Files => {
+                hints.extend([("c", "commit"), ("a", "stage all"), ("space", "toggle"), ("d", "discard"), ("e", "edit"), ("o", "open")]);
+            }
+            ContextId::Branches => {
+                hints.extend([("space", "checkout"), ("n", "new"), ("d", "delete"), ("M", "merge"), ("r", "rebase")]);
+            }
+            ContextId::Commits => {
+                hints.extend([("r", "reword"), ("g", "reset"), ("t", "revert"), ("C", "cherry-pick"), ("ctrl+l", "filter branch")]);
+            }
+            ContextId::Stash => {
+                hints.extend([("g", "pop"), ("space", "apply"), ("d", "drop")]);
+            }
+            ContextId::Remotes => {
+                hints.extend([("enter", "branches"), ("f", "fetch"), ("P", "push"), ("p", "pull")]);
+            }
+            ContextId::RemoteBranches => {
+                hints.extend([("enter", "commits"), ("space", "checkout"), ("M", "merge"), ("r", "rebase"), ("d", "delete")]);
+            }
+            ContextId::Tags => {
+                hints.extend([("n", "new"), ("d", "delete"), ("P", "push")]);
+            }
+            ContextId::Worktrees => {
+                hints.extend([("space", "switch"), ("n", "new"), ("d", "remove")]);
+            }
+            ContextId::Submodules => {
+                hints.extend([("space", "update"), ("a", "add"), ("d", "remove"), ("e", "enter")]);
+            }
+            _ => {}
         }
-        ContextId::Commits => {
-            hints.extend([("r", "reword"), ("g", "reset"), ("t", "revert"), ("C", "cherry-pick"), ("ctrl+l", "filter branch")]);
+        if !diff_view.is_empty() {
+            hints.push(("J/K", "scroll diff"));
+            hints.push(("{/}", "hunks"));
         }
-        ContextId::Stash => {
-            hints.extend([("g", "pop"), ("space", "apply"), ("d", "drop")]);
-        }
-        ContextId::Remotes => {
-            hints.extend([("enter", "branches"), ("f", "fetch"), ("P", "push"), ("p", "pull")]);
-        }
-        ContextId::RemoteBranches => {
-            hints.extend([("enter", "commits"), ("space", "checkout"), ("M", "merge"), ("r", "rebase"), ("d", "delete")]);
-        }
-        ContextId::Tags => {
-            hints.extend([("n", "new"), ("d", "delete"), ("P", "push")]);
-        }
-        ContextId::Worktrees => {
-            hints.extend([("space", "switch"), ("n", "new"), ("d", "remove")]);
-        }
-        ContextId::Submodules => {
-            hints.extend([("space", "update"), ("a", "add"), ("d", "remove"), ("e", "enter")]);
-        }
-        _ => {}
     }
 
-    // Global hints
+    // Global hints (always last)
     hints.extend([("q", "quit"), ("tab/1-5", "panels"), ("j/k", "nav")]);
 
-    // Diff scroll info
-    if !diff_view.is_empty() {
-        hints.extend([("J/K", "scroll diff"), ("{/}", "hunks")]);
-    }
-
     let key_style = Style::default().fg(_theme.text).add_modifier(ratatui::style::Modifier::BOLD);
+    let key_emphasis_style = Style::default().fg(_theme.accent).add_modifier(ratatui::style::Modifier::BOLD);
     let desc_style = Style::default().fg(_theme.text_dimmed);
     let spans: Vec<Span> = hints
         .iter()
         .flat_map(|(key, desc)| {
+            let style = if emphasized.contains(key) { key_emphasis_style } else { key_style };
             vec![
-                Span::styled(format!(" {} ", key), key_style),
+                Span::styled(format!(" {} ", key), style),
                 Span::styled(format!("{} ", desc), desc_style),
             ]
         })

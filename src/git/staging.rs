@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 
 use super::GitCommands;
 
@@ -77,6 +77,148 @@ impl GitCommands {
         };
         Ok(self.parse_diff_hunks(&diff))
     }
+
+    /// Reverse-apply only the lines of a single visual change block to the
+    /// working tree copy of `file_path`. `want_old` and `want_new` are the
+    /// inclusive old-file and new-file line-number ranges the visual block
+    /// covers; either may be `None` for pure insertion or pure deletion.
+    /// The block typically lives inside one of the `@@` hunks of
+    /// `unified_diff`, but may be narrower than that `@@` — visual blocks
+    /// can be split by 1–3 lines of context within a single `@@`.
+    pub fn revert_visual_block_in_worktree(
+        &self,
+        file_path: &str,
+        unified_diff: &str,
+        want_old: Option<(usize, usize)>,
+        want_new: Option<(usize, usize)>,
+    ) -> Result<()> {
+        let patch = build_visual_block_patch(file_path, unified_diff, want_old, want_new)?;
+        self.git()
+            .args(&["apply", "--reverse", "--unidiff-zero", "-"])
+            .stdin(patch)
+            .run_expecting_success()
+            .with_context(|| format!("failed to revert hunk in {}", file_path))?;
+        Ok(())
+    }
+}
+
+fn build_visual_block_patch(
+    file_path: &str,
+    unified_diff: &str,
+    want_old: Option<(usize, usize)>,
+    want_new: Option<(usize, usize)>,
+) -> Result<String> {
+    if want_old.is_none() && want_new.is_none() {
+        bail!("empty visual block");
+    }
+
+    let mut emitted: Vec<String> = Vec::new();
+    let mut anchor_old: Option<usize> = None;
+    let mut anchor_new: Option<usize> = None;
+    let mut old_count = 0usize;
+    let mut new_count = 0usize;
+
+    let mut in_hunk = false;
+    let mut old_counter = 0usize;
+    let mut new_counter = 0usize;
+    let mut last_emitted = false;
+
+    for line in unified_diff.lines() {
+        if line.starts_with("@@") {
+            let (os, _, ns, _) = parse_hunk_header(line);
+            old_counter = os;
+            new_counter = ns;
+            in_hunk = true;
+            last_emitted = false;
+            continue;
+        }
+        if !in_hunk {
+            continue;
+        }
+        // A new file's preamble can interleave between hunks of multi-file
+        // diffs; abandon the current hunk until we see a fresh `@@`.
+        if line.starts_with("diff ")
+            || line.starts_with("--- ")
+            || line.starts_with("+++ ")
+            || line.starts_with("index ")
+            || line.starts_with("similarity ")
+            || line.starts_with("rename ")
+            || line.starts_with("new file ")
+            || line.starts_with("deleted file ")
+            || line.starts_with("Binary ")
+        {
+            in_hunk = false;
+            last_emitted = false;
+            continue;
+        }
+        // A "\ No newline at end of file" marker refers to the immediately
+        // preceding diff line. Propagate it only when that line was emitted.
+        if line.starts_with('\\') {
+            if last_emitted {
+                emitted.push(line.to_string());
+            }
+            continue;
+        }
+        if line.starts_with('-') {
+            let in_range =
+                want_old.is_some_and(|(lo, hi)| old_counter >= lo && old_counter <= hi);
+            if in_range {
+                if anchor_old.is_none() {
+                    anchor_old = Some(old_counter);
+                }
+                if anchor_new.is_none() {
+                    anchor_new = Some(new_counter);
+                }
+                emitted.push(line.to_string());
+                old_count += 1;
+                last_emitted = true;
+            } else {
+                last_emitted = false;
+            }
+            old_counter += 1;
+        } else if line.starts_with('+') {
+            let in_range =
+                want_new.is_some_and(|(lo, hi)| new_counter >= lo && new_counter <= hi);
+            if in_range {
+                if anchor_old.is_none() {
+                    anchor_old = Some(old_counter);
+                }
+                if anchor_new.is_none() {
+                    anchor_new = Some(new_counter);
+                }
+                emitted.push(line.to_string());
+                new_count += 1;
+                last_emitted = true;
+            } else {
+                last_emitted = false;
+            }
+            new_counter += 1;
+        } else if line.starts_with(' ') || line.is_empty() {
+            old_counter += 1;
+            new_counter += 1;
+            last_emitted = false;
+        }
+    }
+
+    if emitted.is_empty() {
+        bail!("visual block matched no diff lines");
+    }
+
+    let old_start = anchor_old.unwrap_or(0);
+    let new_start = anchor_new.unwrap_or(0);
+
+    let mut patch = String::new();
+    patch.push_str(&format!("--- a/{}\n", file_path));
+    patch.push_str(&format!("+++ b/{}\n", file_path));
+    patch.push_str(&format!(
+        "@@ -{},{} +{},{} @@\n",
+        old_start, old_count, new_start, new_count
+    ));
+    for line in &emitted {
+        patch.push_str(line);
+        patch.push('\n');
+    }
+    Ok(patch)
 }
 
 fn parse_hunk_header(header: &str) -> (usize, usize, usize, usize) {
