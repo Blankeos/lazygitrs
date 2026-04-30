@@ -251,6 +251,8 @@ pub struct DiffViewState {
     pub search_textarea: Option<tui_textarea::TextArea<'static>>,
     /// Currently selected revert-button hunk index (for keyboard cycling).
     pub selected_revert_hunk: Option<usize>,
+    /// Hunk index currently under the mouse cursor (for tooltip rendering).
+    pub hovered_revert_hunk: Option<usize>,
 }
 
 impl Default for DiffViewState {
@@ -276,6 +278,7 @@ impl Default for DiffViewState {
             search_match_idx: 0,
             search_textarea: None,
             selected_revert_hunk: None,
+            hovered_revert_hunk: None,
         }
     }
 }
@@ -1034,6 +1037,8 @@ pub fn render_diff(
             .width
             .saturating_sub(gutter_width * 2 + panel_width + divider_width);
 
+        let mut hover_tooltip_y: Option<u16> = None;
+
         let mut row = 0usize;
         for (idx_offset, diff_line) in state.lines[state.scroll_offset..].iter().enumerate() {
             if row >= visible_height {
@@ -1142,9 +1147,13 @@ pub fn render_diff(
                         && !state.wrap
                         && chunk_idx == 0
                         && state.is_hunk_start_line(line_idx);
+                    let marker_hunk_idx = if show_marker {
+                        state.hunk_index_for_start_line(line_idx)
+                    } else {
+                        None
+                    };
                     let (divider_char, marker_style) = if show_marker {
-                        let hunk_idx = state.hunk_index_for_start_line(line_idx);
-                        let is_selected = hunk_idx == state.selected_revert_hunk;
+                        let is_selected = marker_hunk_idx == state.selected_revert_hunk;
                         let style = if is_selected {
                             Style::default()
                                 .fg(theme.accent)
@@ -1160,6 +1169,12 @@ pub fn render_diff(
                     };
                     buf_write_str(buf, div_x, y, "  ", divider_style, divider_width);
                     buf_write_str(buf, div_x, y, divider_char, marker_style, divider_width);
+                    if show_marker
+                        && marker_hunk_idx.is_some()
+                        && marker_hunk_idx == state.hovered_revert_hunk
+                    {
+                        hover_tooltip_y = Some(y);
+                    }
 
                     // Right gutter + content
                     buf_write_str(buf, right_gutter_x, y, &right_gutter_text, right_gutter_style, gutter_width);
@@ -1207,9 +1222,13 @@ pub fn render_diff(
                 // Divider or revert marker.
                 let show_marker =
                     show_revert_markers && !state.wrap && state.is_hunk_start_line(line_idx);
+                let marker_hunk_idx = if show_marker {
+                    state.hunk_index_for_start_line(line_idx)
+                } else {
+                    None
+                };
                 let (divider_char, marker_style) = if show_marker {
-                    let hunk_idx = state.hunk_index_for_start_line(line_idx);
-                    let is_selected = hunk_idx == state.selected_revert_hunk;
+                    let is_selected = marker_hunk_idx == state.selected_revert_hunk;
                     let style = if is_selected {
                         Style::default()
                             .fg(theme.accent)
@@ -1225,6 +1244,12 @@ pub fn render_diff(
                 };
                 buf_write_str(buf, div_x, y, "  ", divider_style, divider_width);
                 buf_write_str(buf, div_x, y, divider_char, marker_style, divider_width);
+                if show_marker
+                    && marker_hunk_idx.is_some()
+                    && marker_hunk_idx == state.hovered_revert_hunk
+                {
+                    hover_tooltip_y = Some(y);
+                }
 
                 // Right gutter
                 buf_write_str(buf, right_gutter_x, y, &right_num, right_gutter_style, gutter_width);
@@ -1252,6 +1277,46 @@ pub fn render_diff(
 
                 row += 1;
             }
+        }
+
+        if let Some(y) = hover_tooltip_y {
+            render_revert_tooltip(buf, div_x + divider_width, y, right_content_width + gutter_width, theme);
+        }
+    }
+}
+
+fn render_revert_tooltip(buf: &mut Buffer, x: u16, y: u16, max_width: u16, theme: &Theme) {
+    let tip_style = Style::default()
+        .bg(theme.selected_bg)
+        .fg(theme.text_strong);
+    let key_style = Style::default()
+        .bg(theme.selected_bg)
+        .fg(theme.accent_secondary)
+        .add_modifier(Modifier::BOLD);
+
+    let parts: [(&str, Style); 3] = [
+        (" ", tip_style),
+        ("enter", key_style),
+        (" Revert hunk ", tip_style),
+    ];
+
+    let buf_area = buf.area();
+    if y < buf_area.y || y >= buf_area.y + buf_area.height {
+        return;
+    }
+    let max_x = (x + max_width).min(buf_area.x + buf_area.width);
+
+    let mut col = x;
+    for (text, style) in &parts {
+        for ch in text.chars() {
+            if col >= max_x {
+                return;
+            }
+            if let Some(cell) = buf.cell_mut((col, y)) {
+                cell.set_char(ch);
+                cell.set_style(*style);
+            }
+            col += 1;
         }
     }
 }

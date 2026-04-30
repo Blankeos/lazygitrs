@@ -4329,6 +4329,15 @@ impl Gui {
         let main_panel = self.compute_main_panel_rect();
         let pl = DiffPanelLayout::compute(main_panel, &self.diff_view);
 
+        // Track mouse hover over the revert-block marker (for tooltip).
+        if !self.diff_mode.active {
+            let new_hover =
+                self.revert_hunk_at_position(main_panel, &pl, mouse.column, mouse.row);
+            if self.diff_view.hovered_revert_hunk != new_hover {
+                self.diff_view.hovered_revert_hunk = new_hover;
+            }
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 let in_main = main_panel.x <= mouse.column
@@ -4981,6 +4990,30 @@ impl Gui {
         self.compute_current_frame_layout().main_panel
     }
 
+    fn revert_hunk_at_position(
+        &self,
+        panel_rect: ratatui::layout::Rect,
+        layout: &DiffPanelLayout,
+        col: u16,
+        row: u16,
+    ) -> Option<usize> {
+        if self.context_mgr.active() != ContextId::Files {
+            return None;
+        }
+        if self.diff_view.wrap || self.diff_view.is_empty() {
+            return None;
+        }
+        if !rect_contains(panel_rect, col, row) {
+            return None;
+        }
+        let divider_x = layout.divider_x()?;
+        if col != divider_x {
+            return None;
+        }
+        let line_idx = self.diff_view.line_index_at_row(row, layout)?;
+        self.diff_view.hunk_index_for_start_line(line_idx)
+    }
+
     fn try_handle_revert_block_click(
         &mut self,
         panel_rect: ratatui::layout::Rect,
@@ -4991,25 +5024,7 @@ impl Gui {
         if self.diff_mode.active {
             return false;
         }
-        if self.context_mgr.active() != ContextId::Files {
-            return false;
-        }
-        if self.diff_view.wrap || self.diff_view.is_empty() {
-            return false;
-        }
-        if !rect_contains(panel_rect, col, row) {
-            return false;
-        }
-        let Some(divider_x) = layout.divider_x() else {
-            return false;
-        };
-        if col != divider_x {
-            return false;
-        }
-        let Some(line_idx) = self.diff_view.line_index_at_row(row, &layout) else {
-            return false;
-        };
-        let Some(hunk_idx) = self.diff_view.hunk_index_for_start_line(line_idx) else {
+        let Some(hunk_idx) = self.revert_hunk_at_position(panel_rect, &layout, col, row) else {
             return false;
         };
         self.diff_view.selected_revert_hunk = Some(hunk_idx);
