@@ -120,21 +120,6 @@ impl GitCommands {
         Ok(())
     }
 
-    /// Squash a commit into its parent.
-    pub fn squash_commit(&self, commit_hash: &str) -> Result<()> {
-        self.rebase_interactive_action(commit_hash, RebaseAction::Squash)
-    }
-
-    /// Fixup a commit into its parent (discard its message).
-    pub fn fixup_commit(&self, commit_hash: &str) -> Result<()> {
-        self.rebase_interactive_action(commit_hash, RebaseAction::Fixup)
-    }
-
-    /// Drop a commit from history.
-    pub fn drop_commit(&self, commit_hash: &str) -> Result<()> {
-        self.rebase_interactive_action(commit_hash, RebaseAction::Drop)
-    }
-
     /// Reword a non-HEAD commit via interactive rebase.
     pub fn reword_commit_rebase(&self, commit_hash: &str, new_message: &str) -> Result<()> {
         let parent = self.commit_parent(commit_hash)?;

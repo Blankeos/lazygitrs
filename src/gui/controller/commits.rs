@@ -1,8 +1,11 @@
+use std::collections::HashSet;
+
 use anyhow::Result;
 use crossterm::event::KeyEvent;
 
 use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
+use crate::git::rebase::RebaseAction;
 use crate::gui::popup::{MenuItem, PopupState, make_textarea};
 use crate::gui::Gui;
 use crate::os::platform::Platform;
@@ -96,6 +99,16 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
     // Checkout commit
     if matches_key(key, &keybindings.commits.checkout_commit) {
         return checkout_commit(gui);
+    }
+
+    // Drop commit(s) — opens interactive rebase planner with Drop pre-marked
+    if key.code == crossterm::event::KeyCode::Char('d') {
+        return apply_action_to_selection(gui, RebaseAction::Drop);
+    }
+
+    // Edit commit(s) — opens interactive rebase planner with Edit pre-marked
+    if key.code == crossterm::event::KeyCode::Char('e') {
+        return apply_action_to_selection(gui, RebaseAction::Edit);
     }
 
     // Open commit in browser
@@ -392,71 +405,71 @@ fn tag_commit(gui: &mut Gui) -> Result<()> {
 }
 
 fn squash_commit(gui: &mut Gui) -> Result<()> {
-    let selected = gui.context_mgr.selected_active();
-    if selected == 0 {
-        return Ok(()); // Can't squash HEAD into nothing
-    }
-    let model = gui.model.lock().unwrap();
-    if let Some(commit) = model.commits.get(selected) {
-        let hash = commit.hash.clone();
-        let short = commit.short_hash().to_string();
-        drop(model);
-
-        gui.popup = PopupState::Confirm {
-            title: "Squash".to_string(),
-            message: format!("Squash commit {} into its parent?", short),
-            on_confirm: Box::new(move |gui| {
-                gui.git.squash_commit(&hash)?;
-                gui.needs_refresh = true;
-                Ok(())
-            }),
-        };
-    }
-    Ok(())
+    apply_action_to_selection(gui, RebaseAction::Squash)
 }
 
 fn fixup_commit(gui: &mut Gui) -> Result<()> {
-    let selected = gui.context_mgr.selected_active();
-    if selected == 0 {
-        return Ok(());
-    }
-    let model = gui.model.lock().unwrap();
-    if let Some(commit) = model.commits.get(selected) {
-        let hash = commit.hash.clone();
-        let short = commit.short_hash().to_string();
-        drop(model);
-
-        gui.popup = PopupState::Confirm {
-            title: "Fixup".to_string(),
-            message: format!("Fixup commit {} into its parent?", short),
-            on_confirm: Box::new(move |gui| {
-                gui.git.fixup_commit(&hash)?;
-                gui.needs_refresh = true;
-                Ok(())
-            }),
-        };
-    }
-    Ok(())
+    apply_action_to_selection(gui, RebaseAction::Fixup)
 }
 
 fn drop_commit(gui: &mut Gui) -> Result<()> {
-    let selected = gui.context_mgr.selected_active();
-    let model = gui.model.lock().unwrap();
-    if let Some(commit) = model.commits.get(selected) {
-        let hash = commit.hash.clone();
-        let short = commit.short_hash().to_string();
-        drop(model);
+    apply_action_to_selection(gui, RebaseAction::Drop)
+}
 
-        gui.popup = PopupState::Confirm {
-            title: "Drop commit".to_string(),
-            message: format!("Drop commit {} from history?", short),
-            on_confirm: Box::new(move |gui| {
-                gui.git.drop_commit(&hash)?;
-                gui.needs_refresh = true;
-                Ok(())
-            }),
-        };
+/// Open the Interactive Rebase planner with the user's current commit
+/// selection pre-marked with `action`. Selection comes from range-select
+/// (`v`) when active; otherwise it's just the focused commit. The rebase
+/// base is the parent of the oldest selected commit, so unselected newer
+/// commits are kept as `pick`.
+fn apply_action_to_selection(gui: &mut Gui, action: RebaseAction) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let (lo, hi) = if let Some(anchor) = gui.range_select_anchor {
+        (anchor.min(selected), anchor.max(selected))
+    } else {
+        (selected, selected)
+    };
+
+    let model = gui.model.lock().unwrap();
+
+    if model.commits.get(lo).is_none() {
+        return Ok(());
     }
+
+    let base_idx = hi + 1;
+    let base_commit = match model.commits.get(base_idx) {
+        Some(c) => c.clone(),
+        None => {
+            drop(model);
+            gui.popup = PopupState::Message {
+                title: "Interactive rebase".to_string(),
+                message: "Cannot rebase past the oldest visible commit.".to_string(),
+                kind: crate::gui::popup::MessageKind::Error,
+            };
+            return Ok(());
+        }
+    };
+
+    let commits_to_rebase: Vec<_> = model.commits[0..=hi].to_vec();
+    let branch_name = model.head_branch_name.clone();
+    let selected_hashes: HashSet<String> = model.commits[lo..=hi]
+        .iter()
+        .map(|c| c.hash.clone())
+        .collect();
+    drop(model);
+
+    gui.range_select_anchor = None;
+
+    gui.rebase_mode
+        .enter(branch_name, &base_commit, &commits_to_rebase);
+
+    for entry in gui.rebase_mode.entries.iter_mut() {
+        if selected_hashes.contains(&entry.hash) {
+            entry.action = action;
+        }
+    }
+
+    gui.rebase_mode.selected = lo;
+
     Ok(())
 }
 
