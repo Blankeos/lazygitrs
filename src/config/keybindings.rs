@@ -116,6 +116,8 @@ pub struct UniversalKeybinding {
     pub next_revert_block: String,
     #[serde(rename = "revertBlock")]
     pub revert_block: String,
+    #[serde(rename = "undoRevertBlock")]
+    pub undo_revert_block: String,
 }
 
 impl Default for UniversalKeybinding {
@@ -166,6 +168,7 @@ impl Default for UniversalKeybinding {
             prev_revert_block: "<c-k>".into(),
             next_revert_block: "<c-j>".into(),
             revert_block: "<enter>".into(),
+            undo_revert_block: "u".into(),
         }
     }
 }

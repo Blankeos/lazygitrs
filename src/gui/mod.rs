@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, MouseEvent};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, cursor};
@@ -2015,6 +2015,20 @@ impl Gui {
             }
             return Ok(());
         }
+        if matches_key(key, &keybindings.universal.undo_revert_block) {
+            if self.context_mgr.active() == ContextId::Files
+                && !self.diff_view.revert_undo_stack.is_empty()
+            {
+                if let Err(err) = self.undo_last_revert_block() {
+                    self.popup = PopupState::Message {
+                        title: "Undo revert failed".to_string(),
+                        message: format!("{}", err),
+                        kind: MessageKind::Error,
+                    };
+                }
+            }
+            return Ok(());
+        }
 
         // Toggle command log (;)
         if key.code == KeyCode::Char(';') {
@@ -3302,6 +3316,7 @@ impl Gui {
                     HelpEntry { key: kb.universal.next_revert_block.clone(), description: "Next revert block in diff".into() },
                     HelpEntry { key: kb.universal.prev_revert_block.clone(), description: "Previous revert block in diff".into() },
                     HelpEntry { key: kb.universal.revert_block.clone(), description: "Revert selected block".into() },
+                    HelpEntry { key: kb.universal.undo_revert_block.clone(), description: "Undo last revert (session)".into() },
                 ],
             },
             ContextId::Worktrees => HelpSection {
@@ -3493,6 +3508,18 @@ impl Gui {
                 HelpEntry { key: "<c-j>/<c-k>".into(), description: "Cycle next / previous revert block (Files)".into() },
                 HelpEntry { key: "<enter>".into(), description: "Revert selected block (Files)".into() },
                 HelpEntry { key: "click 󰧛".into(), description: "Click revert icon to revert that block".into() },
+                HelpEntry {
+                    key: "u".into(),
+                    description: if self.diff_view.revert_undo_stack.is_empty() {
+                        "Undo last revert (nothing to undo)".into()
+                    } else {
+                        format!(
+                            "Undo last revert ({}/{})",
+                            self.diff_view.revert_undo_stack.len(),
+                            self.diff_view.revert_undo_high_water,
+                        )
+                    },
+                },
                 HelpEntry { key: "e".into(), description: "Edit file at line".into() },
                 HelpEntry { key: "o".into(), description: "Open file in default program".into() },
                 HelpEntry { key: "y".into(), description: "Copy selected text".into() },
@@ -5088,9 +5115,45 @@ impl Gui {
             return Ok(());
         }
 
+        // Snapshot the working-tree file before reverting so the user can undo
+        // (`u`) within this session. Only keep the snapshot if the revert
+        // actually succeeds; otherwise we'd leak unrelated state into the stack.
+        let abs_path = self.git.repo_path().join(&file_name);
+        let pre_bytes = std::fs::read(&abs_path).ok();
+
         self.git
             .revert_visual_block_in_worktree(&file_name, &diff, want_old, want_new)?;
+
+        if let Some(bytes) = pre_bytes {
+            let stack = &mut self.diff_view.revert_undo_stack;
+            if stack.len() >= crate::pager::side_by_side::REVERT_UNDO_STACK_CAP {
+                stack.remove(0);
+            }
+            stack.push(crate::pager::side_by_side::RevertUndoEntry {
+                file_path: file_name.clone(),
+                pre_revert_bytes: bytes,
+            });
+            self.diff_view.revert_undo_high_water =
+                self.diff_view.revert_undo_high_water.max(stack.len());
+        }
+
         self.diff_view.selection = None;
+        self.needs_files_refresh = true;
+        self.needs_diff_refresh = true;
+        Ok(())
+    }
+
+    fn undo_last_revert_block(&mut self) -> Result<()> {
+        let Some(entry) = self.diff_view.revert_undo_stack.pop() else {
+            return Ok(());
+        };
+        let abs_path = self.git.repo_path().join(&entry.file_path);
+        std::fs::write(&abs_path, &entry.pre_revert_bytes).with_context(|| {
+            format!("failed to restore {}", entry.file_path)
+        })?;
+        if self.diff_view.revert_undo_stack.is_empty() {
+            self.diff_view.revert_undo_high_water = 0;
+        }
         self.needs_files_refresh = true;
         self.needs_diff_refresh = true;
         Ok(())

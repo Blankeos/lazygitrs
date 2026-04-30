@@ -1370,6 +1370,7 @@ fn render_status_bar(
         // hunk is actually selected (pressing it otherwise is a no-op).
         if ctx_mgr.active() == ContextId::Files {
             let has_selection = diff_view.selected_revert_hunk.is_some();
+            let has_undo = !diff_view.revert_undo_stack.is_empty();
             let mut idx = 0;
             if has_selection {
                 hints.insert(idx, ("enter", "revert hunk"));
@@ -1377,6 +1378,10 @@ fn render_status_bar(
                 idx += 1;
             }
             hints.insert(idx, ("c-j/c-k", "cycle revert"));
+            idx += 1;
+            if has_undo {
+                hints.insert(idx, ("u", "undo revert"));
+            }
         }
         hints.push(("{/}", "prev/next hunk"));
         hints.push(("[/]", "side view"));
