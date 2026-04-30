@@ -110,6 +110,10 @@ pub struct UniversalKeybinding {
     pub prev_screen_mode: String,
     #[serde(rename = "createPatchOptionsMenu")]
     pub create_patch_options_menu: String,
+    #[serde(rename = "prevRevertBlock")]
+    pub prev_revert_block: String,
+    #[serde(rename = "nextRevertBlock")]
+    pub next_revert_block: String,
 }
 
 impl Default for UniversalKeybinding {
@@ -157,6 +161,8 @@ impl Default for UniversalKeybinding {
             next_screen_mode: "+".into(),
             prev_screen_mode: "_".into(),
             create_patch_options_menu: "<c-p>".into(),
+            prev_revert_block: "<c-k>".into(),
+            next_revert_block: "<c-j>".into(),
         }
     }
 }

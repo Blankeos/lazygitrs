@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 
 use super::GitCommands;
 
@@ -76,6 +76,34 @@ impl GitCommands {
             self.diff_file(path)?
         };
         Ok(self.parse_diff_hunks(&diff))
+    }
+
+    /// Given a unified diff and a hunk index, reverse-apply that single hunk
+    /// to the working tree copy of `file_path`.
+    pub fn revert_hunk_in_worktree_from_unified_diff(
+        &self,
+        file_path: &str,
+        unified_diff: &str,
+        hunk_index: usize,
+    ) -> Result<()> {
+        let hunks = self.parse_diff_hunks(unified_diff);
+        let Some(hunk) = hunks.get(hunk_index) else {
+            bail!(
+                "hunk {} out of range ({} hunks)",
+                hunk_index + 1,
+                hunks.len()
+            );
+        };
+
+        let patch = build_patch(file_path, hunk);
+        self.git()
+            .args(&["apply", "--reverse", "--unidiff-zero", "-"])
+            .stdin(patch)
+            .run_expecting_success()
+            .with_context(|| {
+                format!("failed to revert hunk {} in {}", hunk_index + 1, file_path)
+            })?;
+        Ok(())
     }
 }
 

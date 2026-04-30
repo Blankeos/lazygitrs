@@ -98,7 +98,8 @@ pub fn render(
         if diff_focused {
             // Diff is focused: show diff fullscreen
             if !diff_view.is_empty() {
-                side_by_side::render_diff(frame, fl.main_panel, diff_view, theme, true, diff_loading_show);
+                let show_revert_markers = ctx_mgr.active() == ContextId::Files;
+                side_by_side::render_diff(frame, fl.main_panel, diff_view, theme, true, diff_loading_show, show_revert_markers);
                 side_by_side::render_diff_search_highlights(frame, fl.main_panel, diff_view, theme);
                 side_by_side::render_diff_search_bar(frame, fl.main_panel, diff_view, theme);
             } else if diff_loading {
@@ -584,7 +585,8 @@ pub fn render(
             .border_style(theme.active_border);
         render_status_main(frame, fl.main_panel, model, config, theme, status_block);
     } else if !diff_view.is_empty() {
-        side_by_side::render_diff(frame, fl.main_panel, diff_view, theme, diff_focused, diff_loading_show);
+        let show_revert_markers = ctx_mgr.active() == ContextId::Files;
+        side_by_side::render_diff(frame, fl.main_panel, diff_view, theme, diff_focused, diff_loading_show, show_revert_markers);
         side_by_side::render_diff_search_highlights(frame, fl.main_panel, diff_view, theme);
         side_by_side::render_diff_search_bar(frame, fl.main_panel, diff_view, theme);
     } else if diff_loading {

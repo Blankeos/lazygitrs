@@ -103,7 +103,7 @@ impl DiffPanelLayout {
         let inner_end_y = inner_y + panel_rect.height.saturating_sub(2);
 
         let gutter: u16 = 5;
-        let divider: u16 = 1;
+        let divider: u16 = 2;
 
         let is_new_file = state.old_content.is_empty() && state.sections.len() <= 1;
 
@@ -184,6 +184,15 @@ impl DiffPanelLayout {
             DiffPanel::New => (self.new_content_x, self.new_content_end_x),
         }
     }
+
+    /// Get the divider X column between old and new panels (both-side view only).
+    pub fn divider_x(&self) -> Option<u16> {
+        if self.is_new_file || self.old_content_end_x == 0 || self.new_content_x == 0 {
+            None
+        } else {
+            Some(self.old_content_end_x)
+        }
+    }
 }
 
 /// Which side(s) of the diff to display.
@@ -240,6 +249,8 @@ pub struct DiffViewState {
     pub search_match_idx: usize,
     /// Textarea widget for search input.
     pub search_textarea: Option<tui_textarea::TextArea<'static>>,
+    /// Currently selected revert-button hunk index (for keyboard cycling).
+    pub selected_revert_hunk: Option<usize>,
 }
 
 impl Default for DiffViewState {
@@ -264,6 +275,7 @@ impl Default for DiffViewState {
             search_matches: Vec::new(),
             search_match_idx: 0,
             search_textarea: None,
+            selected_revert_hunk: None,
         }
     }
 }
@@ -522,6 +534,7 @@ impl DiffViewState {
     /// Apply a pre-parsed diff result, preserving scroll position for same-file reloads.
     pub fn apply_parsed(&mut self, parsed: ParsedDiff) {
         let same_file = self.filename == parsed.filename;
+        let prev_selected_revert_hunk = self.selected_revert_hunk;
         self.filename = parsed.filename;
         self.old_content = parsed.old_content;
         self.new_content = parsed.new_content;
@@ -530,6 +543,11 @@ impl DiffViewState {
         self.hunk_line_offsets = parsed.hunk_line_offsets;
         self.sections = parsed.sections;
         self.file_exists_on_disk = parsed.file_exists_on_disk;
+        self.selected_revert_hunk = if same_file {
+            prev_selected_revert_hunk.filter(|&i| i < self.hunk_starts.len())
+        } else {
+            None
+        };
         if same_file {
             let max = self.lines.len().saturating_sub(1);
             self.scroll_offset = self.scroll_offset.min(max);
@@ -545,6 +563,7 @@ impl DiffViewState {
     pub fn load(&mut self, filename: &str, old: &str, new: &str) {
         // Preserve scroll position when reloading the same file (e.g. periodic refresh)
         let same_file = self.filename == filename;
+        let prev_selected_revert_hunk = self.selected_revert_hunk;
         self.filename = filename.to_string();
         self.old_content = old.to_string();
         self.new_content = new.to_string();
@@ -561,6 +580,11 @@ impl DiffViewState {
             self.selection = None;
             self.clear_search();
         }
+        self.selected_revert_hunk = if same_file {
+            prev_selected_revert_hunk.filter(|&i| i < self.hunk_starts.len())
+        } else {
+            None
+        };
         // Preserve side_view across reloads so periodic refresh doesn't reset it
         // Single section with index 0
         self.sections = vec![FileSection {
@@ -613,6 +637,7 @@ impl DiffViewState {
             let file_count = file_diffs.len();
             let new_filename = format!("{} ({} files)", filename, file_count);
             let same_file = self.filename == new_filename;
+            let prev_selected_revert_hunk = self.selected_revert_hunk;
             self.filename = new_filename;
             self.old_content = String::new();
             self.new_content = String::new();
@@ -624,6 +649,11 @@ impl DiffViewState {
                 self.selection = None;
                 self.clear_search();
             }
+            self.selected_revert_hunk = if same_file {
+                prev_selected_revert_hunk
+            } else {
+                None
+            };
 
             self.hunk_line_offsets = Vec::new();
 
@@ -673,6 +703,12 @@ impl DiffViewState {
             }
 
             self.hunk_starts = super::diff_algo::find_hunk_starts(&self.lines);
+            self.selected_revert_hunk = if same_file {
+                self.selected_revert_hunk
+                    .filter(|&i| i < self.hunk_starts.len())
+            } else {
+                None
+            };
 
             if same_file {
                 // Clamp scroll in case the diff got shorter
@@ -724,6 +760,56 @@ impl DiffViewState {
         self.lines.is_empty()
     }
 
+    /// Map a terminal row within the diff panel inner area to the visible diff line index.
+    /// This is exact when wrapping is disabled.
+    pub fn line_index_at_row(&self, row: u16, layout: &DiffPanelLayout) -> Option<usize> {
+        if row < layout.inner_y || row >= layout.inner_end_y {
+            return None;
+        }
+        let idx = self.scroll_offset + (row - layout.inner_y) as usize;
+        if idx < self.lines.len() {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
+    /// Return true when the given line index is the first line of a diff hunk.
+    pub fn is_hunk_start_line(&self, line_idx: usize) -> bool {
+        self.hunk_starts.binary_search(&line_idx).is_ok()
+    }
+
+    /// Get the zero-based hunk index for a hunk-start line.
+    pub fn hunk_index_for_start_line(&self, line_idx: usize) -> Option<usize> {
+        self.hunk_starts.binary_search(&line_idx).ok()
+    }
+
+    /// Cycle to the next revertable hunk marker.
+    pub fn select_next_revert_hunk(&mut self) {
+        if self.hunk_starts.is_empty() {
+            self.selected_revert_hunk = None;
+            return;
+        }
+        let next = match self.selected_revert_hunk {
+            Some(i) => (i + 1) % self.hunk_starts.len(),
+            None => 0,
+        };
+        self.selected_revert_hunk = Some(next);
+    }
+
+    /// Cycle to the previous revertable hunk marker.
+    pub fn select_prev_revert_hunk(&mut self) {
+        if self.hunk_starts.is_empty() {
+            self.selected_revert_hunk = None;
+            return;
+        }
+        let prev = match self.selected_revert_hunk {
+            Some(0) | None => self.hunk_starts.len() - 1,
+            Some(i) => i.saturating_sub(1),
+        };
+        self.selected_revert_hunk = Some(prev);
+    }
+
     /// Get the highlighters for a given section index.
     fn highlighters_for_section(&self, section_index: usize) -> Option<(&FileHighlighter, &FileHighlighter)> {
         self.sections
@@ -741,6 +827,7 @@ pub fn render_diff(
     theme: &Theme,
     focused: bool,
     diff_loading: bool,
+    show_revert_markers: bool,
 ) {
     let border_style = if focused {
         theme.active_border
@@ -787,7 +874,7 @@ pub fn render_diff(
     }
 
     let gutter_width = 5u16;
-    let divider_width = 1u16;
+    let divider_width = 2u16;
 
     // Detect new file: old content is empty, so no left panel needed
     let is_new_file = state.old_content.is_empty() && state.sections.len() <= 1;
@@ -1050,8 +1137,29 @@ pub fn render_diff(
                             Style::default().bg(left_bg), panel_width);
                     }
 
-                    // Divider
-                    buf_write_str(buf, div_x, y, "│", divider_style, divider_width);
+                    // Divider or revert marker (first visual row of a hunk only).
+                    let show_marker = show_revert_markers
+                        && !state.wrap
+                        && chunk_idx == 0
+                        && state.is_hunk_start_line(line_idx);
+                    let (divider_char, marker_style) = if show_marker {
+                        let hunk_idx = state.hunk_index_for_start_line(line_idx);
+                        let is_selected = hunk_idx == state.selected_revert_hunk;
+                        let style = if is_selected {
+                            Style::default()
+                                .fg(theme.accent)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                                .fg(theme.separator)
+                                .add_modifier(Modifier::BOLD)
+                        };
+                        ("󰧛", style)
+                    } else {
+                        ("│", divider_style)
+                    };
+                    buf_write_str(buf, div_x, y, "  ", divider_style, divider_width);
+                    buf_write_str(buf, div_x, y, divider_char, marker_style, divider_width);
 
                     // Right gutter + content
                     buf_write_str(buf, right_gutter_x, y, &right_gutter_text, right_gutter_style, gutter_width);
@@ -1096,8 +1204,27 @@ pub fn render_diff(
                 };
                 buf_write_spans(buf, inner.x + gutter_width, y, &left_spans, panel_width, state.horizontal_scroll);
 
-                // Divider
-                buf_write_str(buf, div_x, y, "│", divider_style, divider_width);
+                // Divider or revert marker.
+                let show_marker =
+                    show_revert_markers && !state.wrap && state.is_hunk_start_line(line_idx);
+                let (divider_char, marker_style) = if show_marker {
+                    let hunk_idx = state.hunk_index_for_start_line(line_idx);
+                    let is_selected = hunk_idx == state.selected_revert_hunk;
+                    let style = if is_selected {
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                            .fg(theme.separator)
+                            .add_modifier(Modifier::BOLD)
+                    };
+                    ("󰧛", style)
+                } else {
+                    ("│", divider_style)
+                };
+                buf_write_str(buf, div_x, y, "  ", divider_style, divider_width);
+                buf_write_str(buf, div_x, y, divider_char, marker_style, divider_width);
 
                 // Right gutter
                 buf_write_str(buf, right_gutter_x, y, &right_num, right_gutter_style, gutter_width);
