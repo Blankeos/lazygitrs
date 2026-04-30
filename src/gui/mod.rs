@@ -1996,6 +1996,25 @@ impl Gui {
             }
             return Ok(());
         }
+        if matches_key(key, &keybindings.universal.revert_block) {
+            if self.context_mgr.active() == ContextId::Files {
+                let hunk_idx = self
+                    .diff_view
+                    .selected_revert_hunk
+                    .or(self.diff_view.hovered_revert_hunk);
+                if let Some(hunk_idx) = hunk_idx {
+                    self.diff_view.selected_revert_hunk = Some(hunk_idx);
+                    if let Err(err) = self.revert_selected_file_hunk(hunk_idx) {
+                        self.popup = PopupState::Message {
+                            title: "Revert block failed".to_string(),
+                            message: format!("{}", err),
+                            kind: MessageKind::Error,
+                        };
+                    }
+                }
+            }
+            return Ok(());
+        }
 
         // Toggle command log (;)
         if key.code == KeyCode::Char(';') {
@@ -2101,13 +2120,6 @@ impl Gui {
             KeyCode::Char('G') => {
                 let max = self.diff_view.lines.len().saturating_sub(1);
                 self.diff_view.scroll_offset = max;
-            }
-            KeyCode::Enter => {
-                if self.context_mgr.active() == ContextId::Files
-                    && let Some(hunk_idx) = self.diff_view.selected_revert_hunk
-                {
-                    self.revert_selected_file_hunk(hunk_idx)?;
-                }
             }
             _ => {}
         }
@@ -3287,6 +3299,7 @@ impl Gui {
                     HelpEntry { key: "y".into(), description: "Copy to clipboard menu".into() },
                     HelpEntry { key: kb.universal.next_revert_block.clone(), description: "Next revert block in diff".into() },
                     HelpEntry { key: kb.universal.prev_revert_block.clone(), description: "Previous revert block in diff".into() },
+                    HelpEntry { key: kb.universal.revert_block.clone(), description: "Revert selected block".into() },
                 ],
             },
             ContextId::Worktrees => HelpSection {
@@ -5086,6 +5099,13 @@ impl Gui {
         let pl = DiffPanelLayout::compute(main_panel, &self.diff_view);
         let visible_rows = (pl.inner_end_y.saturating_sub(pl.inner_y)) as usize;
         if visible_rows == 0 {
+            return;
+        }
+
+        let scroll = self.diff_view.scroll_offset;
+        // Already in viewport? Don't scroll. The marker glyph sits on the
+        // hunk's first row, so only that row needs to be visible.
+        if line_idx >= scroll && line_idx < scroll + visible_rows {
             return;
         }
 

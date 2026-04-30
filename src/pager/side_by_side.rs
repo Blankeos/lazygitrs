@@ -1152,18 +1152,21 @@ pub fn render_diff(
                     } else {
                         None
                     };
+                    let marker_is_hovered = show_marker
+                        && marker_hunk_idx.is_some()
+                        && marker_hunk_idx == state.hovered_revert_hunk;
                     let (divider_char, marker_style) = if show_marker {
                         let is_selected = marker_hunk_idx == state.selected_revert_hunk;
-                        let style = if is_selected {
-                            Style::default()
-                                .fg(theme.accent)
-                                .add_modifier(Modifier::BOLD)
+                        // Hover wins over selection so the hover state is always
+                        // visible — even on a hunk that's currently selected.
+                        let fg = if marker_is_hovered {
+                            theme.accent_secondary
+                        } else if is_selected {
+                            theme.accent
                         } else {
-                            Style::default()
-                                .fg(theme.separator)
-                                .add_modifier(Modifier::BOLD)
+                            theme.separator
                         };
-                        ("󰧛", style)
+                        ("󰧛", Style::default().fg(fg).add_modifier(Modifier::BOLD))
                     } else {
                         ("│", divider_style)
                     };
@@ -1227,18 +1230,19 @@ pub fn render_diff(
                 } else {
                     None
                 };
+                let marker_is_hovered = show_marker
+                    && marker_hunk_idx.is_some()
+                    && marker_hunk_idx == state.hovered_revert_hunk;
                 let (divider_char, marker_style) = if show_marker {
                     let is_selected = marker_hunk_idx == state.selected_revert_hunk;
-                    let style = if is_selected {
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD)
+                    let fg = if marker_is_hovered {
+                        theme.accent_secondary
+                    } else if is_selected {
+                        theme.accent
                     } else {
-                        Style::default()
-                            .fg(theme.separator)
-                            .add_modifier(Modifier::BOLD)
+                        theme.separator
                     };
-                    ("󰧛", style)
+                    ("󰧛", Style::default().fg(fg).add_modifier(Modifier::BOLD))
                 } else {
                     ("│", divider_style)
                 };
@@ -1280,12 +1284,14 @@ pub fn render_diff(
         }
 
         if let Some(y) = hover_tooltip_y {
-            render_revert_tooltip(buf, div_x + divider_width, y, right_content_width + gutter_width, theme);
+            let show_key = state.hovered_revert_hunk.is_some()
+                && state.hovered_revert_hunk == state.selected_revert_hunk;
+            render_revert_tooltip(buf, div_x + divider_width, y, right_content_width + gutter_width, theme, show_key);
         }
     }
 }
 
-fn render_revert_tooltip(buf: &mut Buffer, x: u16, y: u16, max_width: u16, theme: &Theme) {
+fn render_revert_tooltip(buf: &mut Buffer, x: u16, y: u16, max_width: u16, theme: &Theme, show_key: bool) {
     let tip_style = Style::default()
         .bg(theme.selected_bg)
         .fg(theme.text_strong);
@@ -1294,11 +1300,15 @@ fn render_revert_tooltip(buf: &mut Buffer, x: u16, y: u16, max_width: u16, theme
         .fg(theme.accent_secondary)
         .add_modifier(Modifier::BOLD);
 
-    let parts: [(&str, Style); 3] = [
-        (" ", tip_style),
-        ("enter", key_style),
-        (" Revert hunk ", tip_style),
-    ];
+    let parts: Vec<(&str, Style)> = if show_key {
+        vec![
+            (" ", tip_style),
+            ("c-r", key_style),
+            (" Revert hunk ", tip_style),
+        ]
+    } else {
+        vec![(" Revert hunk ", tip_style)]
+    };
 
     let buf_area = buf.area();
     if y < buf_area.y || y >= buf_area.y + buf_area.height {
