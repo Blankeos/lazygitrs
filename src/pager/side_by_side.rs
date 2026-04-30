@@ -538,6 +538,7 @@ impl DiffViewState {
     pub fn apply_parsed(&mut self, parsed: ParsedDiff) {
         let same_file = self.filename == parsed.filename;
         let prev_selected_revert_hunk = self.selected_revert_hunk;
+        let prev_hovered_revert_hunk = self.hovered_revert_hunk;
         self.filename = parsed.filename;
         self.old_content = parsed.old_content;
         self.new_content = parsed.new_content;
@@ -548,6 +549,11 @@ impl DiffViewState {
         self.file_exists_on_disk = parsed.file_exists_on_disk;
         self.selected_revert_hunk = if same_file {
             prev_selected_revert_hunk.filter(|&i| i < self.hunk_starts.len())
+        } else {
+            None
+        };
+        self.hovered_revert_hunk = if same_file {
+            prev_hovered_revert_hunk.filter(|&i| i < self.hunk_starts.len())
         } else {
             None
         };
@@ -567,6 +573,7 @@ impl DiffViewState {
         // Preserve scroll position when reloading the same file (e.g. periodic refresh)
         let same_file = self.filename == filename;
         let prev_selected_revert_hunk = self.selected_revert_hunk;
+        let prev_hovered_revert_hunk = self.hovered_revert_hunk;
         self.filename = filename.to_string();
         self.old_content = old.to_string();
         self.new_content = new.to_string();
@@ -585,6 +592,11 @@ impl DiffViewState {
         }
         self.selected_revert_hunk = if same_file {
             prev_selected_revert_hunk.filter(|&i| i < self.hunk_starts.len())
+        } else {
+            None
+        };
+        self.hovered_revert_hunk = if same_file {
+            prev_hovered_revert_hunk.filter(|&i| i < self.hunk_starts.len())
         } else {
             None
         };
@@ -641,6 +653,7 @@ impl DiffViewState {
             let new_filename = format!("{} ({} files)", filename, file_count);
             let same_file = self.filename == new_filename;
             let prev_selected_revert_hunk = self.selected_revert_hunk;
+            let prev_hovered_revert_hunk = self.hovered_revert_hunk;
             self.filename = new_filename;
             self.old_content = String::new();
             self.new_content = String::new();
@@ -654,6 +667,11 @@ impl DiffViewState {
             }
             self.selected_revert_hunk = if same_file {
                 prev_selected_revert_hunk
+            } else {
+                None
+            };
+            self.hovered_revert_hunk = if same_file {
+                prev_hovered_revert_hunk
             } else {
                 None
             };
@@ -708,6 +726,12 @@ impl DiffViewState {
             self.hunk_starts = super::diff_algo::find_hunk_starts(&self.lines);
             self.selected_revert_hunk = if same_file {
                 self.selected_revert_hunk
+                    .filter(|&i| i < self.hunk_starts.len())
+            } else {
+                None
+            };
+            self.hovered_revert_hunk = if same_file {
+                self.hovered_revert_hunk
                     .filter(|&i| i < self.hunk_starts.len())
             } else {
                 None
@@ -785,6 +809,70 @@ impl DiffViewState {
     /// Get the zero-based hunk index for a hunk-start line.
     pub fn hunk_index_for_start_line(&self, line_idx: usize) -> Option<usize> {
         self.hunk_starts.binary_search(&line_idx).ok()
+    }
+
+    /// For the visual hunk at `block_idx`, return the (old, new) line-number
+    /// ranges (inclusive) the block covers in the underlying file. Either
+    /// side may be `None` when the block is a pure insertion (no `-` lines)
+    /// or pure deletion (no `+` lines). Used to slice a sub-patch out of the
+    /// raw unified diff so revert affects only this visual block, not the
+    /// surrounding `@@` hunk that may contain other change blocks.
+    pub fn visual_block_line_ranges(
+        &self,
+        block_idx: usize,
+    ) -> Option<(Option<(usize, usize)>, Option<(usize, usize)>)> {
+        let start = *self.hunk_starts.get(block_idx)?;
+        let mut end = start;
+        while end < self.lines.len()
+            && !matches!(self.lines[end].change_type, ChangeType::Equal)
+        {
+            end += 1;
+        }
+        // DiffLine line numbers are content-relative (positions inside the
+        // concatenated old/new strings produced by parse_unified_diff), but
+        // the unified-diff walker we feed these ranges to tracks file-relative
+        // line numbers. `hunk_line_offsets` provides the per-`@@` deltas we
+        // need to bridge the two.
+        let (old_offset, new_offset) = self.line_number_offsets_at(start);
+        let mut old_range: Option<(usize, usize)> = None;
+        let mut new_range: Option<(usize, usize)> = None;
+        for line in &self.lines[start..end] {
+            if matches!(line.change_type, ChangeType::Delete | ChangeType::Modified) {
+                if let Some((n, _)) = &line.old_line {
+                    let n = *n + old_offset;
+                    old_range = Some(match old_range {
+                        None => (n, n),
+                        Some((lo, hi)) => (lo.min(n), hi.max(n)),
+                    });
+                }
+            }
+            if matches!(line.change_type, ChangeType::Insert | ChangeType::Modified) {
+                if let Some((n, _)) = &line.new_line {
+                    let n = *n + new_offset;
+                    new_range = Some(match new_range {
+                        None => (n, n),
+                        Some((lo, hi)) => (lo.min(n), hi.max(n)),
+                    });
+                }
+            }
+        }
+        Some((old_range, new_range))
+    }
+
+    /// Find the `@@` hunk that owns the DiffLine at `line_idx` and return
+    /// its (old, new) content→file line-number offsets. Returns (0, 0) when
+    /// no hunk metadata is available (e.g. the `load(...)` raw-content path,
+    /// where content and file numbering already coincide).
+    fn line_number_offsets_at(&self, line_idx: usize) -> (usize, usize) {
+        let mut offsets = (0usize, 0usize);
+        for &(start_idx, old_off, new_off) in &self.hunk_line_offsets {
+            if start_idx <= line_idx {
+                offsets = (old_off, new_off);
+            } else {
+                break;
+            }
+        }
+        offsets
     }
 
     /// Cycle to the next revertable hunk marker.

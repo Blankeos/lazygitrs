@@ -5075,13 +5075,21 @@ impl Gui {
         let file_name = file.name.clone();
         drop(model);
 
+        let Some((want_old, want_new)) = self.diff_view.visual_block_line_ranges(hunk_idx)
+        else {
+            return Ok(());
+        };
+        if want_old.is_none() && want_new.is_none() {
+            return Ok(());
+        }
+
         let diff = self.git.diff_file(&file_name)?;
         if diff.is_empty() {
             return Ok(());
         }
 
         self.git
-            .revert_hunk_in_worktree_from_unified_diff(&file_name, &diff, hunk_idx)?;
+            .revert_visual_block_in_worktree(&file_name, &diff, want_old, want_new)?;
         self.diff_view.selection = None;
         self.needs_files_refresh = true;
         self.needs_diff_refresh = true;
