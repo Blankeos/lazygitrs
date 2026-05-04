@@ -97,9 +97,17 @@ impl GitCommands {
     }
 
     pub fn unstage_all(&self) -> Result<()> {
-        self.git()
-            .args(&["reset", "HEAD"])
-            .run_expecting_success()?;
+        // When there are no commits yet, HEAD doesn't exist so `git reset HEAD`
+        // fails. Use `git rm --cached -r .` to unstage everything instead.
+        if self.git().args(&["rev-parse", "--verify", "HEAD"]).run().is_err() {
+            self.git()
+                .args(&["rm", "--cached", "-r", "."])
+                .run_expecting_success()?;
+        } else {
+            self.git()
+                .args(&["reset", "HEAD"])
+                .run_expecting_success()?;
+        }
         Ok(())
     }
 
