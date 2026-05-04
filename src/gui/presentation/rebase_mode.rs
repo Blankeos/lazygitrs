@@ -336,7 +336,7 @@ fn render_list(frame: &mut Frame, area: Rect, state: &RebaseModeState, theme: &T
         } else {
             squash_target_color[len].unwrap_or(theme.text_dimmed)
         };
-        let base_spans = vec![
+        let mut base_spans = vec![
             Span::styled(" ◯  ", Style::default().fg(base_node_color)),
             Span::styled(base_pad, Style::default()),
             Span::styled(
@@ -348,6 +348,12 @@ fn render_list(frame: &mut Frame, area: Rect, state: &RebaseModeState, theme: &T
                 Style::default().fg(theme.text_dimmed),
             ),
         ];
+        if !state.base_author_name.is_empty() {
+            base_spans.push(Span::styled(
+                format!("  {}", state.base_author_name),
+                Style::default().fg(theme.diff_line_number),
+            ));
+        }
         items.push(ListItem::new(Line::from(base_spans)));
     }
 

@@ -47,6 +47,8 @@ pub struct RebaseModeState {
     pub base_short_hash: String,
     /// Message of the base commit for display.
     pub base_message: String,
+    /// Author name of the base commit for display.
+    pub base_author_name: String,
     /// The rebase todo entries, in display order (newest first, oldest last).
     /// Reversed to rebase-todo order (oldest first) when building actions for git.
     pub entries: Vec<RebaseEntry>,
@@ -77,6 +79,7 @@ impl RebaseModeState {
             base_hash: String::new(),
             base_short_hash: String::new(),
             base_message: String::new(),
+            base_author_name: String::new(),
             entries: Vec::new(),
             selected: 0,
             scroll: 0,
@@ -102,6 +105,7 @@ impl RebaseModeState {
         self.base_hash = base_commit.hash.clone();
         self.base_short_hash = base_commit.short_hash().to_string();
         self.base_message = base_commit.name.clone();
+        self.base_author_name = base_commit.author_name.clone();
 
         // Keep newest-first order (same as commits panel display).
         self.entries = commits
@@ -134,6 +138,7 @@ impl RebaseModeState {
         self.base_hash = progress.onto_hash.clone();
         self.base_short_hash = progress.onto_short.clone();
         self.base_message = progress.onto_message.clone();
+        self.base_author_name = progress.onto_author_name.clone();
 
         // Build entries in oldest-first (git order), then reverse for display.
         let mut entries = Vec::new();
@@ -180,6 +185,7 @@ impl RebaseModeState {
         self.base_hash.clear();
         self.base_short_hash.clear();
         self.base_message.clear();
+        self.base_author_name.clear();
         self.selected = 0;
         self.scroll = 0;
         self.done_count = 0;

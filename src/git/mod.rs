@@ -284,4 +284,13 @@ impl GitCommands {
             .run_expecting_success()?;
         Ok(result.stdout_trimmed().to_string())
     }
+
+    /// Get the author name of a commit.
+    pub fn commit_author_name(&self, hash: &str) -> Result<String> {
+        let result = self
+            .git()
+            .args(&["log", "-1", "--format=%an", hash])
+            .run_expecting_success()?;
+        Ok(result.stdout_trimmed().to_string())
+    }
 }

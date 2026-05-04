@@ -225,3 +225,5 @@
     - But actually 1 big UX improvement over original lazygit is just immediately showing the 'Interactive Rebase' tool with it that kinda shows 'squash' for those commits you selected (or the single commit). And obviously it behaves like the regular way of pressing `i` or `I and then picking a ref and enter`. Basically it won't really commit the squash/fixup etc until you press enter.
 
 - [x] Bug: Big bug with git hunks sometimes being misidentified.
+
+- [ ] Feat: add the author for interactive rebase on the commit we're 'rebasing on top of'. Currently when I try to rebase on top of a commit, the author is not visible in the list.

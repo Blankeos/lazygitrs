@@ -476,6 +476,7 @@ pub fn enter_interactive_rebase_onto(gui: &mut Gui, onto_ref: &str) -> Result<()
         None => {
             // Base commit might not be in the loaded commits list — create a minimal one
             let msg = gui.git.commit_subject(&base_hash).unwrap_or_default();
+            let author = gui.git.commit_author_name(&base_hash).unwrap_or_default();
             use crate::model::commit::{CommitStatus, Divergence};
             crate::model::Commit {
                 hash: base_hash.clone(),
@@ -485,7 +486,7 @@ pub fn enter_interactive_rebase_onto(gui: &mut Gui, onto_ref: &str) -> Result<()
                 tags: Vec::<String>::new(),
                 refs: Vec::<String>::new(),
                 extra_info: String::new(),
-                author_name: String::new(),
+                author_name: author,
                 author_email: String::new(),
                 unix_timestamp: 0,
                 parents: Vec::new(),

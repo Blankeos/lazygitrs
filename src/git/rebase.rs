@@ -299,6 +299,7 @@ impl GitCommands {
             onto_hash,
             onto_short,
             onto_message,
+            onto_author_name: String::new(),
             done_entries,
             todo_entries,
             stopped_sha,
@@ -310,7 +311,8 @@ impl GitCommands {
     /// Each `git` subprocess spawn dominates the latency on entry to the
     /// InProgress view, so we coalesce what would otherwise be three calls.
     pub fn hydrate_progress(&self, progress: &mut RebaseProgress) {
-        let need_onto = progress.onto_message.is_empty() && !progress.onto_hash.is_empty();
+        let need_onto = (progress.onto_message.is_empty() || progress.onto_author_name.is_empty())
+            && !progress.onto_hash.is_empty();
         if progress.done_entries.is_empty()
             && progress.todo_entries.is_empty()
             && !need_onto
@@ -363,8 +365,9 @@ impl GitCommands {
             apply(e, &info);
         }
         if need_onto {
-            if let Some((subject, _, _)) = info.get(&progress.onto_hash) {
+            if let Some((subject, author, _)) = info.get(&progress.onto_hash) {
                 progress.onto_message = subject.clone();
+                progress.onto_author_name = author.clone();
             }
         }
     }
@@ -390,6 +393,8 @@ pub struct RebaseProgress {
     pub onto_short: String,
     /// Subject of the onto commit.
     pub onto_message: String,
+    /// Author name of the onto commit.
+    pub onto_author_name: String,
     /// Entries that have already been processed.
     pub done_entries: Vec<TodoEntry>,
     /// Entries still to be processed.
