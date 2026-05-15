@@ -926,6 +926,43 @@ impl DiffViewState {
         Some((old_range, new_range))
     }
 
+    /// Return the inclusive visual line range for a revertable hunk in the diff buffer.
+    pub fn visual_block_line_span(&self, block_idx: usize) -> Option<(usize, usize)> {
+        let start = *self.hunk_starts.get(block_idx)?;
+        let mut end = start;
+        while end < self.lines.len() && !matches!(self.lines[end].change_type, ChangeType::Equal) {
+            end += 1;
+        }
+        Some((start, end.saturating_sub(1)))
+    }
+
+    /// Return the line index where the sticky revert marker should render for this hunk,
+    /// or `None` when no part of the hunk is visible in the current viewport.
+    pub fn sticky_revert_marker_line(
+        &self,
+        block_idx: usize,
+        visible_height: usize,
+    ) -> Option<usize> {
+        if visible_height == 0 {
+            return None;
+        }
+        let (start, end) = self.visual_block_line_span(block_idx)?;
+        let view_start = self.scroll_offset;
+        let view_end = self
+            .scroll_offset
+            .saturating_add(visible_height)
+            .saturating_sub(1);
+        if end < view_start || start > view_end {
+            return None;
+        }
+
+        let visible_start = start.max(view_start);
+        let visible_end = end.min(view_end);
+        let block_mid = start + (end.saturating_sub(start) / 2);
+
+        Some(block_mid.clamp(visible_start, visible_end))
+    }
+
     /// Find the `@@` hunk that owns the DiffLine at `line_idx` and return
     /// its (old, new) content→file line-number offsets. Returns (0, 0) when
     /// no hunk metadata is available (e.g. the `load(...)` raw-content path,
@@ -966,6 +1003,20 @@ impl DiffViewState {
             Some(i) => i.saturating_sub(1),
         };
         self.selected_revert_hunk = Some(prev);
+    }
+
+    /// Return the sticky revert-marker hunk rendered at `line_idx` for the current viewport.
+    pub fn sticky_revert_hunk_at_line(
+        &self,
+        line_idx: usize,
+        visible_height: usize,
+    ) -> Option<usize> {
+        if self.wrap {
+            return None;
+        }
+        self.hunk_starts.iter().enumerate().find_map(|(idx, _)| {
+            (self.sticky_revert_marker_line(idx, visible_height) == Some(line_idx)).then_some(idx)
+        })
     }
 
     /// Get the highlighters for a given section index.
@@ -1372,15 +1423,12 @@ pub fn render_diff(
                     }
 
                     // Divider or revert marker (first visual row of a hunk only).
-                    let show_marker = show_revert_markers
-                        && !state.wrap
-                        && chunk_idx == 0
-                        && state.is_hunk_start_line(line_idx);
-                    let marker_hunk_idx = if show_marker {
-                        state.hunk_index_for_start_line(line_idx)
+                    let marker_hunk_idx = if show_revert_markers && !state.wrap && chunk_idx == 0 {
+                        state.sticky_revert_hunk_at_line(line_idx, visible_height)
                     } else {
                         None
                     };
+                    let show_marker = marker_hunk_idx.is_some();
                     let marker_is_hovered = show_marker
                         && marker_hunk_idx.is_some()
                         && marker_hunk_idx == state.hovered_revert_hunk;
@@ -1487,13 +1535,12 @@ pub fn render_diff(
                 );
 
                 // Divider or revert marker.
-                let show_marker =
-                    show_revert_markers && !state.wrap && state.is_hunk_start_line(line_idx);
-                let marker_hunk_idx = if show_marker {
-                    state.hunk_index_for_start_line(line_idx)
+                let marker_hunk_idx = if show_revert_markers && !state.wrap {
+                    state.sticky_revert_hunk_at_line(line_idx, visible_height)
                 } else {
                     None
                 };
+                let show_marker = marker_hunk_idx.is_some();
                 let marker_is_hovered = show_marker
                     && marker_hunk_idx.is_some()
                     && marker_hunk_idx == state.hovered_revert_hunk;

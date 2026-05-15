@@ -5054,7 +5054,8 @@ impl Gui {
             return None;
         }
         let line_idx = self.diff_view.line_index_at_row(row, layout)?;
-        self.diff_view.hunk_index_for_start_line(line_idx)
+        let visible_height = (layout.inner_end_y.saturating_sub(layout.inner_y)) as usize;
+        self.diff_view.sticky_revert_hunk_at_line(line_idx, visible_height)
     }
 
     fn try_handle_revert_block_click(
