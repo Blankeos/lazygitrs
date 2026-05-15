@@ -1658,10 +1658,12 @@ impl Gui {
         // Next/prev hunk with { and }
         if key.code == KeyCode::Char('{') {
             self.diff_view.prev_hunk();
+            self.center_selected_revert_block();
             return Ok(());
         }
         if key.code == KeyCode::Char('}') {
             self.diff_view.next_hunk();
+            self.center_selected_revert_block();
             return Ok(());
         }
 
