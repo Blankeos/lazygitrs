@@ -236,7 +236,7 @@ pub struct RevertHunkMarkerStyle {
 impl RevertHunkMarkerStyle {
     pub fn from_config(config: &RevertHunkMarkerConfig) -> Self {
         let icon = if config.icon.is_empty() {
-            "󰧛".to_string()
+            "".to_string()
         } else {
             config.icon.clone()
         };

@@ -129,7 +129,7 @@ pub struct RevertHunkMarkerConfig {
 impl Default for RevertHunkMarkerConfig {
     fn default() -> Self {
         Self {
-            icon: "󰧛".to_string(),
+            icon: "".to_string(),
             bold: None,
             color: None,
             selected_color: None,

@@ -3526,7 +3526,7 @@ impl Gui {
                 HelpEntry { key: "/".into(), description: "Search in diff".into() },
                 HelpEntry { key: "n/N".into(), description: "Next / previous search match".into() },
                 HelpEntry { key: "r".into(), description: "Revert selected block (Files)".into() },
-                HelpEntry { key: "click 󰧛".into(), description: "Click revert icon to revert that block".into() },
+                HelpEntry { key: "click ".into(), description: "Click revert icon to revert that block".into() },
                 HelpEntry {
                     key: "u".into(),
                     description: if self.diff_view.revert_undo_stack.is_empty() {
