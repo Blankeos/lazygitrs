@@ -93,7 +93,7 @@ pub struct GuiConfig {
     #[serde(rename = "nerdFontsVersion")]
     pub nerd_fonts_version: String,
     #[serde(rename = "revertHunkMarker")]
-    pub revert_hunk_marker: RevertHunkMarkerConfig,
+    pub hunk_marker: HunkMarkerConfig,
 }
 
 impl Default for GuiConfig {
@@ -109,14 +109,14 @@ impl Default for GuiConfig {
             show_command_log: true,
             show_bottom_line: true,
             nerd_fonts_version: "3".to_string(),
-            revert_hunk_marker: RevertHunkMarkerConfig::default(),
+            hunk_marker: HunkMarkerConfig::default(),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct RevertHunkMarkerConfig {
+pub struct HunkMarkerConfig {
     pub icon: String,
     pub bold: Option<bool>,
     pub color: Option<String>,
@@ -126,7 +126,7 @@ pub struct RevertHunkMarkerConfig {
     pub hover_color: Option<String>,
 }
 
-impl Default for RevertHunkMarkerConfig {
+impl Default for HunkMarkerConfig {
     fn default() -> Self {
         Self {
             icon: "".to_string(),
