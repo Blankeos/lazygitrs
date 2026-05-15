@@ -5172,21 +5172,15 @@ impl Gui {
         let Some(sel) = self.diff_view.selected_revert_hunk else {
             return;
         };
-        let Some(&line_idx) = self.diff_view.hunk_starts.get(sel) else {
+        let Some((start_line, end_line)) = self.diff_view.visual_block_line_span(sel) else {
             return;
         };
+        let line_idx = start_line + (end_line.saturating_sub(start_line) / 2);
 
         let main_panel = self.compute_main_panel_rect();
         let pl = DiffPanelLayout::compute(main_panel, &self.diff_view);
         let visible_rows = (pl.inner_end_y.saturating_sub(pl.inner_y)) as usize;
         if visible_rows == 0 {
-            return;
-        }
-
-        let scroll = self.diff_view.scroll_offset;
-        // Already in viewport? Don't scroll. The marker glyph sits on the
-        // hunk's first row, so only that row needs to be visible.
-        if line_idx >= scroll && line_idx < scroll + visible_rows {
             return;
         }
 
