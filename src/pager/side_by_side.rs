@@ -797,6 +797,7 @@ impl DiffViewState {
     pub fn next_hunk(&mut self) {
         if let Some(next) = self.hunk_starts.iter().find(|&&h| h > self.scroll_offset) {
             self.scroll_offset = *next;
+            self.selected_revert_hunk = self.hunk_index_for_start_line(*next);
         }
     }
 
@@ -808,6 +809,7 @@ impl DiffViewState {
             .find(|&&h| h < self.scroll_offset)
         {
             self.scroll_offset = *prev;
+            self.selected_revert_hunk = self.hunk_index_for_start_line(*prev);
         }
     }
 

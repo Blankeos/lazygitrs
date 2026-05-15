@@ -515,12 +515,6 @@ fn handle_diff_exploration_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         KeyCode::Char('l') | KeyCode::Right => {
             gui.diff_view.scroll_right(4);
         }
-        KeyCode::Char('}') => {
-            gui.diff_view.next_hunk();
-        }
-        KeyCode::Char('{') => {
-            gui.diff_view.prev_hunk();
-        }
         KeyCode::Char(']') => {
             use crate::pager::side_by_side::DiffSideView;
             gui.diff_view.side_view = match gui.diff_view.side_view {

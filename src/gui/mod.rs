@@ -2094,13 +2094,6 @@ impl Gui {
             KeyCode::Char('l') | KeyCode::Right => {
                 self.diff_view.scroll_right(4);
             }
-            // { and } jump between hunks
-            KeyCode::Char('}') => {
-                self.diff_view.next_hunk();
-            }
-            KeyCode::Char('{') => {
-                self.diff_view.prev_hunk();
-            }
             // [ and ] toggle old-only / new-only view
             KeyCode::Char(']') => {
                 use crate::pager::side_by_side::DiffSideView;
