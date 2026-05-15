@@ -1398,7 +1398,6 @@ fn render_status_bar(
                 emphasized.push("enter");
                 idx += 1;
             }
-            hints.insert(idx, ("c-j/c-k", "cycle revert"));
             idx += 1;
             if has_undo {
                 hints.insert(idx, ("u", "undo revert"));

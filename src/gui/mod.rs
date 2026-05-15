@@ -3508,7 +3508,6 @@ impl Gui {
                 HelpEntry { key: "PgUp/PgDn".into(), description: "Page up / down".into() },
                 HelpEntry { key: "/".into(), description: "Search in diff".into() },
                 HelpEntry { key: "n/N".into(), description: "Next / previous search match".into() },
-                HelpEntry { key: "<c-j>/<c-k>".into(), description: "Cycle next / previous revert block (Files)".into() },
                 HelpEntry { key: "<enter>".into(), description: "Revert selected block (Files)".into() },
                 HelpEntry { key: "click 󰧛".into(), description: "Click revert icon to revert that block".into() },
                 HelpEntry {
