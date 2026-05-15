@@ -1393,17 +1393,24 @@ fn render_status_bar(
             let has_selection = diff_view.selected_revert_hunk.is_some();
             let has_undo = !diff_view.revert_undo_stack.is_empty();
             let mut idx = 0;
+            if diff_view.hunk_mode {
+                hints.insert(idx, ("esc", "exit hunk mode"));
+                idx += 1;
+                hints.insert(idx, ("j/k", "cycle hunks"));
+                idx += 1;
+            } else {
+                hints.insert(idx, ("H", "enter hunk mode"));
+                idx += 1;
+            }
             if has_selection {
                 hints.insert(idx, ("enter", "revert hunk"));
                 emphasized.push("enter");
                 idx += 1;
             }
-            idx += 1;
             if has_undo {
                 hints.insert(idx, ("u", "undo revert"));
             }
         }
-        hints.push(("{/}", "prev/next hunk"));
         hints.push(("[/]", "side view"));
     } else {
         // Sidebar-focused: context-specific hints.
@@ -1439,7 +1446,7 @@ fn render_status_bar(
         }
         if !diff_view.is_empty() {
             hints.push(("J/K", "scroll diff"));
-            hints.push(("{/}", "hunks"));
+            hints.push(("H", "hunk mode"));
         }
     }
 

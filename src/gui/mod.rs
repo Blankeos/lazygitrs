@@ -1645,6 +1645,19 @@ impl Gui {
             return Ok(());
         }
 
+        // Enter hunk mode
+        if key.code == KeyCode::Char('H') && self.context_mgr.active() == ContextId::Files {
+            if !self.diff_view.is_empty() {
+                self.diff_focused = true;
+            }
+            self.diff_view.hunk_mode = true;
+            if self.diff_view.selected_revert_hunk.is_none() && !self.diff_view.hunk_starts.is_empty() {
+                self.diff_view.select_next_revert_hunk();
+                self.center_selected_revert_block();
+            }
+            return Ok(());
+        }
+
         // Horizontal scroll (H/L)
         if matches_key(key, &keybindings.universal.scroll_left) {
             self.diff_view.scroll_left(4);
@@ -1652,18 +1665,6 @@ impl Gui {
         }
         if matches_key(key, &keybindings.universal.scroll_right) {
             self.diff_view.scroll_right(4);
-            return Ok(());
-        }
-
-        // Next/prev hunk with { and }
-        if key.code == KeyCode::Char('{') {
-            self.diff_view.prev_hunk();
-            self.center_selected_revert_block();
-            return Ok(());
-        }
-        if key.code == KeyCode::Char('}') {
-            self.diff_view.next_hunk();
-            self.center_selected_revert_block();
             return Ok(());
         }
 
@@ -1993,14 +1994,14 @@ impl Gui {
         }
 
         if matches_key(key, &keybindings.universal.next_revert_block) {
-            if self.context_mgr.active() == ContextId::Files {
+            if self.context_mgr.active() == ContextId::Files && self.diff_view.hunk_mode {
                 self.diff_view.select_next_revert_hunk();
                 self.center_selected_revert_block();
             }
             return Ok(());
         }
         if matches_key(key, &keybindings.universal.prev_revert_block) {
-            if self.context_mgr.active() == ContextId::Files {
+            if self.context_mgr.active() == ContextId::Files && self.diff_view.hunk_mode {
                 self.diff_view.select_prev_revert_hunk();
                 self.center_selected_revert_block();
             }
@@ -2078,7 +2079,10 @@ impl Gui {
         match key.code {
             // Escape: clear revert-hunk selection first, then search, then unfocus diff
             KeyCode::Esc => {
-                if self.diff_view.selected_revert_hunk.is_some() {
+                if self.diff_view.hunk_mode {
+                    self.diff_view.hunk_mode = false;
+                    self.diff_view.selected_revert_hunk = None;
+                } else if self.diff_view.selected_revert_hunk.is_some() {
                     self.diff_view.selected_revert_hunk = None;
                 } else if !self.diff_view.search_query.is_empty() {
                     self.diff_view.clear_search();
@@ -2092,10 +2096,20 @@ impl Gui {
             }
             // j/k/up/down scroll line by line
             KeyCode::Char('j') | KeyCode::Down => {
-                self.diff_view.scroll_down(1);
+                if self.diff_view.hunk_mode {
+                    self.diff_view.select_next_revert_hunk();
+                    self.center_selected_revert_block();
+                } else {
+                    self.diff_view.scroll_down(1);
+                }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.diff_view.scroll_up(1);
+                if self.diff_view.hunk_mode {
+                    self.diff_view.select_prev_revert_hunk();
+                    self.center_selected_revert_block();
+                } else {
+                    self.diff_view.scroll_up(1);
+                }
             }
             // h/l/left/right scroll horizontally
             KeyCode::Char('h') | KeyCode::Left => {
@@ -3285,7 +3299,7 @@ impl Gui {
                 HelpEntry { key: kb.universal.prev_screen_mode.clone(), description: "Shrink panel".into() },
                 HelpEntry { key: kb.universal.create_rebase_options_menu.clone(), description: "Rebase options".into() },
                 HelpEntry { key: kb.universal.create_patch_options_menu.clone(), description: "Patch options".into() },
-                HelpEntry { key: "{/}".into(), description: "Previous/next hunk".into() },
+                HelpEntry { key: "H".into(), description: "Enter hunk mode".into() },
                 HelpEntry { key: ";".into(), description: "Toggle command log".into() },
                 HelpEntry { key: "W".into(), description: "Compare / Diff mode".into() },
                 HelpEntry { key: "I".into(), description: "Interactive rebase onto...".into() },
@@ -3316,8 +3330,9 @@ impl Gui {
                     HelpEntry { key: kb.universal.edit.clone(), description: "Open in editor".into() },
                     HelpEntry { key: kb.universal.open_file.clone(), description: "Open in default program".into() },
                     HelpEntry { key: "y".into(), description: "Copy to clipboard menu".into() },
-                    HelpEntry { key: kb.universal.next_revert_block.clone(), description: "Next revert block in diff".into() },
-                    HelpEntry { key: kb.universal.prev_revert_block.clone(), description: "Previous revert block in diff".into() },
+                    HelpEntry { key: "H".into(), description: "Enter hunk mode".into() },
+                    HelpEntry { key: "j/k".into(), description: "Cycle hunks in hunk mode".into() },
+                    HelpEntry { key: "esc".into(), description: "Exit hunk mode".into() },
                     HelpEntry { key: kb.universal.revert_block.clone(), description: "Revert selected block".into() },
                     HelpEntry { key: kb.universal.undo_revert_block.clone(), description: "Undo last revert (session)".into() },
                 ],
@@ -3500,7 +3515,9 @@ impl Gui {
             entries: vec![
                 HelpEntry { key: "j/k".into(), description: "Scroll down / up".into() },
                 HelpEntry { key: "h/l".into(), description: "Scroll left / right".into() },
-                HelpEntry { key: "{/}".into(), description: "Previous / next hunk".into() },
+                HelpEntry { key: "H".into(), description: "Enter hunk mode".into() },
+                HelpEntry { key: "j/k".into(), description: "Cycle hunks in hunk mode".into() },
+                HelpEntry { key: "esc".into(), description: "Exit hunk mode".into() },
                 HelpEntry { key: "[".into(), description: "Toggle old-only view".into() },
                 HelpEntry { key: "]".into(), description: "Toggle new-only view".into() },
                 HelpEntry { key: "z".into(), description: "Toggle line wrap".into() },

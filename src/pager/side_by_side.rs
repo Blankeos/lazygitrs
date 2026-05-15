@@ -302,6 +302,7 @@ pub struct DiffViewState {
     pub revert_undo_high_water: usize,
     pub preferred_revert_hunk_line: Option<usize>,
     pub center_selected_revert_hunk_on_refresh: bool,
+    pub hunk_mode: bool,
 }
 
 impl Default for DiffViewState {
@@ -332,6 +333,7 @@ impl Default for DiffViewState {
             revert_undo_high_water: 0,
             preferred_revert_hunk_line: None,
             center_selected_revert_hunk_on_refresh: false,
+            hunk_mode: false,
         }
     }
 }
