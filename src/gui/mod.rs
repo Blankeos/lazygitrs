@@ -521,11 +521,15 @@ impl Gui {
                     let diff_loading_show = self.diff_loading && self.diff_loading_since
                         .map(|t| t.elapsed() >= std::time::Duration::from_millis(50))
                         .unwrap_or(false);
+                    let revert_marker_style = crate::pager::side_by_side::RevertHunkMarkerStyle::from_config(
+                        &self.config.user_config.gui.revert_hunk_marker,
+                    );
                     presentation::diff_mode::render(
                         frame,
                         &mut self.diff_mode,
                         &mut self.diff_view,
                         &theme,
+                        &revert_marker_style,
                         self.diff_loading,
                         diff_loading_show,
                     );
@@ -5117,6 +5121,16 @@ impl Gui {
         self.git
             .revert_visual_block_in_worktree(&file_name, &diff, want_old, want_new)?;
 
+        let next_selection = if self.diff_view.hunk_starts.is_empty() {
+            None
+        } else if hunk_idx > 0 {
+            Some(hunk_idx - 1)
+        } else if hunk_idx + 1 < self.diff_view.hunk_starts.len() {
+            Some(hunk_idx)
+        } else {
+            None
+        };
+
         if let Some(bytes) = pre_bytes {
             let stack = &mut self.diff_view.revert_undo_stack;
             if stack.len() >= crate::pager::side_by_side::REVERT_UNDO_STACK_CAP {
@@ -5131,6 +5145,7 @@ impl Gui {
         }
 
         self.diff_view.selection = None;
+        self.diff_view.preferred_revert_hunk = next_selection;
         self.needs_files_refresh = true;
         self.needs_diff_refresh = true;
         Ok(())

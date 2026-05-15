@@ -5,7 +5,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::config::Theme;
+use crate::config::{RevertHunkMarkerConfig, Theme, parse_optional_color};
 
 use super::highlight::FileHighlighter;
 use super::{ChangeType, DiffLine, InlineSegment};
@@ -224,6 +224,32 @@ pub struct RevertUndoEntry {
     pub pre_revert_bytes: Vec<u8>,
 }
 
+#[derive(Clone, Debug)]
+pub struct RevertHunkMarkerStyle {
+    pub icon: String,
+    pub bold: bool,
+    pub color: Option<Color>,
+    pub selected_color: Option<Color>,
+    pub hover_color: Option<Color>,
+}
+
+impl RevertHunkMarkerStyle {
+    pub fn from_config(config: &RevertHunkMarkerConfig) -> Self {
+        let icon = if config.icon.is_empty() {
+            "󰧛".to_string()
+        } else {
+            config.icon.clone()
+        };
+        Self {
+            icon,
+            bold: config.bold.unwrap_or(true),
+            color: parse_optional_color(config.color.as_deref()),
+            selected_color: parse_optional_color(config.selected_color.as_deref()),
+            hover_color: parse_optional_color(config.hover_color.as_deref()),
+        }
+    }
+}
+
 /// Maximum entries kept in the revert-hunk undo stack.
 pub const REVERT_UNDO_STACK_CAP: usize = 20;
 
@@ -274,6 +300,7 @@ pub struct DiffViewState {
     /// `n/m` denominator in the bottom-right footnote; resets to 0 once the
     /// stack drains so a fresh streak starts at `1/1`.
     pub revert_undo_high_water: usize,
+    pub preferred_revert_hunk: Option<usize>,
 }
 
 impl Default for DiffViewState {
@@ -302,6 +329,7 @@ impl Default for DiffViewState {
             hovered_revert_hunk: None,
             revert_undo_stack: Vec::new(),
             revert_undo_high_water: 0,
+            preferred_revert_hunk: None,
         }
     }
 }
@@ -582,10 +610,13 @@ impl DiffViewState {
         self.sections = parsed.sections;
         self.file_exists_on_disk = parsed.file_exists_on_disk;
         self.selected_revert_hunk = if same_file {
-            prev_selected_revert_hunk.filter(|&i| i < self.hunk_starts.len())
+            self.preferred_revert_hunk
+                .or(prev_selected_revert_hunk)
+                .filter(|&i| i < self.hunk_starts.len())
         } else {
             None
         };
+        self.preferred_revert_hunk = None;
         self.hovered_revert_hunk = if same_file {
             prev_hovered_revert_hunk.filter(|&i| i < self.hunk_starts.len())
         } else {
@@ -947,6 +978,7 @@ pub fn render_diff(
     area: Rect,
     state: &DiffViewState,
     theme: &Theme,
+    marker_cfg: &RevertHunkMarkerStyle,
     focused: bool,
     diff_loading: bool,
     show_revert_markers: bool,
@@ -1349,13 +1381,17 @@ pub fn render_diff(
                         // Hover wins over selection so the hover state is always
                         // visible — even on a hunk that's currently selected.
                         let fg = if marker_is_hovered {
-                            theme.accent_secondary
+                            marker_cfg.hover_color.unwrap_or(theme.accent_secondary)
                         } else if is_selected {
-                            theme.accent
+                            marker_cfg.selected_color.unwrap_or(theme.accent)
                         } else {
-                            theme.separator
+                            marker_cfg.color.unwrap_or(theme.separator)
                         };
-                        ("󰧛", Style::default().fg(fg).add_modifier(Modifier::BOLD))
+                        let mut style = Style::default().fg(fg);
+                        if marker_cfg.bold {
+                            style = style.add_modifier(Modifier::BOLD);
+                        }
+                        (marker_cfg.icon.as_str(), style)
                     } else {
                         ("│", divider_style)
                     };
@@ -1456,13 +1492,17 @@ pub fn render_diff(
                 let (divider_char, marker_style) = if show_marker {
                     let is_selected = marker_hunk_idx == state.selected_revert_hunk;
                     let fg = if marker_is_hovered {
-                        theme.accent_secondary
+                        marker_cfg.hover_color.unwrap_or(theme.accent_secondary)
                     } else if is_selected {
-                        theme.accent
+                        marker_cfg.selected_color.unwrap_or(theme.accent)
                     } else {
-                        theme.separator
+                        marker_cfg.color.unwrap_or(theme.separator)
                     };
-                    ("󰧛", Style::default().fg(fg).add_modifier(Modifier::BOLD))
+                    let mut style = Style::default().fg(fg);
+                    if marker_cfg.bold {
+                        style = style.add_modifier(Modifier::BOLD);
+                    }
+                    (marker_cfg.icon.as_str(), style)
                 } else {
                     ("│", divider_style)
                 };

@@ -68,6 +68,9 @@ pub fn render(
     ai_button_hovered: bool,
     ai_configured: bool,
 ) {
+    let revert_marker_style = side_by_side::RevertHunkMarkerStyle::from_config(
+        &config.user_config.gui.revert_hunk_marker,
+    );
     let area = frame.area();
     let panel_count = SideWindow::ALL.len();
 
@@ -99,7 +102,16 @@ pub fn render(
             // Diff is focused: show diff fullscreen
             if !diff_view.is_empty() {
                 let show_revert_markers = ctx_mgr.active() == ContextId::Files;
-                side_by_side::render_diff(frame, fl.main_panel, diff_view, theme, true, diff_loading_show, show_revert_markers);
+                side_by_side::render_diff(
+                    frame,
+                    fl.main_panel,
+                    diff_view,
+                    theme,
+                    &revert_marker_style,
+                    true,
+                    diff_loading_show,
+                    show_revert_markers,
+                );
                 side_by_side::render_diff_search_highlights(frame, fl.main_panel, diff_view, theme);
                 side_by_side::render_diff_search_bar(frame, fl.main_panel, diff_view, theme);
             } else if diff_loading {
@@ -586,7 +598,16 @@ pub fn render(
         render_status_main(frame, fl.main_panel, model, config, theme, status_block);
     } else if !diff_view.is_empty() {
         let show_revert_markers = ctx_mgr.active() == ContextId::Files;
-        side_by_side::render_diff(frame, fl.main_panel, diff_view, theme, diff_focused, diff_loading_show, show_revert_markers);
+        side_by_side::render_diff(
+            frame,
+            fl.main_panel,
+            diff_view,
+            theme,
+            &revert_marker_style,
+            diff_focused,
+            diff_loading_show,
+            show_revert_markers,
+        );
         side_by_side::render_diff_search_highlights(frame, fl.main_panel, diff_view, theme);
         side_by_side::render_diff_search_bar(frame, fl.main_panel, diff_view, theme);
     } else if diff_loading {
