@@ -1403,8 +1403,8 @@ fn render_status_bar(
                 idx += 1;
             }
             if has_selection {
-                hints.insert(idx, ("enter", "revert hunk"));
-                emphasized.push("enter");
+                hints.insert(idx, ("r", "revert hunk"));
+                emphasized.push("r");
                 idx += 1;
             }
             if has_undo {

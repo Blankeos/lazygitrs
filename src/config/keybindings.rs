@@ -167,7 +167,7 @@ impl Default for UniversalKeybinding {
             create_patch_options_menu: "<c-p>".into(),
             prev_revert_block: "{".into(),
             next_revert_block: "}".into(),
-            revert_block: "<enter>".into(),
+            revert_block: "r".into(),
             undo_revert_block: "u".into(),
         }
     }
