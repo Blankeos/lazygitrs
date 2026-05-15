@@ -709,6 +709,10 @@ impl Gui {
                 }
                 DiffPayload::Parsed(parsed) => {
                     self.diff_view.apply_parsed(parsed);
+                    if self.diff_view.center_selected_revert_hunk_on_refresh {
+                        self.center_selected_revert_block();
+                        self.diff_view.center_selected_revert_hunk_on_refresh = false;
+                    }
                 }
                 DiffPayload::Empty => {
                     self.diff_view = DiffViewState::new();
@@ -5121,15 +5125,7 @@ impl Gui {
         self.git
             .revert_visual_block_in_worktree(&file_name, &diff, want_old, want_new)?;
 
-        let next_selection = if self.diff_view.hunk_starts.is_empty() {
-            None
-        } else if hunk_idx > 0 {
-            Some(hunk_idx - 1)
-        } else if hunk_idx + 1 < self.diff_view.hunk_starts.len() {
-            Some(hunk_idx)
-        } else {
-            None
-        };
+        let preferred_hunk_line = self.diff_view.hunk_starts.get(hunk_idx).copied();
 
         if let Some(bytes) = pre_bytes {
             let stack = &mut self.diff_view.revert_undo_stack;
@@ -5145,7 +5141,8 @@ impl Gui {
         }
 
         self.diff_view.selection = None;
-        self.diff_view.preferred_revert_hunk = next_selection;
+        self.diff_view.preferred_revert_hunk_line = preferred_hunk_line;
+        self.diff_view.center_selected_revert_hunk_on_refresh = true;
         self.needs_files_refresh = true;
         self.needs_diff_refresh = true;
         Ok(())

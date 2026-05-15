@@ -300,7 +300,8 @@ pub struct DiffViewState {
     /// `n/m` denominator in the bottom-right footnote; resets to 0 once the
     /// stack drains so a fresh streak starts at `1/1`.
     pub revert_undo_high_water: usize,
-    pub preferred_revert_hunk: Option<usize>,
+    pub preferred_revert_hunk_line: Option<usize>,
+    pub center_selected_revert_hunk_on_refresh: bool,
 }
 
 impl Default for DiffViewState {
@@ -329,7 +330,8 @@ impl Default for DiffViewState {
             hovered_revert_hunk: None,
             revert_undo_stack: Vec::new(),
             revert_undo_high_water: 0,
-            preferred_revert_hunk: None,
+            preferred_revert_hunk_line: None,
+            center_selected_revert_hunk_on_refresh: false,
         }
     }
 }
@@ -610,13 +612,19 @@ impl DiffViewState {
         self.sections = parsed.sections;
         self.file_exists_on_disk = parsed.file_exists_on_disk;
         self.selected_revert_hunk = if same_file {
-            self.preferred_revert_hunk
-                .or(prev_selected_revert_hunk)
-                .filter(|&i| i < self.hunk_starts.len())
+            if let Some(anchor_line) = self.preferred_revert_hunk_line {
+                self.hunk_starts
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, line_idx)| (**line_idx).abs_diff(anchor_line))
+                    .map(|(idx, _)| idx)
+            } else {
+                prev_selected_revert_hunk.filter(|&i| i < self.hunk_starts.len())
+            }
         } else {
             None
         };
-        self.preferred_revert_hunk = None;
+        self.preferred_revert_hunk_line = None;
         self.hovered_revert_hunk = if same_file {
             prev_hovered_revert_hunk.filter(|&i| i < self.hunk_starts.len())
         } else {
