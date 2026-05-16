@@ -1645,8 +1645,8 @@ impl Gui {
             return Ok(());
         }
 
-        // Enter hunk mode
-        if key.code == KeyCode::Char('H') && self.context_mgr.active() == ContextId::Files {
+        // Enter hunk mode from the files panel before diff focus.
+        if key.code == KeyCode::Char('H') && self.context_mgr.active() == ContextId::Files && !self.diff_focused {
             if !self.diff_view.is_empty() {
                 self.diff_focused = true;
             }
@@ -1991,6 +1991,18 @@ impl Gui {
                 self.diff_view.prev_search_match();
                 return Ok(());
             }
+        }
+
+        if key.code == KeyCode::Char('H')
+            && self.context_mgr.active() == ContextId::Files
+            && !self.diff_view.hunk_mode
+        {
+            self.diff_view.hunk_mode = true;
+            if self.diff_view.selected_hunk.is_none() && !self.diff_view.hunk_starts.is_empty() {
+                self.diff_view.select_next_hunk();
+                self.center_selected_hunk();
+            }
+            return Ok(());
         }
 
         if matches_key(key, &keybindings.universal.next_revert_block) {

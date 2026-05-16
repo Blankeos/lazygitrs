@@ -1386,9 +1386,6 @@ fn render_status_bar(
 
     if diff_focused && !diff_view.is_empty() {
         // Diff-focused hint set: only the diff-relevant keys, kept tight.
-        // Revert-related keys are grouped together at the front so users see
-        // enter right next to its cycle keys. enter itself only appears when a
-        // hunk is actually selected (pressing it otherwise is a no-op).
         if ctx_mgr.active() == ContextId::Files {
             let has_selection = diff_view.selected_hunk.is_some();
             let has_undo = !diff_view.hunk_action_undo_stack.is_empty();
@@ -1449,7 +1446,7 @@ fn render_status_bar(
         }
         if !diff_view.is_empty() {
             hints.push(("J/K", "scroll diff"));
-            hints.push(("H", "hunk mode"));
+            hints.push(("H", "enter hunk mode"));
         }
     }
 
