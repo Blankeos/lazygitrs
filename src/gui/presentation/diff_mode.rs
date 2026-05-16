@@ -8,7 +8,7 @@ use crate::config::Theme;
 use crate::gui::modes::diff_mode::{DiffModeFocus, DiffModeState, RefKind};
 use crate::model::{CommitFile, FileChangeStatus};
 use crate::model::file_tree::CommitFileTreeNode;
-use crate::pager::side_by_side::{self, DiffViewState, RevertHunkMarkerStyle};
+use crate::pager::side_by_side::{self, DiffViewState, HunkMarkerStyle};
 
 /// Max items visible in the dropdown at once.
 const DROPDOWN_MAX_VISIBLE: usize = 10;
@@ -18,7 +18,7 @@ pub fn render(
     state: &mut DiffModeState,
     diff_view: &mut DiffViewState,
     theme: &Theme,
-    revert_marker_style: &RevertHunkMarkerStyle,
+    hunk_marker_style: &HunkMarkerStyle,
     diff_loading: bool,
     diff_loading_show: bool,
 ) {
@@ -56,7 +56,7 @@ pub fn render(
         state,
         diff_view,
         theme,
-        revert_marker_style,
+        hunk_marker_style,
         diff_loading,
         diff_loading_show,
     );
@@ -287,7 +287,7 @@ fn render_diff_panel(
     state: &DiffModeState,
     diff_view: &mut DiffViewState,
     theme: &Theme,
-    revert_marker_style: &RevertHunkMarkerStyle,
+    hunk_marker_style: &HunkMarkerStyle,
     diff_loading: bool,
     diff_loading_show: bool,
 ) {
@@ -299,7 +299,7 @@ fn render_diff_panel(
             area,
             diff_view,
             theme,
-            revert_marker_style,
+            hunk_marker_style,
             focused,
             diff_loading,
             false,

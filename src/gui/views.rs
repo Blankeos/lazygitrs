@@ -68,8 +68,8 @@ pub fn render(
     ai_button_hovered: bool,
     ai_configured: bool,
 ) {
-    let revert_marker_style = side_by_side::RevertHunkMarkerStyle::from_config(
-        &config.user_config.gui.revert_hunk_marker,
+    let hunk_marker_style = side_by_side::HunkMarkerStyle::from_config(
+        &config.user_config.gui.hunk_marker,
     );
     let area = frame.area();
     let panel_count = SideWindow::ALL.len();
@@ -107,7 +107,7 @@ pub fn render(
                     fl.main_panel,
                     diff_view,
                     theme,
-                    &revert_marker_style,
+                    &hunk_marker_style,
                     true,
                     diff_loading_show,
                     show_revert_markers,
@@ -603,7 +603,7 @@ pub fn render(
             fl.main_panel,
             diff_view,
             theme,
-            &revert_marker_style,
+            &hunk_marker_style,
             diff_focused,
             diff_loading_show,
             show_revert_markers,
@@ -1386,24 +1386,31 @@ fn render_status_bar(
 
     if diff_focused && !diff_view.is_empty() {
         // Diff-focused hint set: only the diff-relevant keys, kept tight.
-        // Revert-related keys are grouped together at the front so users see
-        // enter right next to its cycle keys. enter itself only appears when a
-        // hunk is actually selected (pressing it otherwise is a no-op).
         if ctx_mgr.active() == ContextId::Files {
-            let has_selection = diff_view.selected_revert_hunk.is_some();
-            let has_undo = !diff_view.revert_undo_stack.is_empty();
+            let has_selection = diff_view.selected_hunk.is_some();
+            let has_undo = !diff_view.hunk_action_undo_stack.is_empty();
             let mut idx = 0;
-            if has_selection {
-                hints.insert(idx, ("enter", "revert hunk"));
-                emphasized.push("enter");
+            if diff_view.hunk_mode {
+                hints.insert(idx, ("esc", "exit hunk mode"));
+                idx += 1;
+                hints.insert(idx, ("j/k", "cycle hunks"));
+                idx += 1;
+            } else {
+                hints.insert(idx, ("H", "enter hunk mode"));
                 idx += 1;
             }
-            idx += 1;
+            if has_selection {
+                hints.insert(idx, ("a", "stage hunk"));
+                emphasized.push("a");
+                idx += 1;
+                hints.insert(idx, ("r", "revert hunk"));
+                emphasized.push("r");
+                idx += 1;
+            }
             if has_undo {
-                hints.insert(idx, ("u", "undo revert"));
+                hints.insert(idx, ("u", "undo hunk action"));
             }
         }
-        hints.push(("{/}", "prev/next hunk"));
         hints.push(("[/]", "side view"));
     } else {
         // Sidebar-focused: context-specific hints.
@@ -1439,7 +1446,7 @@ fn render_status_bar(
         }
         if !diff_view.is_empty() {
             hints.push(("J/K", "scroll diff"));
-            hints.push(("{/}", "hunks"));
+            hints.push(("H", "enter hunk mode"));
         }
     }
 

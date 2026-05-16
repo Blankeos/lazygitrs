@@ -5,7 +5,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::config::{RevertHunkMarkerConfig, Theme, parse_optional_color};
+use crate::config::{HunkMarkerConfig, Theme, parse_optional_color};
 
 use super::highlight::FileHighlighter;
 use super::{ChangeType, DiffLine, InlineSegment};
@@ -218,14 +218,31 @@ pub struct DiffSearchMatch {
     pub col: usize,
 }
 
-/// One entry in the diff view's revert-hunk undo stack.
-pub struct RevertUndoEntry {
-    pub file_path: String,
-    pub pre_revert_bytes: Vec<u8>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HunkActionKind {
+    Stage,
+    Revert,
+}
+
+impl HunkActionKind {
+    pub fn verb(self) -> &'static str {
+        match self {
+            Self::Stage => "stage",
+            Self::Revert => "revert",
+        }
+    }
+}
+
+/// One entry in the diff view's hunk-action undo stack.
+pub struct HunkActionUndoEntry {
+    pub action: HunkActionKind,
+    pub patch: String,
+    pub apply_cached: bool,
+    pub reverse: bool,
 }
 
 #[derive(Clone, Debug)]
-pub struct RevertHunkMarkerStyle {
+pub struct HunkMarkerStyle {
     pub icon: String,
     pub bold: bool,
     pub color: Option<Color>,
@@ -233,10 +250,10 @@ pub struct RevertHunkMarkerStyle {
     pub hover_color: Option<Color>,
 }
 
-impl RevertHunkMarkerStyle {
-    pub fn from_config(config: &RevertHunkMarkerConfig) -> Self {
+impl HunkMarkerStyle {
+    pub fn from_config(config: &HunkMarkerConfig) -> Self {
         let icon = if config.icon.is_empty() {
-            "󰧛".to_string()
+            "".to_string()
         } else {
             config.icon.clone()
         };
@@ -288,20 +305,20 @@ pub struct DiffViewState {
     pub search_match_idx: usize,
     /// Textarea widget for search input.
     pub search_textarea: Option<tui_textarea::TextArea<'static>>,
-    /// Currently selected revert-button hunk index (for keyboard cycling).
-    pub selected_revert_hunk: Option<usize>,
+    /// Currently selected hunk-action marker index (for keyboard cycling).
+    pub selected_hunk: Option<usize>,
     /// Hunk index currently under the mouse cursor (for tooltip rendering).
-    pub hovered_revert_hunk: Option<usize>,
-    /// Pre-revert file snapshots, most-recent last. Bounded by
-    /// `REVERT_UNDO_STACK_CAP`. Used to undo revert-hunk actions within a
-    /// session.
-    pub revert_undo_stack: Vec<RevertUndoEntry>,
-    /// Peak `revert_undo_stack.len()` since it was last empty. Drives the
+    pub hovered_hunk: Option<usize>,
+    /// Pre-action file snapshots, most-recent last. Bounded by
+    /// `REVERT_UNDO_STACK_CAP`. Used to undo hunk actions within a session.
+    pub hunk_action_undo_stack: Vec<HunkActionUndoEntry>,
+    /// Peak `hunk_action_undo_stack.len()` since it was last empty. Drives the
     /// `n/m` denominator in the bottom-right footnote; resets to 0 once the
     /// stack drains so a fresh streak starts at `1/1`.
-    pub revert_undo_high_water: usize,
-    pub preferred_revert_hunk_line: Option<usize>,
-    pub center_selected_revert_hunk_on_refresh: bool,
+    pub hunk_action_undo_high_water: usize,
+    pub preferred_selected_hunk_line: Option<usize>,
+    pub center_selected_hunk_on_refresh: bool,
+    pub hunk_mode: bool,
 }
 
 impl Default for DiffViewState {
@@ -326,12 +343,13 @@ impl Default for DiffViewState {
             search_matches: Vec::new(),
             search_match_idx: 0,
             search_textarea: None,
-            selected_revert_hunk: None,
-            hovered_revert_hunk: None,
-            revert_undo_stack: Vec::new(),
-            revert_undo_high_water: 0,
-            preferred_revert_hunk_line: None,
-            center_selected_revert_hunk_on_refresh: false,
+            selected_hunk: None,
+            hovered_hunk: None,
+            hunk_action_undo_stack: Vec::new(),
+            hunk_action_undo_high_water: 0,
+            preferred_selected_hunk_line: None,
+            center_selected_hunk_on_refresh: false,
+            hunk_mode: false,
         }
     }
 }
@@ -601,8 +619,8 @@ impl DiffViewState {
     /// Apply a pre-parsed diff result, preserving scroll position for same-file reloads.
     pub fn apply_parsed(&mut self, parsed: ParsedDiff) {
         let same_file = self.filename == parsed.filename;
-        let prev_selected_revert_hunk = self.selected_revert_hunk;
-        let prev_hovered_revert_hunk = self.hovered_revert_hunk;
+        let prev_selected_hunk = self.selected_hunk;
+        let prev_hovered_hunk = self.hovered_hunk;
         self.filename = parsed.filename;
         self.old_content = parsed.old_content;
         self.new_content = parsed.new_content;
@@ -611,22 +629,22 @@ impl DiffViewState {
         self.hunk_line_offsets = parsed.hunk_line_offsets;
         self.sections = parsed.sections;
         self.file_exists_on_disk = parsed.file_exists_on_disk;
-        self.selected_revert_hunk = if same_file {
-            if let Some(anchor_line) = self.preferred_revert_hunk_line {
+        self.selected_hunk = if same_file {
+            if let Some(anchor_line) = self.preferred_selected_hunk_line {
                 self.hunk_starts
                     .iter()
                     .enumerate()
                     .min_by_key(|(_, line_idx)| (**line_idx).abs_diff(anchor_line))
                     .map(|(idx, _)| idx)
             } else {
-                prev_selected_revert_hunk.filter(|&i| i < self.hunk_starts.len())
+                prev_selected_hunk.filter(|&i| i < self.hunk_starts.len())
             }
         } else {
             None
         };
-        self.preferred_revert_hunk_line = None;
-        self.hovered_revert_hunk = if same_file {
-            prev_hovered_revert_hunk.filter(|&i| i < self.hunk_starts.len())
+        self.preferred_selected_hunk_line = None;
+        self.hovered_hunk = if same_file {
+            prev_hovered_hunk.filter(|&i| i < self.hunk_starts.len())
         } else {
             None
         };
@@ -645,8 +663,8 @@ impl DiffViewState {
     pub fn load(&mut self, filename: &str, old: &str, new: &str) {
         // Preserve scroll position when reloading the same file (e.g. periodic refresh)
         let same_file = self.filename == filename;
-        let prev_selected_revert_hunk = self.selected_revert_hunk;
-        let prev_hovered_revert_hunk = self.hovered_revert_hunk;
+        let prev_selected_hunk = self.selected_hunk;
+        let prev_hovered_hunk = self.hovered_hunk;
         self.filename = filename.to_string();
         self.old_content = old.to_string();
         self.new_content = new.to_string();
@@ -663,13 +681,13 @@ impl DiffViewState {
             self.selection = None;
             self.clear_search();
         }
-        self.selected_revert_hunk = if same_file {
-            prev_selected_revert_hunk.filter(|&i| i < self.hunk_starts.len())
+        self.selected_hunk = if same_file {
+            prev_selected_hunk.filter(|&i| i < self.hunk_starts.len())
         } else {
             None
         };
-        self.hovered_revert_hunk = if same_file {
-            prev_hovered_revert_hunk.filter(|&i| i < self.hunk_starts.len())
+        self.hovered_hunk = if same_file {
+            prev_hovered_hunk.filter(|&i| i < self.hunk_starts.len())
         } else {
             None
         };
@@ -725,8 +743,8 @@ impl DiffViewState {
             let file_count = file_diffs.len();
             let new_filename = format!("{} ({} files)", filename, file_count);
             let same_file = self.filename == new_filename;
-            let prev_selected_revert_hunk = self.selected_revert_hunk;
-            let prev_hovered_revert_hunk = self.hovered_revert_hunk;
+            let prev_selected_hunk = self.selected_hunk;
+            let prev_hovered_hunk = self.hovered_hunk;
             self.filename = new_filename;
             self.old_content = String::new();
             self.new_content = String::new();
@@ -738,13 +756,13 @@ impl DiffViewState {
                 self.selection = None;
                 self.clear_search();
             }
-            self.selected_revert_hunk = if same_file {
-                prev_selected_revert_hunk
+            self.selected_hunk = if same_file {
+                prev_selected_hunk
             } else {
                 None
             };
-            self.hovered_revert_hunk = if same_file {
-                prev_hovered_revert_hunk
+            self.hovered_hunk = if same_file {
+                prev_hovered_hunk
             } else {
                 None
             };
@@ -795,14 +813,14 @@ impl DiffViewState {
             }
 
             self.hunk_starts = super::diff_algo::find_hunk_starts(&self.lines);
-            self.selected_revert_hunk = if same_file {
-                self.selected_revert_hunk
+            self.selected_hunk = if same_file {
+                self.selected_hunk
                     .filter(|&i| i < self.hunk_starts.len())
             } else {
                 None
             };
-            self.hovered_revert_hunk = if same_file {
-                self.hovered_revert_hunk
+            self.hovered_hunk = if same_file {
+                self.hovered_hunk
                     .filter(|&i| i < self.hunk_starts.len())
             } else {
                 None
@@ -836,7 +854,7 @@ impl DiffViewState {
     pub fn next_hunk(&mut self) {
         if let Some(next) = self.hunk_starts.iter().find(|&&h| h > self.scroll_offset) {
             self.scroll_offset = *next;
-            self.selected_revert_hunk = self.hunk_index_for_start_line(*next);
+            self.selected_hunk = self.hunk_index_for_start_line(*next);
         }
     }
 
@@ -848,7 +866,7 @@ impl DiffViewState {
             .find(|&&h| h < self.scroll_offset)
         {
             self.scroll_offset = *prev;
-            self.selected_revert_hunk = self.hunk_index_for_start_line(*prev);
+            self.selected_hunk = self.hunk_index_for_start_line(*prev);
         }
     }
 
@@ -936,9 +954,9 @@ impl DiffViewState {
         Some((start, end.saturating_sub(1)))
     }
 
-    /// Return the line index where the sticky revert marker should render for this hunk,
+    /// Return the line index where the sticky hunk marker should render for this hunk,
     /// or `None` when no part of the hunk is visible in the current viewport.
-    pub fn sticky_revert_marker_line(
+    pub fn sticky_hunk_marker_line(
         &self,
         block_idx: usize,
         visible_height: usize,
@@ -979,34 +997,34 @@ impl DiffViewState {
         offsets
     }
 
-    /// Cycle to the next revertable hunk marker.
-    pub fn select_next_revert_hunk(&mut self) {
+    /// Cycle to the next hunk marker.
+    pub fn select_next_hunk(&mut self) {
         if self.hunk_starts.is_empty() {
-            self.selected_revert_hunk = None;
+            self.selected_hunk = None;
             return;
         }
-        let next = match self.selected_revert_hunk {
+        let next = match self.selected_hunk {
             Some(i) => (i + 1) % self.hunk_starts.len(),
             None => 0,
         };
-        self.selected_revert_hunk = Some(next);
+        self.selected_hunk = Some(next);
     }
 
-    /// Cycle to the previous revertable hunk marker.
-    pub fn select_prev_revert_hunk(&mut self) {
+    /// Cycle to the previous hunk marker.
+    pub fn select_prev_hunk(&mut self) {
         if self.hunk_starts.is_empty() {
-            self.selected_revert_hunk = None;
+            self.selected_hunk = None;
             return;
         }
-        let prev = match self.selected_revert_hunk {
+        let prev = match self.selected_hunk {
             Some(0) | None => self.hunk_starts.len() - 1,
             Some(i) => i.saturating_sub(1),
         };
-        self.selected_revert_hunk = Some(prev);
+        self.selected_hunk = Some(prev);
     }
 
-    /// Return the sticky revert-marker hunk rendered at `line_idx` for the current viewport.
-    pub fn sticky_revert_hunk_at_line(
+    /// Return the sticky hunk marker rendered at `line_idx` for the current viewport.
+    pub fn sticky_hunk_at_line(
         &self,
         line_idx: usize,
         visible_height: usize,
@@ -1015,7 +1033,7 @@ impl DiffViewState {
             return None;
         }
         self.hunk_starts.iter().enumerate().find_map(|(idx, _)| {
-            (self.sticky_revert_marker_line(idx, visible_height) == Some(line_idx)).then_some(idx)
+            (self.sticky_hunk_marker_line(idx, visible_height) == Some(line_idx)).then_some(idx)
         })
     }
 
@@ -1037,7 +1055,7 @@ pub fn render_diff(
     area: Rect,
     state: &DiffViewState,
     theme: &Theme,
-    marker_cfg: &RevertHunkMarkerStyle,
+    marker_cfg: &HunkMarkerStyle,
     focused: bool,
     diff_loading: bool,
     show_revert_markers: bool,
@@ -1079,13 +1097,13 @@ pub fn render_diff(
         .borders(Borders::ALL)
         .border_style(border_style);
 
-    // Bottom-right footnote: revert-hunk undo indicator. Only shown when
+    // Bottom-right footnote: hunk-action undo indicator. Only shown when
     // there's something to undo; the denominator is the peak stack depth
     // since it last drained, so a streak reads `1/1`, `2/2`, ... and undos
     // walk it back down to `1/3` etc.
-    let undo_n = state.revert_undo_stack.len();
+    let undo_n = state.hunk_action_undo_stack.len();
     if undo_n > 0 {
-        let undo_m = state.revert_undo_high_water.max(undo_n);
+        let undo_m = state.hunk_action_undo_high_water.max(undo_n);
         block = block.title_bottom(
             Line::from(vec![
                 Span::styled(" ", Style::default().fg(theme.text_dimmed)),
@@ -1096,7 +1114,7 @@ pub fn render_diff(
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!(" undo revert ({}/{}) ", undo_n, undo_m),
+                    format!(" undo hunk action ({}/{}) ", undo_n, undo_m),
                     Style::default().fg(theme.text_dimmed),
                 ),
             ])
@@ -1422,18 +1440,18 @@ pub fn render_diff(
                         );
                     }
 
-                    // Divider or revert marker (first visual row of a hunk only).
+                    // Divider or hunk marker (first visual row of a hunk only).
                     let marker_hunk_idx = if show_revert_markers && !state.wrap && chunk_idx == 0 {
-                        state.sticky_revert_hunk_at_line(line_idx, visible_height)
+                        state.sticky_hunk_at_line(line_idx, visible_height)
                     } else {
                         None
                     };
                     let show_marker = marker_hunk_idx.is_some();
                     let marker_is_hovered = show_marker
                         && marker_hunk_idx.is_some()
-                        && marker_hunk_idx == state.hovered_revert_hunk;
-                    let (divider_char, marker_style) = if show_marker {
-                        let is_selected = marker_hunk_idx == state.selected_revert_hunk;
+                        && marker_hunk_idx == state.hovered_hunk;
+                    let (divider_chars, marker_style) = if show_marker {
+                        let is_selected = marker_hunk_idx == state.selected_hunk;
                         // Hover wins over selection so the hover state is always
                         // visible — even on a hunk that's currently selected.
                         let fg = if marker_is_hovered {
@@ -1447,15 +1465,16 @@ pub fn render_diff(
                         if marker_cfg.bold {
                             style = style.add_modifier(Modifier::BOLD);
                         }
-                        (marker_cfg.icon.as_str(), style)
+                        let chars = if is_selected { "󱐌" } else { marker_cfg.icon.as_str() };
+                        (chars, style)
                     } else {
                         ("│", divider_style)
                     };
                     buf_write_str(buf, div_x, y, "  ", divider_style, divider_width);
-                    buf_write_str(buf, div_x, y, divider_char, marker_style, divider_width);
+                    buf_write_str(buf, div_x, y, divider_chars, marker_style, divider_width);
                     if show_marker
                         && marker_hunk_idx.is_some()
-                        && marker_hunk_idx == state.hovered_revert_hunk
+                        && marker_hunk_idx == state.hovered_hunk
                     {
                         hover_tooltip_y = Some(y);
                     }
@@ -1534,18 +1553,18 @@ pub fn render_diff(
                     state.horizontal_scroll,
                 );
 
-                // Divider or revert marker.
+                // Divider or hunk marker.
                 let marker_hunk_idx = if show_revert_markers && !state.wrap {
-                    state.sticky_revert_hunk_at_line(line_idx, visible_height)
+                    state.sticky_hunk_at_line(line_idx, visible_height)
                 } else {
                     None
                 };
                 let show_marker = marker_hunk_idx.is_some();
                 let marker_is_hovered = show_marker
                     && marker_hunk_idx.is_some()
-                    && marker_hunk_idx == state.hovered_revert_hunk;
-                let (divider_char, marker_style) = if show_marker {
-                    let is_selected = marker_hunk_idx == state.selected_revert_hunk;
+                    && marker_hunk_idx == state.hovered_hunk;
+                let (divider_chars, marker_style) = if show_marker {
+                    let is_selected = marker_hunk_idx == state.selected_hunk;
                     let fg = if marker_is_hovered {
                         marker_cfg.hover_color.unwrap_or(theme.accent_secondary)
                     } else if is_selected {
@@ -1557,15 +1576,16 @@ pub fn render_diff(
                     if marker_cfg.bold {
                         style = style.add_modifier(Modifier::BOLD);
                     }
-                    (marker_cfg.icon.as_str(), style)
+                    let chars = if is_selected { "󱐌" } else { marker_cfg.icon.as_str() };
+                    (chars, style)
                 } else {
                     ("│", divider_style)
                 };
                 buf_write_str(buf, div_x, y, "  ", divider_style, divider_width);
-                buf_write_str(buf, div_x, y, divider_char, marker_style, divider_width);
+                buf_write_str(buf, div_x, y, divider_chars, marker_style, divider_width);
                 if show_marker
                     && marker_hunk_idx.is_some()
-                    && marker_hunk_idx == state.hovered_revert_hunk
+                    && marker_hunk_idx == state.hovered_hunk
                 {
                     hover_tooltip_y = Some(y);
                 }
@@ -1614,9 +1634,8 @@ pub fn render_diff(
         }
 
         if let Some(y) = hover_tooltip_y {
-            let show_key = state.hovered_revert_hunk.is_some()
-                && state.hovered_revert_hunk == state.selected_revert_hunk;
-            render_revert_tooltip(
+            let show_key = state.hovered_hunk.is_some() && state.hovered_hunk == state.selected_hunk;
+            render_hunk_action_tooltip(
                 buf,
                 div_x + divider_width,
                 y,
@@ -1628,7 +1647,7 @@ pub fn render_diff(
     }
 }
 
-fn render_revert_tooltip(
+fn render_hunk_action_tooltip(
     buf: &mut Buffer,
     x: u16,
     y: u16,
@@ -1645,11 +1664,13 @@ fn render_revert_tooltip(
     let parts: Vec<(&str, Style)> = if show_key {
         vec![
             (" ", tip_style),
-            ("enter", key_style),
-            (" Revert hunk ", tip_style),
+            ("a", key_style),
+            (" stage ", tip_style),
+            ("r", key_style),
+            (" revert ", tip_style),
         ]
     } else {
-        vec![(" Revert hunk ", tip_style)]
+        vec![(" Stage/revert hunk ", tip_style)]
     };
 
     let buf_area = buf.area();
