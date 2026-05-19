@@ -10,7 +10,7 @@ use anyhow::Result;
 pub use app_state::AppState;
 pub use keybindings::KeybindingConfig;
 pub use theme::{Theme, ColorTheme, COLOR_THEMES};
-pub use user_config::UserConfig;
+pub use user_config::{HunkMarkerConfig, UserConfig, parse_optional_color};
 
 pub fn config_dir_candidates() -> Vec<PathBuf> {
     let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));

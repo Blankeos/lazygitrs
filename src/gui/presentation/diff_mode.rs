@@ -8,7 +8,7 @@ use crate::config::Theme;
 use crate::gui::modes::diff_mode::{DiffModeFocus, DiffModeState, RefKind};
 use crate::model::{CommitFile, FileChangeStatus};
 use crate::model::file_tree::CommitFileTreeNode;
-use crate::pager::side_by_side::{self, DiffViewState};
+use crate::pager::side_by_side::{self, DiffViewState, HunkMarkerStyle};
 
 /// Max items visible in the dropdown at once.
 const DROPDOWN_MAX_VISIBLE: usize = 10;
@@ -18,6 +18,7 @@ pub fn render(
     state: &mut DiffModeState,
     diff_view: &mut DiffViewState,
     theme: &Theme,
+    hunk_marker_style: &HunkMarkerStyle,
     diff_loading: bool,
     diff_loading_show: bool,
 ) {
@@ -49,7 +50,16 @@ pub fn render(
     render_commit_files(frame, sidebar[2], state, theme);
 
     // Right panel: diff exploration
-    render_diff_panel(frame, content[1], state, diff_view, theme, diff_loading, diff_loading_show);
+    render_diff_panel(
+        frame,
+        content[1],
+        state,
+        diff_view,
+        theme,
+        hunk_marker_style,
+        diff_loading,
+        diff_loading_show,
+    );
 
     // Text selection highlight overlay and tooltip (must be before popups/dropdowns)
     crate::gui::views::render_selection_overlay(frame, diff_view, content[1], theme);
@@ -277,13 +287,23 @@ fn render_diff_panel(
     state: &DiffModeState,
     diff_view: &mut DiffViewState,
     theme: &Theme,
+    hunk_marker_style: &HunkMarkerStyle,
     diff_loading: bool,
     diff_loading_show: bool,
 ) {
     let focused = state.focus == DiffModeFocus::DiffExploration;
 
     if !diff_view.is_empty() {
-        side_by_side::render_diff(frame, area, diff_view, theme, focused, diff_loading, false);
+        side_by_side::render_diff(
+            frame,
+            area,
+            diff_view,
+            theme,
+            hunk_marker_style,
+            focused,
+            diff_loading,
+            false,
+        );
         side_by_side::render_diff_search_highlights(frame, area, diff_view, theme);
         side_by_side::render_diff_search_bar(frame, area, diff_view, theme);
     } else {

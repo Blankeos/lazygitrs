@@ -515,12 +515,6 @@ fn handle_diff_exploration_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         KeyCode::Char('l') | KeyCode::Right => {
             gui.diff_view.scroll_right(4);
         }
-        KeyCode::Char('}') => {
-            gui.diff_view.next_hunk();
-        }
-        KeyCode::Char('{') => {
-            gui.diff_view.prev_hunk();
-        }
         KeyCode::Char(']') => {
             use crate::pager::side_by_side::DiffSideView;
             gui.diff_view.side_view = match gui.diff_view.side_view {
@@ -712,7 +706,9 @@ fn show_diff_mode_help(gui: &mut Gui) {
             HelpEntry { key: "<enter>".into(), description: "Edit selector / Focus diff".into() },
             HelpEntry { key: "`".into(), description: "Toggle file tree view".into() },
             HelpEntry { key: "j/k".into(), description: "Navigate files / Scroll diff".into() },
-            HelpEntry { key: "{/}".into(), description: "Previous / next hunk".into() },
+            HelpEntry { key: "H".into(), description: "Enter hunk mode".into() },
+            HelpEntry { key: "j/k".into(), description: "Cycle hunks in hunk mode".into() },
+            HelpEntry { key: "esc".into(), description: "Exit hunk mode".into() },
             HelpEntry { key: "[/]".into(), description: "Toggle old / new only view".into() },
             HelpEntry { key: "z".into(), description: "Toggle line wrap".into() },
             HelpEntry { key: "g/G".into(), description: "Go to top / bottom".into() },

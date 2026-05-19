@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::Result;
+use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 
 use super::keybindings::KeybindingConfig;
@@ -91,6 +92,8 @@ pub struct GuiConfig {
     pub show_bottom_line: bool,
     #[serde(rename = "nerdFontsVersion")]
     pub nerd_fonts_version: String,
+    #[serde(rename = "revertHunkMarker")]
+    pub hunk_marker: HunkMarkerConfig,
 }
 
 impl Default for GuiConfig {
@@ -106,7 +109,57 @@ impl Default for GuiConfig {
             show_command_log: true,
             show_bottom_line: true,
             nerd_fonts_version: "3".to_string(),
+            hunk_marker: HunkMarkerConfig::default(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HunkMarkerConfig {
+    pub icon: String,
+    pub bold: Option<bool>,
+    pub color: Option<String>,
+    #[serde(rename = "selectedColor")]
+    pub selected_color: Option<String>,
+    #[serde(rename = "hoverColor")]
+    pub hover_color: Option<String>,
+}
+
+impl Default for HunkMarkerConfig {
+    fn default() -> Self {
+        Self {
+            icon: "│".to_string(),
+            bold: Some(true),
+            color: None,
+            selected_color: None,
+            hover_color: None,
+        }
+    }
+}
+
+pub fn parse_optional_color(value: Option<&str>) -> Option<Color> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    match value.to_lowercase().as_str() {
+        "default" => None,
+        "black" => Some(Color::Black),
+        "red" => Some(Color::Red),
+        "green" => Some(Color::Green),
+        "yellow" => Some(Color::Yellow),
+        "blue" => Some(Color::Blue),
+        "magenta" => Some(Color::Magenta),
+        "cyan" => Some(Color::Cyan),
+        "white" => Some(Color::White),
+        s if s.starts_with('#') && s.len() == 7 => {
+            let r = u8::from_str_radix(&s[1..3], 16).ok()?;
+            let g = u8::from_str_radix(&s[3..5], 16).ok()?;
+            let b = u8::from_str_radix(&s[5..7], 16).ok()?;
+            Some(Color::Rgb(r, g, b))
+        }
+        _ => None,
     }
 }
 

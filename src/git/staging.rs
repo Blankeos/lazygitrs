@@ -50,7 +50,7 @@ impl GitCommands {
 
     /// Stage a specific hunk by applying it as a patch.
     pub fn stage_hunk(&self, file_path: &str, hunk: &DiffHunk) -> Result<()> {
-        let patch = build_patch(file_path, hunk);
+        let patch = self.build_hunk_patch(file_path, hunk);
         self.git()
             .args(&["apply", "--cached", "--unidiff-zero", "-"])
             .stdin(patch)
@@ -60,7 +60,7 @@ impl GitCommands {
 
     /// Unstage a specific hunk by reverse-applying it as a patch.
     pub fn unstage_hunk(&self, file_path: &str, hunk: &DiffHunk) -> Result<()> {
-        let patch = build_patch(file_path, hunk);
+        let patch = self.build_hunk_patch(file_path, hunk);
         self.git()
             .args(&["apply", "--cached", "--reverse", "--unidiff-zero", "-"])
             .stdin(patch)
@@ -98,6 +98,33 @@ impl GitCommands {
             .stdin(patch)
             .run_expecting_success()
             .with_context(|| format!("failed to revert hunk in {}", file_path))?;
+        Ok(())
+    }
+
+    pub fn build_visual_block_patch_text(
+        &self,
+        file_path: &str,
+        unified_diff: &str,
+        want_old: Option<(usize, usize)>,
+        want_new: Option<(usize, usize)>,
+    ) -> Result<String> {
+        build_visual_block_patch(file_path, unified_diff, want_old, want_new)
+    }
+
+    pub fn build_hunk_patch(&self, file_path: &str, hunk: &DiffHunk) -> String {
+        build_patch(file_path, hunk)
+    }
+
+    pub fn apply_patch_text(&self, patch: String, cached: bool, reverse: bool) -> Result<()> {
+        let mut args = vec!["apply"];
+        if cached {
+            args.push("--cached");
+        }
+        if reverse {
+            args.push("--reverse");
+        }
+        args.extend(["--unidiff-zero", "-"]);
+        self.git().args(&args).stdin(patch).run_expecting_success()?;
         Ok(())
     }
 }

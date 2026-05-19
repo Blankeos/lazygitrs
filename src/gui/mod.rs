@@ -26,7 +26,7 @@ use crate::config::keybindings::parse_key;
 use crate::git::{GitCommands, ModelPart, MODEL_PART_COUNT};
 use crate::model::Model;
 use crate::model::file_tree::{build_file_tree, CommitFileTreeNode, FileTreeNode};
-use crate::pager::side_by_side::{DiffPanel, DiffPanelLayout, DiffViewState, TextSelection};
+use crate::pager::side_by_side::{DiffPanel, DiffPanelLayout, DiffViewState, HunkActionKind, TextSelection};
 
 use self::context::{ContextId, ContextManager, SideWindow};
 use self::layout::LayoutState;
@@ -521,11 +521,15 @@ impl Gui {
                     let diff_loading_show = self.diff_loading && self.diff_loading_since
                         .map(|t| t.elapsed() >= std::time::Duration::from_millis(50))
                         .unwrap_or(false);
+                    let hunk_marker_style = crate::pager::side_by_side::HunkMarkerStyle::from_config(
+                        &self.config.user_config.gui.hunk_marker,
+                    );
                     presentation::diff_mode::render(
                         frame,
                         &mut self.diff_mode,
                         &mut self.diff_view,
                         &theme,
+                        &hunk_marker_style,
                         self.diff_loading,
                         diff_loading_show,
                     );
@@ -705,9 +709,13 @@ impl Gui {
                 }
                 DiffPayload::Parsed(parsed) => {
                     self.diff_view.apply_parsed(parsed);
+                    if self.diff_view.center_selected_hunk_on_refresh {
+                        self.center_selected_hunk();
+                        self.diff_view.center_selected_hunk_on_refresh = false;
+                    }
                 }
                 DiffPayload::Empty => {
-                    self.diff_view.reset_keep_prefs();
+                    self.diff_view = DiffViewState::new();
                 }
             }
         }
@@ -1058,7 +1066,7 @@ impl Gui {
 
             // Clear stale diff when selection changes
             if selection_changed {
-                self.diff_view.reset_keep_prefs();
+                self.diff_view = DiffViewState::new();
             }
 
             self.diff_loading = true;
@@ -1084,7 +1092,7 @@ impl Gui {
 
         // Clear stale diff when selection changes so user sees "Loading..." instead of old content
         if selection_changed {
-            self.diff_view.reset_keep_prefs();
+            self.diff_view = DiffViewState::new();
         }
 
         let model = self.model.lock().unwrap();
@@ -1211,15 +1219,15 @@ impl Gui {
                             });
                         } else {
                             drop(model);
-                            self.diff_view.reset_keep_prefs();
+                            self.diff_view = DiffViewState::new();
                         }
                     } else {
                         drop(model);
-                        self.diff_view.reset_keep_prefs();
+                        self.diff_view = DiffViewState::new();
                     }
                 } else {
                     drop(model);
-                    self.diff_view.reset_keep_prefs();
+                    self.diff_view = DiffViewState::new();
                 }
             }
             ContextId::Commits => {
@@ -1452,16 +1460,16 @@ impl Gui {
                             });
                         } else {
                             drop(model);
-                            self.diff_view.reset_keep_prefs();
+                            self.diff_view = DiffViewState::new();
                         }
                     } else {
                         drop(model);
-                        self.diff_view.reset_keep_prefs();
+                        self.diff_view = DiffViewState::new();
                     }
                 } else {
                     // No file selected — clear diff
                     drop(model);
-                    self.diff_view.reset_keep_prefs();
+                    self.diff_view = DiffViewState::new();
                 }
             }
             _ => {
@@ -1637,6 +1645,20 @@ impl Gui {
             return Ok(());
         }
 
+        // {/} jump between hunks from the sidebar (Files context, diff not focused)
+        if self.context_mgr.active() == ContextId::Files && !self.diff_view.is_empty() {
+            if key.code == KeyCode::Char('}') {
+                self.diff_view.select_next_hunk();
+                self.center_selected_hunk();
+                return Ok(());
+            }
+            if key.code == KeyCode::Char('{') {
+                self.diff_view.select_prev_hunk();
+                self.center_selected_hunk();
+                return Ok(());
+            }
+        }
+
         // Horizontal scroll (H/L)
         if matches_key(key, &keybindings.universal.scroll_left) {
             self.diff_view.scroll_left(4);
@@ -1644,16 +1666,6 @@ impl Gui {
         }
         if matches_key(key, &keybindings.universal.scroll_right) {
             self.diff_view.scroll_right(4);
-            return Ok(());
-        }
-
-        // Next/prev hunk with { and }
-        if key.code == KeyCode::Char('{') {
-            self.diff_view.prev_hunk();
-            return Ok(());
-        }
-        if key.code == KeyCode::Char('}') {
-            self.diff_view.next_hunk();
             return Ok(());
         }
 
@@ -1707,7 +1719,7 @@ impl Gui {
         // Diff/Compare mode (W)
         if key.code == KeyCode::Char('W') {
             self.diff_mode.enter();
-            self.diff_view.reset_keep_prefs();
+            self.diff_view = DiffViewState::new();
             return Ok(());
         }
 
@@ -1982,26 +1994,59 @@ impl Gui {
             }
         }
 
+        if matches_key(key, &keybindings.universal.next_revert_block) {
+            if self.context_mgr.active() == ContextId::Files {
+                self.diff_view.select_next_hunk();
+                self.center_selected_hunk();
+            }
+            return Ok(());
+        }
+        if matches_key(key, &keybindings.universal.prev_revert_block) {
+            if self.context_mgr.active() == ContextId::Files {
+                self.diff_view.select_prev_hunk();
+                self.center_selected_hunk();
+            }
+            return Ok(());
+        }
+        if matches_key(key, &keybindings.universal.stage_block) {
+            if self.context_mgr.active() == ContextId::Files {
+                let hunk_idx = self.diff_view.selected_hunk.or(self.diff_view.hovered_hunk);
+                if let Some(hunk_idx) = hunk_idx {
+                    self.diff_view.selected_hunk = Some(hunk_idx);
+                    if let Err(err) = self.apply_selected_file_hunk_action(hunk_idx, HunkActionKind::Stage) {
+                        self.popup = PopupState::Message {
+                            title: "Stage block failed".to_string(),
+                            message: format!("{}", err),
+                            kind: MessageKind::Error,
+                        };
+                    }
+                }
+            }
+            return Ok(());
+        }
         if matches_key(key, &keybindings.universal.revert_block) {
             if self.context_mgr.active() == ContextId::Files {
-                let hunk_idx = self
-                    .diff_view
-                    .selected_revert_hunk
-                    .or(self.diff_view.hovered_revert_hunk);
+                let hunk_idx = self.diff_view.selected_hunk.or(self.diff_view.hovered_hunk);
                 if let Some(hunk_idx) = hunk_idx {
-                    self.diff_view.selected_revert_hunk = Some(hunk_idx);
-                    self.show_hunk_context_menu(hunk_idx);
+                    self.diff_view.selected_hunk = Some(hunk_idx);
+                    if let Err(err) = self.apply_selected_file_hunk_action(hunk_idx, HunkActionKind::Revert) {
+                        self.popup = PopupState::Message {
+                            title: "Revert block failed".to_string(),
+                            message: format!("{}", err),
+                            kind: MessageKind::Error,
+                        };
+                    }
                 }
             }
             return Ok(());
         }
         if matches_key(key, &keybindings.universal.undo_revert_block) {
             if self.context_mgr.active() == ContextId::Files
-                && !self.diff_view.revert_undo_stack.is_empty()
+                && !self.diff_view.hunk_action_undo_stack.is_empty()
             {
-                if let Err(err) = self.undo_last_revert_block() {
+                if let Err(err) = self.undo_last_hunk_action() {
                     self.popup = PopupState::Message {
-                        title: "Undo revert failed".to_string(),
+                        title: "Undo hunk action failed".to_string(),
                         message: format!("{}", err),
                         kind: MessageKind::Error,
                     };
@@ -2048,8 +2093,8 @@ impl Gui {
         match key.code {
             // Escape: clear revert-hunk selection first, then search, then unfocus diff
             KeyCode::Esc => {
-                if self.diff_view.selected_revert_hunk.is_some() {
-                    self.diff_view.selected_revert_hunk = None;
+                if self.diff_view.selected_hunk.is_some() {
+                    self.diff_view.selected_hunk = None;
                 } else if !self.diff_view.search_query.is_empty() {
                     self.diff_view.clear_search();
                 } else {
@@ -2074,23 +2119,14 @@ impl Gui {
             KeyCode::Char('l') | KeyCode::Right => {
                 self.diff_view.scroll_right(4);
             }
-            // { and } jump between hunks. In Files context they also select
-            // the hunk as the revert target so the marker glyph turns
-            // accent-coloured; the scroll motion stays the same as plain
-            // hunk navigation (always jumps, even if already in viewport).
+            // { and } navigate between hunks (always-on: select + center + wrap)
             KeyCode::Char('}') => {
-                if self.context_mgr.active() == ContextId::Files {
-                    self.diff_view.cycle_next_revert_hunk();
-                } else {
-                    self.diff_view.next_hunk();
-                }
+                self.diff_view.select_next_hunk();
+                self.center_selected_hunk();
             }
             KeyCode::Char('{') => {
-                if self.context_mgr.active() == ContextId::Files {
-                    self.diff_view.cycle_prev_revert_hunk();
-                } else {
-                    self.diff_view.prev_hunk();
-                }
+                self.diff_view.select_prev_hunk();
+                self.center_selected_hunk();
             }
             // [ and ] toggle old-only / new-only view
             KeyCode::Char(']') => {
@@ -2575,14 +2611,10 @@ impl Gui {
                         }
                     }
                 }
-                // Insert a newline in the body:
-                //   - Enter while focused on Body (the natural keystroke for a multi-line field).
-                //   - Shift+Enter from Summary jumps focus to Body and inserts a newline.
-                //   - Ctrl+J (some terminals emit this for Shift+Enter) — without this branch it
-                //     would hit tui_textarea's default `delete_line_by_head` binding.
-                else if (key.code == KeyCode::Enter
-                    && (focus == popup::CommitInputFocus::Body
-                        || key.modifiers.contains(KeyModifiers::SHIFT)))
+                // Shift+Enter (or Ctrl+J, which some terminals emit for Shift+Enter): insert a
+                // newline in the body. Without this branch, Ctrl+J hits tui_textarea's default
+                // binding for `delete_line_by_head`, wiping what the user just typed.
+                else if (key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT))
                     || (key.code == KeyCode::Char('j') && key.modifiers.contains(KeyModifiers::CONTROL))
                 {
                     let wrap_width = self.commit_body_wrap_width();
@@ -3277,7 +3309,6 @@ impl Gui {
                 HelpEntry { key: kb.universal.prev_screen_mode.clone(), description: "Shrink panel".into() },
                 HelpEntry { key: kb.universal.create_rebase_options_menu.clone(), description: "Rebase options".into() },
                 HelpEntry { key: kb.universal.create_patch_options_menu.clone(), description: "Patch options".into() },
-                HelpEntry { key: "{/}".into(), description: "Previous/next hunk".into() },
                 HelpEntry { key: ";".into(), description: "Toggle command log".into() },
                 HelpEntry { key: "W".into(), description: "Compare / Diff mode".into() },
                 HelpEntry { key: "I".into(), description: "Interactive rebase onto...".into() },
@@ -3308,9 +3339,11 @@ impl Gui {
                     HelpEntry { key: kb.universal.edit.clone(), description: "Open in editor".into() },
                     HelpEntry { key: kb.universal.open_file.clone(), description: "Open in default program".into() },
                     HelpEntry { key: "y".into(), description: "Copy to clipboard menu".into() },
-                    HelpEntry { key: "{/}".into(), description: "Cycle prev/next revert block in diff".into() },
-                    HelpEntry { key: kb.universal.revert_block.clone(), description: "Open hunk menu (revert selected block)".into() },
-                    HelpEntry { key: kb.universal.undo_revert_block.clone(), description: "Undo last revert (session)".into() },
+                    HelpEntry { key: "{/}".into(), description: "Prev/next hunk (select + center)".into() },
+                    HelpEntry { key: "esc".into(), description: "Clear hunk selection".into() },
+                    HelpEntry { key: kb.universal.stage_block.clone(), description: "Stage selected block".into() },
+                    HelpEntry { key: kb.universal.revert_block.clone(), description: "Revert selected block".into() },
+                    HelpEntry { key: kb.universal.undo_revert_block.clone(), description: "Undo last hunk action (session)".into() },
                 ],
             },
             ContextId::Worktrees => HelpSection {
@@ -3486,12 +3519,14 @@ impl Gui {
     }
 
     fn show_diff_help(&mut self) {
+        let kb = &self.config.user_config.keybinding;
         let diff_section = HelpSection {
             title: "Diff Viewer".into(),
             entries: vec![
                 HelpEntry { key: "j/k".into(), description: "Scroll down / up".into() },
                 HelpEntry { key: "h/l".into(), description: "Scroll left / right".into() },
-                HelpEntry { key: "{/}".into(), description: "Cycle prev / next hunk (selects revert block in Files)".into() },
+                HelpEntry { key: "{/}".into(), description: "Prev/next hunk (select + center)".into() },
+                HelpEntry { key: "esc".into(), description: "Clear hunk selection".into() },
                 HelpEntry { key: "[".into(), description: "Toggle old-only view".into() },
                 HelpEntry { key: "]".into(), description: "Toggle new-only view".into() },
                 HelpEntry { key: "z".into(), description: "Toggle line wrap".into() },
@@ -3499,17 +3534,18 @@ impl Gui {
                 HelpEntry { key: "PgUp/PgDn".into(), description: "Page up / down".into() },
                 HelpEntry { key: "/".into(), description: "Search in diff".into() },
                 HelpEntry { key: "n/N".into(), description: "Next / previous search match".into() },
-                HelpEntry { key: "<enter>".into(), description: "Open hunk menu on selected block (Files)".into() },
-                HelpEntry { key: "click 󰧛".into(), description: "Click revert icon to revert that block".into() },
+                HelpEntry { key: kb.universal.stage_block.clone(), description: "Stage selected block (Files)".into() },
+                HelpEntry { key: kb.universal.revert_block.clone(), description: "Revert selected block (Files)".into() },
+                HelpEntry { key: "click │".into(), description: "Select block marker, then use a/r".into() },
                 HelpEntry {
                     key: "u".into(),
-                    description: if self.diff_view.revert_undo_stack.is_empty() {
-                        "Undo last revert (nothing to undo)".into()
+                    description: if self.diff_view.hunk_action_undo_stack.is_empty() {
+                        "Undo last hunk action (nothing to undo)".into()
                     } else {
                         format!(
-                            "Undo last revert ({}/{})",
-                            self.diff_view.revert_undo_stack.len(),
-                            self.diff_view.revert_undo_high_water,
+                            "Undo last hunk action ({}/{})",
+                            self.diff_view.hunk_action_undo_stack.len(),
+                            self.diff_view.hunk_action_undo_high_water,
                         )
                     },
                 },
@@ -3809,7 +3845,7 @@ impl Gui {
                         gui.needs_refresh = false;
                         gui.needs_diff_refresh = true;
                         gui.context_mgr = context::ContextManager::new();
-                        gui.diff_view.reset_keep_prefs();
+                        gui.diff_view = DiffViewState::new();
                         if gui.show_file_tree {
                             gui.update_file_tree_state();
                         }
@@ -4398,12 +4434,11 @@ impl Gui {
         let main_panel = self.compute_main_panel_rect();
         let pl = DiffPanelLayout::compute(main_panel, &self.diff_view);
 
-        // Track mouse hover over the revert-block marker (for tooltip).
+        // Track mouse hover over the hunk marker (for tooltip).
         if !self.diff_mode.active {
-            let new_hover =
-                self.revert_hunk_at_position(main_panel, &pl, mouse.column, mouse.row);
-            if self.diff_view.hovered_revert_hunk != new_hover {
-                self.diff_view.hovered_revert_hunk = new_hover;
+            let new_hover = self.hunk_at_position(main_panel, &pl, mouse.column, mouse.row);
+            if self.diff_view.hovered_hunk != new_hover {
+                self.diff_view.hovered_hunk = new_hover;
             }
         }
 
@@ -4420,7 +4455,7 @@ impl Gui {
                 let full_sidebar = self.screen_mode == ScreenMode::Full && !self.diff_focused;
 
                 if in_main && !self.diff_view.is_empty() && !full_sidebar {
-                    if self.try_handle_revert_block_click(main_panel, pl, mouse.column, mouse.row) {
+                    if self.try_handle_hunk_click(main_panel, pl, mouse.column, mouse.row) {
                         self.diff_focused = true;
                         return;
                     }
@@ -4758,7 +4793,7 @@ impl Gui {
                 // Check if click is in the diff panel — start text selection
                 if rect_contains(diff_rect, col, row) && !self.diff_view.is_empty() {
                     let pl = DiffPanelLayout::compute(diff_rect, &self.diff_view);
-                    if self.try_handle_revert_block_click(diff_rect, pl, col, row) {
+                    if self.try_handle_hunk_click(diff_rect, pl, col, row) {
                         self.diff_mode.focus = DiffModeFocus::DiffExploration;
                         return;
                     }
@@ -5059,7 +5094,7 @@ impl Gui {
         self.compute_current_frame_layout().main_panel
     }
 
-    fn revert_hunk_at_position(
+    fn hunk_at_position(
         &self,
         panel_rect: ratatui::layout::Rect,
         layout: &DiffPanelLayout,
@@ -5069,24 +5104,22 @@ impl Gui {
         if self.context_mgr.active() != ContextId::Files {
             return None;
         }
-        if self.diff_view.is_empty() {
+        if self.diff_view.wrap || self.diff_view.is_empty() {
             return None;
         }
         if !rect_contains(panel_rect, col, row) {
             return None;
         }
         let divider_x = layout.divider_x()?;
-        if col != divider_x {
+        if col < divider_x || col >= divider_x.saturating_add(2) {
             return None;
         }
-        let (line_idx, chunk_idx) = self.diff_view.line_chunk_at_row(row, layout)?;
-        if chunk_idx != 0 {
-            return None;
-        }
-        self.diff_view.hunk_index_for_start_line(line_idx)
+        let line_idx = self.diff_view.line_index_at_row(row, layout)?;
+        let visible_height = (layout.inner_end_y.saturating_sub(layout.inner_y)) as usize;
+        self.diff_view.sticky_hunk_at_line(line_idx, visible_height)
     }
 
-    fn try_handle_revert_block_click(
+    fn try_handle_hunk_click(
         &mut self,
         panel_rect: ratatui::layout::Rect,
         layout: DiffPanelLayout,
@@ -5096,61 +5129,17 @@ impl Gui {
         if self.diff_mode.active {
             return false;
         }
-        let Some(hunk_idx) = self.revert_hunk_at_position(panel_rect, &layout, col, row) else {
+        let Some(hunk_idx) = self.hunk_at_position(panel_rect, &layout, col, row) else {
             return false;
         };
-        self.diff_view.selected_revert_hunk = Some(hunk_idx);
-        if let Err(err) = self.revert_selected_file_hunk(hunk_idx) {
-            self.popup = PopupState::Message {
-                title: "Revert block failed".to_string(),
-                message: format!("{}", err),
-                kind: MessageKind::Error,
-            };
+        if self.diff_view.selected_hunk == Some(hunk_idx) {
+            return true;
         }
+        self.diff_view.selected_hunk = Some(hunk_idx);
         true
     }
 
-    /// Open the hunk action menu (shown when Enter is pressed on a selected
-    /// or hovered revert hunk). Cancel is focused first so an accidental
-    /// Enter doesn't revert anything.
-    fn show_hunk_context_menu(&mut self, hunk_idx: usize) {
-        let items = vec![
-            popup::MenuItem {
-                label: "Cancel".to_string(),
-                description: String::new(),
-                key: None,
-                // No-op: execute_menu_action already drops the menu popup
-                // before invoking the action, so returning Ok leaves the
-                // menu closed. Esc also closes the menu via the universal
-                // menu Esc handler.
-                action: Some(Box::new(|_gui| Ok(()))),
-            },
-            popup::MenuItem {
-                label: "Revert hunk".to_string(),
-                description: String::new(),
-                key: None,
-                action: Some(Box::new(move |gui| {
-                    if let Err(err) = gui.revert_selected_file_hunk(hunk_idx) {
-                        gui.popup = PopupState::Message {
-                            title: "Revert block failed".to_string(),
-                            message: format!("{}", err),
-                            kind: MessageKind::Error,
-                        };
-                    }
-                    Ok(())
-                })),
-            },
-        ];
-
-        self.popup = PopupState::Menu {
-            title: "Hunk".to_string(),
-            items,
-            selected: 0,
-            loading_index: None,
-        };
-    }
-
-    fn revert_selected_file_hunk(&mut self, hunk_idx: usize) -> Result<()> {
+    fn apply_selected_file_hunk_action(&mut self, hunk_idx: usize, action: HunkActionKind) -> Result<()> {
         let Some(file_idx) = self.selected_file_index() else {
             return Ok(());
         };
@@ -5160,73 +5149,129 @@ impl Gui {
             return Ok(());
         };
 
-        if !file.has_unstaged_changes {
-            self.popup = PopupState::Message {
-                title: "Revert block".to_string(),
-                message: "Block revert is available only for unstaged changes.".to_string(),
-                kind: MessageKind::Info,
-            };
-            return Ok(());
-        }
-
         let file_name = file.name.clone();
+        let has_staged = file.has_staged_changes;
+        let has_unstaged = file.has_unstaged_changes;
         drop(model);
 
-        let Some((want_old, want_new)) = self.diff_view.visual_block_line_ranges(hunk_idx)
-        else {
-            return Ok(());
-        };
-        if want_old.is_none() && want_new.is_none() {
-            return Ok(());
+        let mut undo_entry: Option<crate::pager::side_by_side::HunkActionUndoEntry> = None;
+
+        match action {
+            HunkActionKind::Revert => {
+                if !has_unstaged {
+                    self.popup = PopupState::Message {
+                        title: "Revert block".to_string(),
+                        message: "Block revert is available only for unstaged changes.".to_string(),
+                        kind: MessageKind::Info,
+                    };
+                    return Ok(());
+                }
+                let Some((want_old, want_new)) = self.diff_view.visual_block_line_ranges(hunk_idx) else {
+                    return Ok(());
+                };
+                if want_old.is_none() && want_new.is_none() {
+                    return Ok(());
+                }
+                let diff = self.git.diff_file(&file_name)?;
+                if diff.is_empty() {
+                    return Ok(());
+                }
+                let patch = self
+                    .git
+                    .build_visual_block_patch_text(&file_name, &diff, want_old, want_new)?;
+                undo_entry = Some(crate::pager::side_by_side::HunkActionUndoEntry {
+                    action,
+                    patch,
+                    apply_cached: false,
+                    reverse: false,
+                });
+                self.git
+                    .revert_visual_block_in_worktree(&file_name, &diff, want_old, want_new)?;
+            }
+            HunkActionKind::Stage => {
+                let staged_diff = !(has_unstaged || !has_staged);
+                let diff = if staged_diff {
+                    self.git.diff_file_staged(&file_name)?
+                } else {
+                    self.git.diff_file(&file_name)?
+                };
+                if diff.is_empty() {
+                    return Ok(());
+                }
+                let Some((want_old, want_new)) = self.diff_view.visual_block_line_ranges(hunk_idx) else {
+                    return Ok(());
+                };
+                if want_old.is_none() && want_new.is_none() {
+                    return Ok(());
+                }
+                let patch = self
+                    .git
+                    .build_visual_block_patch_text(&file_name, &diff, want_old, want_new)?;
+                undo_entry = Some(crate::pager::side_by_side::HunkActionUndoEntry {
+                    action,
+                    patch: patch.clone(),
+                    apply_cached: true,
+                    reverse: !staged_diff,
+                });
+                self.git.apply_patch_text(patch, true, staged_diff)?;
+            }
         }
 
-        let diff = self.git.diff_file(&file_name)?;
-        if diff.is_empty() {
-            return Ok(());
-        }
+        let preferred_hunk_line = self.diff_view.hunk_starts.get(hunk_idx).copied();
 
-        // Snapshot the working-tree file before reverting so the user can undo
-        // (`u`) within this session. Only keep the snapshot if the revert
-        // actually succeeds; otherwise we'd leak unrelated state into the stack.
-        let abs_path = self.git.repo_path().join(&file_name);
-        let pre_bytes = std::fs::read(&abs_path).ok();
-
-        self.git
-            .revert_visual_block_in_worktree(&file_name, &diff, want_old, want_new)?;
-
-        if let Some(bytes) = pre_bytes {
-            let stack = &mut self.diff_view.revert_undo_stack;
+        if let Some(entry) = undo_entry {
+            let stack = &mut self.diff_view.hunk_action_undo_stack;
             if stack.len() >= crate::pager::side_by_side::REVERT_UNDO_STACK_CAP {
                 stack.remove(0);
             }
-            stack.push(crate::pager::side_by_side::RevertUndoEntry {
-                file_path: file_name.clone(),
-                pre_revert_bytes: bytes,
-            });
-            self.diff_view.revert_undo_high_water =
-                self.diff_view.revert_undo_high_water.max(stack.len());
+            stack.push(entry);
+            self.diff_view.hunk_action_undo_high_water =
+                self.diff_view.hunk_action_undo_high_water.max(stack.len());
         }
 
         self.diff_view.selection = None;
+        self.diff_view.preferred_selected_hunk_line = preferred_hunk_line;
+        self.diff_view.center_selected_hunk_on_refresh = true;
         self.needs_files_refresh = true;
         self.needs_diff_refresh = true;
         Ok(())
     }
 
-    fn undo_last_revert_block(&mut self) -> Result<()> {
-        let Some(entry) = self.diff_view.revert_undo_stack.pop() else {
+    fn undo_last_hunk_action(&mut self) -> Result<()> {
+        let Some(entry) = self.diff_view.hunk_action_undo_stack.pop() else {
             return Ok(());
         };
-        let abs_path = self.git.repo_path().join(&entry.file_path);
-        std::fs::write(&abs_path, &entry.pre_revert_bytes).with_context(|| {
-            format!("failed to restore {}", entry.file_path)
-        })?;
-        if self.diff_view.revert_undo_stack.is_empty() {
-            self.diff_view.revert_undo_high_water = 0;
+        self.git
+            .apply_patch_text(entry.patch, entry.apply_cached, entry.reverse)
+            .with_context(|| format!("failed to undo {} hunk action", entry.action.verb()))?;
+        if self.diff_view.hunk_action_undo_stack.is_empty() {
+            self.diff_view.hunk_action_undo_high_water = 0;
         }
         self.needs_files_refresh = true;
         self.needs_diff_refresh = true;
         Ok(())
+    }
+
+    /// Keep the selected hunk marker around the vertical middle of the visible diff area.
+    fn center_selected_hunk(&mut self) {
+        let Some(sel) = self.diff_view.selected_hunk else {
+            return;
+        };
+        let Some((start_line, end_line)) = self.diff_view.visual_block_line_span(sel) else {
+            return;
+        };
+        let line_idx = start_line + (end_line.saturating_sub(start_line) / 2);
+
+        let main_panel = self.compute_main_panel_rect();
+        let pl = DiffPanelLayout::compute(main_panel, &self.diff_view);
+        let visible_rows = (pl.inner_end_y.saturating_sub(pl.inner_y)) as usize;
+        if visible_rows == 0 {
+            return;
+        }
+
+        let desired = line_idx.saturating_sub(visible_rows / 2);
+        let max_start = self.diff_view.lines.len().saturating_sub(visible_rows);
+        self.diff_view.scroll_offset = desired.min(max_start);
     }
 
     /// Approximate visible height of the active sidebar panel (inner area minus borders).
@@ -5693,8 +5738,20 @@ fn read_clipboard() -> Option<String> {
 
 fn matches_key(key: KeyEvent, binding: &str) -> bool {
     if let Some(expected) = parse_key(binding) {
-        // Compare code and modifiers, ignore kind/state
-        key.code == expected.code && key.modifiers == expected.modifiers
+        if key.code != expected.code {
+            return false;
+        }
+        // For non-alphabetic Char keys (e.g. `{`, `}`, `!`) the character itself
+        // already encodes whether Shift was involved, so terminals with keyboard
+        // enhancement (which emit SHIFT for these keys) and those without (which
+        // don't) must both match. Strip SHIFT from the comparison for those keys.
+        let strip_shift = matches!(key.code, KeyCode::Char(c) if !c.is_alphabetic());
+        let mask = if strip_shift {
+            crossterm::event::KeyModifiers::all() & !crossterm::event::KeyModifiers::SHIFT
+        } else {
+            crossterm::event::KeyModifiers::all()
+        };
+        (key.modifiers & mask) == (expected.modifiers & mask)
     } else {
         false
     }
