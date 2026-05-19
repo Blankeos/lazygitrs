@@ -114,6 +114,10 @@ pub struct UniversalKeybinding {
     pub revert_block: String,
     #[serde(rename = "undoRevertBlock")]
     pub undo_revert_block: String,
+    #[serde(rename = "shrinkSidePanel")]
+    pub shrink_side_panel: String,
+    #[serde(rename = "expandSidePanel")]
+    pub expand_side_panel: String,
 }
 
 impl Default for UniversalKeybinding {
@@ -163,6 +167,8 @@ impl Default for UniversalKeybinding {
             create_patch_options_menu: "<c-p>".into(),
             revert_block: "<enter>".into(),
             undo_revert_block: "u".into(),
+            shrink_side_panel: "<c-s-h>".into(),
+            expand_side_panel: "<c-s-l>".into(),
         }
     }
 }
@@ -390,13 +396,19 @@ pub fn parse_key(s: &str) -> Option<KeyEvent> {
     if s.starts_with('<') && s.ends_with('>') {
         let inner = &s[1..s.len() - 1];
 
-        // Ctrl modifier
-        if let Some(key) = inner.strip_prefix("c-") {
+        // Ctrl+Shift modifier combo: <c-s-h>
+        if let Some(key) = inner.strip_prefix("c-s-") {
             let ch = key.chars().next()?;
             return Some(KeyEvent::new(
                 KeyCode::Char(ch),
-                KeyModifiers::CONTROL,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
             ));
+        }
+
+        // Ctrl modifier
+        if let Some(key) = inner.strip_prefix("c-") {
+            let ch = key.chars().next()?;
+            return Some(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL));
         }
 
         // Alt modifier
@@ -411,9 +423,7 @@ pub fn parse_key(s: &str) -> Option<KeyEvent> {
             "escape" | "esc" => Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             "tab" => Some(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             "backtab" | "shift-tab" => Some(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
-            "backspace" | "bs" => {
-                Some(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
-            }
+            "backspace" | "bs" => Some(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
             "delete" | "del" => Some(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
             "space" => Some(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)),
             "up" => Some(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
