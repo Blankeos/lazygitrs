@@ -175,8 +175,8 @@ impl Default for UniversalKeybinding {
             undo_revert_block: "u".into(),
             shrink_side_panel: "<a-h>".into(),
             expand_side_panel: "<a-l>".into(),
-            side_panel_full: "<a-f>".into(),
-            main_panel_full: "<a-d>".into(),
+            side_panel_full: "<a-L>".into(),
+            main_panel_full: "<a-H>".into(),
             reset_side_panel: "<a-r>".into(),
         }
     }
@@ -410,7 +410,12 @@ pub fn parse_key(s: &str) -> Option<KeyEvent> {
 
         if let Some(key) = inner.strip_prefix("a-") {
             let ch = key.chars().next()?;
-            return Some(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::ALT));
+            let modifiers = if ch.is_uppercase() {
+                KeyModifiers::ALT | KeyModifiers::SHIFT
+            } else {
+                KeyModifiers::ALT
+            };
+            return Some(KeyEvent::new(KeyCode::Char(ch), modifiers));
         }
 
         return match inner {
