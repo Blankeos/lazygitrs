@@ -179,49 +179,44 @@ pub fn compute_layout_with_details(
         _ => side_ratio,
     };
 
-    // Split main area into side panel and main content
-    let side_width = ((main_area.width as f64) * effective_ratio) as u16;
-    let max_side = if screen_mode == ScreenMode::Half {
-        main_area.width.saturating_sub(20) // leave at least 20 cols for main
-    } else {
-        main_area.width / 2
-    };
-    let side_width = side_width.max(20).min(max_side);
+    // Side panel width: ratio 0.0 collapses to the left border; ratio 1.0
+    // expands to the right border.
+    let side_width = ((main_area.width as f64) * effective_ratio).round() as u16;
+    let side_width = side_width.min(main_area.width);
+
+    if side_width == 0 {
+        return FrameLayout {
+            side_panels: Vec::new(),
+            main_panel: main_area,
+            status_bar,
+            portrait: false,
+            commit_details_panel: None,
+        };
+    }
+
+    if side_width >= main_area.width {
+        let side_panels = split_side_panels(main_area, panel_count, active_panel_index);
+        return FrameLayout {
+            side_panels,
+            main_panel: Rect::default(),
+            status_bar,
+            portrait: false,
+            commit_details_panel: None,
+        };
+    }
 
     let horizontal = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Length(side_width),
-            Constraint::Min(1),
+            Constraint::Min(0),
         ])
         .split(main_area);
 
     let side_area = horizontal[0];
     let main_panel = horizontal[1];
 
-    // Side panel sizing: active panel expands, others collapse.
-    // On very short terminals (< 21 rows) unfocused panels shrink to 1 line.
-    let side_height = side_area.height;
-    let collapsed: u16 = if side_height < 21 { 1 } else { 3 };
-
-    let expand_index = if active_panel_index == 0 { 1 } else { active_panel_index };
-    let panel_constraints: Vec<Constraint> = (0..panel_count)
-        .map(|i| {
-            if i == 0 {
-                Constraint::Length(STATUS_PANEL_HEIGHT)
-            } else if i == expand_index {
-                Constraint::Min(collapsed)
-            } else {
-                Constraint::Length(collapsed)
-            }
-        })
-        .collect();
-
-    let side_panels = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(panel_constraints)
-        .split(side_area)
-        .to_vec();
+    let side_panels = split_side_panels(side_area, panel_count, active_panel_index);
 
     // Carve a compact commit-details box off the top of main_panel.  Target
     // size is 7 rows (2 borders + 5 content lines); shrink gracefully on
@@ -265,4 +260,27 @@ pub fn compute_layout_with_details(
             commit_details_panel: None,
         },
     }
+}
+
+/// Splits `area` vertically into one rect per side panel.
+/// The active panel expands; the status panel (index 0) is fixed height.
+fn split_side_panels(area: Rect, panel_count: usize, active_panel_index: usize) -> Vec<Rect> {
+    let collapsed: u16 = if area.height < 21 { 1 } else { 3 };
+    let expand_index = if active_panel_index == 0 { 1 } else { active_panel_index };
+    let constraints: Vec<Constraint> = (0..panel_count)
+        .map(|i| {
+            if i == 0 {
+                Constraint::Length(STATUS_PANEL_HEIGHT)
+            } else if i == expand_index {
+                Constraint::Min(collapsed)
+            } else {
+                Constraint::Length(collapsed)
+            }
+        })
+        .collect();
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area)
+        .to_vec()
 }

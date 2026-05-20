@@ -118,6 +118,12 @@ pub struct UniversalKeybinding {
     pub shrink_side_panel: String,
     #[serde(rename = "expandSidePanel")]
     pub expand_side_panel: String,
+    #[serde(rename = "sidePanelFull")]
+    pub side_panel_full: String,
+    #[serde(rename = "mainPanelFull")]
+    pub main_panel_full: String,
+    #[serde(rename = "resetSidePanel")]
+    pub reset_side_panel: String,
 }
 
 impl Default for UniversalKeybinding {
@@ -167,8 +173,11 @@ impl Default for UniversalKeybinding {
             create_patch_options_menu: "<c-p>".into(),
             revert_block: "<enter>".into(),
             undo_revert_block: "u".into(),
-            shrink_side_panel: "<c-s-h>".into(),
-            expand_side_panel: "<c-s-l>".into(),
+            shrink_side_panel: "<a-h>".into(),
+            expand_side_panel: "<a-l>".into(),
+            side_panel_full: "<a-f>".into(),
+            main_panel_full: "<a-d>".into(),
+            reset_side_panel: "<a-r>".into(),
         }
     }
 }
@@ -385,39 +394,25 @@ impl Default for CommitMessageKeybinding {
     }
 }
 
-/// Parse a keybinding string like "q", "<c-c>", "<enter>", "<space>" into a KeyEvent.
 pub fn parse_key(s: &str) -> Option<KeyEvent> {
     let s = s.trim();
     if s.is_empty() {
         return None;
     }
 
-    // Check for modifier+key combos like <c-c>, <a-x>
     if s.starts_with('<') && s.ends_with('>') {
         let inner = &s[1..s.len() - 1];
 
-        // Ctrl+Shift modifier combo: <c-s-h>
-        if let Some(key) = inner.strip_prefix("c-s-") {
-            let ch = key.chars().next()?;
-            return Some(KeyEvent::new(
-                KeyCode::Char(ch),
-                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            ));
-        }
-
-        // Ctrl modifier
         if let Some(key) = inner.strip_prefix("c-") {
             let ch = key.chars().next()?;
             return Some(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL));
         }
 
-        // Alt modifier
         if let Some(key) = inner.strip_prefix("a-") {
             let ch = key.chars().next()?;
             return Some(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::ALT));
         }
 
-        // Special keys
         return match inner {
             "enter" => Some(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             "escape" | "esc" => Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
@@ -438,7 +433,6 @@ pub fn parse_key(s: &str) -> Option<KeyEvent> {
         };
     }
 
-    // Single character
     if s.len() == 1 {
         let ch = s.chars().next()?;
         let modifiers = if ch.is_uppercase() {

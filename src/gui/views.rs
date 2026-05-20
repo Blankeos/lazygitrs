@@ -576,7 +576,8 @@ pub fn render(
         }
     }
 
-    // Render main panel
+    // Render main panel (skipped when side panel is fully expanded)
+    if fl.main_panel.width > 0 {
     if ctx_mgr.active() == ContextId::Status {
         // Status view: show logo + copyright in the main content area
         let status_block = Block::default()
@@ -612,6 +613,7 @@ pub fn render(
         let widget = Paragraph::new(info).block(block);
         frame.render_widget(widget, fl.main_panel);
     }
+    } // end main_panel.width > 0
 
     // Normal/Half mode: compact details box sits at the bottom of the active
     // sidebar panel (layout carves the rect out of the active side panel).

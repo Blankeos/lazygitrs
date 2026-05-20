@@ -1506,25 +1506,25 @@ impl Gui {
 
         let keybindings = &self.config.user_config.keybinding;
 
-        // Side-panel resize: Ctrl+Shift+H shrinks, Ctrl+Shift+L expands.
-        // When the left (side) panel is focused the keys act directly;
-        // when the right (diff) panel is focused the meaning is inverted so
-        // that the user always "pushes" the divider toward or away from their
-        // current focus.
+        // Side-panel resize: Alt+h/l shrink/expand, Alt+H/L jump to border, Alt+r reset.
         let shrink_key = matches_key(key, &keybindings.universal.shrink_side_panel);
         let expand_key = matches_key(key, &keybindings.universal.expand_side_panel);
         if shrink_key || expand_key {
             const STEP: f64 = 0.05;
-            const MIN_RATIO: f64 = 0.10;
-            const MAX_RATIO: f64 = 0.70;
-            let do_shrink = shrink_key;
-            if do_shrink {
-                self.layout.side_panel_ratio =
-                    (self.layout.side_panel_ratio - STEP).max(MIN_RATIO);
-            } else {
-                self.layout.side_panel_ratio =
-                    (self.layout.side_panel_ratio + STEP).min(MAX_RATIO);
-            }
+            let delta = if shrink_key { -STEP } else { STEP };
+            self.layout.side_panel_ratio = (self.layout.side_panel_ratio + delta).clamp(0.0, 1.0);
+            return Ok(());
+        }
+        if matches_key(key, &keybindings.universal.side_panel_full) {
+            self.layout.side_panel_ratio = 1.0;
+            return Ok(());
+        }
+        if matches_key(key, &keybindings.universal.main_panel_full) {
+            self.layout.side_panel_ratio = 0.0;
+            return Ok(());
+        }
+        if matches_key(key, &keybindings.universal.reset_side_panel) {
+            self.layout.side_panel_ratio = self.config.user_config.gui.side_panel_width;
             return Ok(());
         }
 
