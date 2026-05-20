@@ -117,15 +117,36 @@ pub fn compute_layout_with_details(
             ScreenMode::Half => 0.5,
             _ => side_ratio,
         };
+        if effective_ratio <= 0.0 {
+            return FrameLayout {
+                side_panels: Vec::new(),
+                main_panel: main_area,
+                status_bar,
+                portrait: true,
+                commit_details_panel: None,
+            };
+        }
+
+        if effective_ratio >= 1.0 {
+            let side_panels = split_side_panels(main_area, panel_count, active_panel_index);
+            return FrameLayout {
+                side_panels,
+                main_panel: Rect::default(),
+                status_bar,
+                portrait: true,
+                commit_details_panel: None,
+            };
+        }
+
         let max_side_height = if screen_mode == ScreenMode::Half {
-            main_area.height.saturating_sub(5) // leave at least 5 rows for main
+            main_area.height.saturating_sub(5)
         } else {
-            main_area.height / 2
+            main_area.height.saturating_sub(1)
         };
-        let side_height = (main_area.height as f64 * effective_ratio).round() as u16;
-        let side_height = side_height
-            .max(panel_count as u16 * 2)
-            .min(max_side_height);
+        let side_height = {
+            let h = (main_area.height as f64 * effective_ratio).round() as u16;
+            h.max(1).min(max_side_height)
+        };
 
         let vertical = Layout::default()
             .direction(Direction::Vertical)
@@ -142,7 +163,7 @@ pub fn compute_layout_with_details(
         // When Status (index 0) is focused it stays compact, so expand Files
         // (index 1) instead — otherwise the sidebar leaves a large empty gap.
         let expand_index = if active_panel_index == 0 { 1 } else { active_panel_index };
-        let collapsed: u16 = if side_area.height < 21 { 1 } else { 3 };
+        let collapsed: u16 = 1;
         let panel_constraints: Vec<Constraint> = (0..panel_count)
             .map(|i| {
                 if i == 0 {

@@ -1506,21 +1506,32 @@ impl Gui {
 
         let keybindings = &self.config.user_config.keybinding;
 
-        // Side-panel resize: Alt+h/l shrink/expand, Alt+H/L jump to border, Alt+r reset.
+        // Side-panel resize: orientation-aware.
+        // Portrait (vertical stack): side on top, diff on bottom.
+        //   Alt+h/l → shrink/expand by step
+        //   Alt+k → diff pane full (ratio 0.0), Alt+j → side pane full (ratio 1.0)
+        // Landscape (horizontal split): side on left, diff on right.
+        //   Alt+h/l → shrink/expand by step, Alt+k → side full, Alt+j → main full
+        let portrait = self.screen_mode != ScreenMode::Full
+            && self.layout.width <= 84
+            && self.layout.height > 25;
         let shrink_key = matches_key(key, &keybindings.universal.shrink_side_panel);
         let expand_key = matches_key(key, &keybindings.universal.expand_side_panel);
         if shrink_key || expand_key {
             const STEP: f64 = 0.05;
             let delta = if shrink_key { -STEP } else { STEP };
-            self.layout.side_panel_ratio = (self.layout.side_panel_ratio + delta).clamp(0.0, 1.0);
+            self.layout.side_panel_ratio =
+                (self.layout.side_panel_ratio + delta).clamp(0.0, 1.0);
             return Ok(());
         }
         if matches_key(key, &keybindings.universal.side_panel_full) {
-            self.layout.side_panel_ratio = 1.0;
+            // Alt+k: diff full in portrait, side full in landscape
+            self.layout.side_panel_ratio = if portrait { 0.0 } else { 1.0 };
             return Ok(());
         }
         if matches_key(key, &keybindings.universal.main_panel_full) {
-            self.layout.side_panel_ratio = 0.0;
+            // Alt+j: side full in portrait, main full in landscape
+            self.layout.side_panel_ratio = if portrait { 1.0 } else { 0.0 };
             return Ok(());
         }
         if matches_key(key, &keybindings.universal.reset_side_panel) {
