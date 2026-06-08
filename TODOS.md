@@ -256,3 +256,6 @@
 Also another thing I noticed, a missed keyboard behavior we didn't do yet... Doing cmd+backspace to clear from the current cursor. Not observed yet, even on the zed terminal. This is a mustfix.
 
 Where I observed this behavior: I noticed this for the "Commit Message" and "Description". Generally where I can input text i..e the "Interactive rebase on" dialog palette or the help `?` command palette.
+
+- [x] IN the original lazygit, When i delete tags, I can see a dialog with actions to delete local tag, delete remote tag, and 'delete local and remote tag'. Let's do that here as well.
+  - [ ] improvement, use the palette selector for branches and refs, find a way to reuse

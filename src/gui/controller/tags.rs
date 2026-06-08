@@ -83,16 +83,103 @@ fn delete_tag(gui: &mut Gui) -> Result<()> {
         let name = tag.name.clone();
         drop(model);
 
-        gui.popup = PopupState::Confirm {
-            title: "Delete tag".to_string(),
-            message: format!("Delete tag '{}'?", name),
-            on_confirm: Box::new(move |gui| {
-                gui.git.delete_tag(&name)?;
-                gui.needs_refresh = true;
-                Ok(())
-            }),
+        let name_local = name.clone();
+        let name_remote = name.clone();
+        let name_both = name.clone();
+
+        gui.popup = PopupState::Menu {
+            title: format!("Delete tag '{}'?", name),
+            items: vec![
+                MenuItem {
+                    label: "Delete local tag".to_string(),
+                    description: String::new(),
+                    key: Some("c".to_string()),
+                    action: Some(Box::new(move |gui| {
+                        gui.git.delete_tag(&name_local)?;
+                        gui.needs_refresh = true;
+                        Ok(())
+                    })),
+                },
+                MenuItem {
+                    label: "Delete remote tag".to_string(),
+                    description: String::new(),
+                    key: Some("r".to_string()),
+                    action: Some(Box::new(move |gui| {
+                        prompt_remote_tag_delete(gui, name_remote.clone(), false)
+                    })),
+                },
+                MenuItem {
+                    label: "Delete local and remote tag".to_string(),
+                    description: String::new(),
+                    key: Some("b".to_string()),
+                    action: Some(Box::new(move |gui| {
+                        prompt_remote_tag_delete(gui, name_both.clone(), true)
+                    })),
+                },
+            ],
+            selected: 0,
+            loading_index: None,
         };
     }
+    Ok(())
+}
+
+fn prompt_remote_tag_delete(
+    gui: &mut Gui,
+    name: String,
+    delete_local_after_remote: bool,
+) -> Result<()> {
+    let mut textarea = make_textarea("");
+    textarea.insert_str("origin");
+
+    gui.popup = PopupState::Input {
+        title: format!("Remote from which to remove tag '{}':", name),
+        textarea,
+        on_confirm: Box::new(move |gui, remote| {
+            let remote = remote.trim().to_string();
+            if remote.is_empty() {
+                return Ok(());
+            }
+
+            let title = format!("Delete tag '{}'?", name);
+            let message = if delete_local_after_remote {
+                format!(
+                    "Are you sure you want to delete '{}' from both your machine and from '{}'?",
+                    name, remote
+                )
+            } else {
+                format!(
+                    "Are you sure you want to delete the remote tag '{}' from '{}'?",
+                    name, remote
+                )
+            };
+
+            gui.popup = PopupState::Confirm {
+                title,
+                message,
+                on_confirm: Box::new(move |gui| {
+                    let message = if delete_local_after_remote {
+                        format!("Deleting tag {} locally and from {}...", name, remote)
+                    } else {
+                        format!("Deleting tag {} from {}...", name, remote)
+                    };
+
+                    gui.start_remote_op("Delete", &message, move |git| {
+                        git.delete_remote_tag(&remote, &name)?;
+                        if delete_local_after_remote {
+                            git.delete_tag(&name)?;
+                        }
+                        Ok(())
+                    });
+                    Ok(())
+                }),
+            };
+            Ok(())
+        }),
+        is_commit: false,
+        confirm_focused: false,
+    };
+
     Ok(())
 }
 

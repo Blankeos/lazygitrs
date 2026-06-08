@@ -58,6 +58,14 @@ impl GitCommands {
         Ok(())
     }
 
+    pub fn delete_remote_tag(&self, remote: &str, name: &str) -> Result<()> {
+        let refspec = format!("refs/tags/{}", name);
+        self.git()
+            .args(&["push", remote, "--delete", &refspec])
+            .run_expecting_success()?;
+        Ok(())
+    }
+
     pub fn push_tag(&self, name: &str) -> Result<()> {
         self.git()
             .args(&["push", "origin", name])
