@@ -1181,9 +1181,52 @@ fn command_log_geometry(main_panel: Rect, command_count: usize) -> Option<(Rect,
     ))
 }
 
+fn wrap_popup_lines(message: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    message
+        .lines()
+        .flat_map(|line| {
+            if line.is_empty() {
+                vec![String::new()]
+            } else {
+                textwrap::wrap(line, width)
+                    .into_iter()
+                    .map(|line| line.into_owned())
+                    .collect()
+            }
+        })
+        .collect()
+}
+
+fn visible_popup_lines(wrapped: &[String], max_lines: usize) -> Vec<String> {
+    if wrapped.len() <= max_lines {
+        return wrapped.to_vec();
+    }
+    if max_lines == 0 {
+        return Vec::new();
+    }
+    if max_lines == 1 {
+        return vec![format!("... {} more lines", wrapped.len())];
+    }
+
+    let mut visible: Vec<String> = wrapped.iter().take(max_lines - 1).cloned().collect();
+    let remaining = wrapped.len() - visible.len();
+    visible.push(format!("... {} more lines", remaining));
+    visible
+}
+
+fn clamped_popup_height(line_count: usize, fixed_rows: u16, area_height: u16) -> u16 {
+    let line_rows = u16::try_from(line_count).unwrap_or(u16::MAX);
+    line_rows.saturating_add(fixed_rows).min(area_height)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::command_log_geometry;
+    use super::{command_log_geometry, render_popup};
+    use crate::config::Theme;
+    use crate::gui::popup::{MessageKind, PopupState};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
 
     #[test]
@@ -1198,6 +1241,39 @@ mod tests {
 
         assert_eq!(visible_lines, 1);
         assert_eq!(rect, Rect::new(40, 4, 50, 3));
+    }
+
+    #[test]
+    fn long_error_message_popup_renders_in_short_terminal() {
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let message = (0..40)
+            .map(|i| {
+                format!(
+                    "hint: divergent branches need reconciliation before pull can continue ({i})"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let popup = PopupState::Message {
+            title: "Pull error".to_string(),
+            message,
+            kind: MessageKind::Error,
+        };
+
+        terminal
+            .draw(|frame| {
+                render_popup(
+                    frame,
+                    &popup,
+                    Rect::new(0, 0, 40, 8),
+                    0,
+                    &Theme::default(),
+                    false,
+                    false,
+                );
+            })
+            .expect("long popup message should render without panicking");
     }
 }
 
@@ -2336,17 +2412,9 @@ pub fn render_popup(
     match popup {
         PopupState::Confirm { title, message, .. } => {
             let inner_width = popup_width.saturating_sub(4) as usize; // borders + padding
-            let wrapped: Vec<std::borrow::Cow<'_, str>> = message
-                .lines()
-                .flat_map(|line| {
-                    if line.is_empty() {
-                        vec![std::borrow::Cow::Borrowed("")]
-                    } else {
-                        textwrap::wrap(line, inner_width)
-                    }
-                })
-                .collect();
-            let confirm_height = (wrapped.len() as u16) + 5; // border*2 + blank line + blank line + y yes / n no
+            let wrapped = wrap_popup_lines(message, inner_width);
+            let wrapped = visible_popup_lines(&wrapped, area.height.saturating_sub(5) as usize);
+            let confirm_height = clamped_popup_height(wrapped.len(), 5, area.height);
             let cy = (area.height.saturating_sub(confirm_height)) / 2;
             let popup_rect = Rect::new(x, cy, popup_width, confirm_height);
             frame.render_widget(Clear, popup_rect);
@@ -2381,17 +2449,9 @@ pub fn render_popup(
             let is_error = *kind == crate::gui::popup::MessageKind::Error;
             let icon = if is_error { "⚠ " } else { "" };
             let inner_width = popup_width.saturating_sub(4) as usize; // borders + padding
-            let wrapped: Vec<std::borrow::Cow<'_, str>> = message
-                .lines()
-                .flat_map(|line| {
-                    if line.is_empty() {
-                        vec![std::borrow::Cow::Borrowed("")]
-                    } else {
-                        textwrap::wrap(line, inner_width)
-                    }
-                })
-                .collect();
-            let msg_height = (wrapped.len() as u16) + 4; // border*2 + blank line + dismiss line
+            let wrapped = wrap_popup_lines(message, inner_width);
+            let wrapped = visible_popup_lines(&wrapped, area.height.saturating_sub(4) as usize);
+            let msg_height = clamped_popup_height(wrapped.len(), 4, area.height);
             let cy = (area.height.saturating_sub(msg_height)) / 2;
             let popup_rect = Rect::new(x, cy, popup_width, msg_height);
             frame.render_widget(Clear, popup_rect);

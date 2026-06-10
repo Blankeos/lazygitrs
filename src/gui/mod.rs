@@ -2794,6 +2794,10 @@ impl Gui {
     }
 
     pub(crate) fn handle_popup_key(&mut self, key: KeyEvent) -> Result<()> {
+        let was_help = matches!(self.popup, PopupState::Help { .. });
+        let was_ref_picker = matches!(self.popup, PopupState::RefPicker { .. });
+        let was_theme_picker = matches!(self.popup, PopupState::ThemePicker { .. });
+
         match &self.popup {
             PopupState::Confirm { .. } => {
                 if key.code == KeyCode::Char('y') || key.code == KeyCode::Enter {
@@ -3458,11 +3462,11 @@ impl Gui {
         // Use else-if so that a handler that transitions to another popup
         // (e.g. Help → ThemePicker on Enter) does not also fire the new
         // popup's handler with the same key event.
-        if matches!(self.popup, PopupState::Help { .. }) {
+        if was_help && matches!(self.popup, PopupState::Help { .. }) {
             self.handle_help_popup_key(key);
-        } else if matches!(self.popup, PopupState::RefPicker { .. }) {
+        } else if was_ref_picker && matches!(self.popup, PopupState::RefPicker { .. }) {
             self.handle_ref_picker_key(key)?;
-        } else if matches!(self.popup, PopupState::ThemePicker { .. }) {
+        } else if was_theme_picker && matches!(self.popup, PopupState::ThemePicker { .. }) {
             self.handle_theme_picker_key(key);
         }
 

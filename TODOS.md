@@ -259,3 +259,5 @@ Where I observed this behavior: I noticed this for the "Commit Message" and "Des
 
 - [x] IN the original lazygit, When i delete tags, I can see a dialog with actions to delete local tag, delete remote tag, and 'delete local and remote tag'. Let's do that here as well.
   - [ ] improvement, use the palette selector for branches and refs, find a way to reuse
+
+- [x] Bug, I get rect whatever error when the error box shows up. My hypothesis is out of bounds or something.
