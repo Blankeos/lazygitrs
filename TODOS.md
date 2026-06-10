@@ -258,6 +258,6 @@ Also another thing I noticed, a missed keyboard behavior we didn't do yet... Doi
 Where I observed this behavior: I noticed this for the "Commit Message" and "Description". Generally where I can input text i..e the "Interactive rebase on" dialog palette or the help `?` command palette.
 
 - [x] IN the original lazygit, When i delete tags, I can see a dialog with actions to delete local tag, delete remote tag, and 'delete local and remote tag'. Let's do that here as well.
-  - [ ] improvement, use the palette selector for branches and refs, find a way to reuse
+  - [x] improvement, use the palette selector for branches and refs, find a way to reuse
 
 - [x] Bug, I get rect whatever error when the error box shows up. My hypothesis is out of bounds or something.

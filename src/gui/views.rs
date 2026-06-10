@@ -1910,7 +1910,11 @@ fn render_status_bar(
             hints.push(("{/}", "prev/next hunk"));
         }
         hints.push(("[/]", "side view"));
-        hints.push(("v", "diff view"));
+        let view_layout_hint = match diff_view.view_layout {
+            DiffViewLayout::SideBySide => "unified view",
+            DiffViewLayout::Unified => "split view",
+        };
+        hints.push(("v", view_layout_hint));
     } else {
         // Sidebar-focused: context-specific hints.
         match ctx_mgr.active() {
