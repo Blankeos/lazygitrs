@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.22] - 2026-06-10
+
+### Bug Fixes
+
+- Update status-bar hint for diff layout toggle by @Blankeos
+- Centralize textarea shortcut handling across input fields by @Blankeos
+- Show errors instead of aborting on failure paths by @Blankeos
+- Mouse-scroll drain pending crossterm events on terminal restore by @Blankeos
+
+### Features
+
+- Add palette selector + guard popup transitions and bound popup dialog height by @Blankeos
+- Add interactive local and remote tag deletion flow by @Blankeos
+- Resolve repo root and name from git top-level by @Blankeos
+- Support repo-inspection generators and preserve draft on failure by @Blankeos
+
 ## [0.0.21] - 2026-05-31
 
 ### Bug Fixes
