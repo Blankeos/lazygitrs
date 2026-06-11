@@ -89,6 +89,10 @@ fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
     };
 
     let file_name = file.name.clone();
+    let old_path = file
+        .rename_paths()
+        .map_or_else(|| file.name.clone(), |(old, _)| old.to_string());
+    let new_path = file.current_path().to_string();
     let status = file.status;
     let hash = gui.commit_files_hash.clone();
     drop(model);
@@ -97,8 +101,8 @@ fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
         return Ok(());
     }
 
-    let path_for_old = file_name.clone();
-    let path_for_new = file_name.clone();
+    let path_for_old = old_path.clone();
+    let path_for_new = new_path.clone();
     let path_for_diff = file_name.clone();
     let hash_for_old = hash.clone();
     let hash_for_new = hash.clone();

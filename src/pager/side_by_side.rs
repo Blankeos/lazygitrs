@@ -580,8 +580,7 @@ impl DiffViewState {
                 .first()
                 .map(|(name, _)| name.as_str())
                 .unwrap_or(filename);
-            let lines =
-                super::diff_algo::compute_side_by_side_from_unified_diff(diff_output, tab_width);
+            let lines = diff_lines_from_unified_or_rename_only(diff_output, tab_width);
             let hunk_starts = super::diff_algo::find_hunk_starts(&lines);
             let hunks = parse_hunk_headers(diff_output);
             let hunk_line_offsets = build_hunk_line_offsets(&hunks, &lines, 0);
@@ -621,7 +620,7 @@ impl DiffViewState {
 
                 let section_start = lines.len();
                 let mut section_lines =
-                    super::diff_algo::compute_side_by_side_from_unified_diff(file_diff, tab_width);
+                    diff_lines_from_unified_or_rename_only(file_diff, tab_width);
                 for line in &mut section_lines {
                     line.section_index = section_idx;
                 }
@@ -747,10 +746,7 @@ impl DiffViewState {
             self.filename = actual_name.to_string();
             self.old_content = old.clone();
             self.new_content = new.clone();
-            self.lines = super::diff_algo::compute_side_by_side_from_unified_diff(
-                diff_output,
-                self.tab_width,
-            );
+            self.lines = diff_lines_from_unified_or_rename_only(diff_output, self.tab_width);
             self.hunk_starts = super::diff_algo::find_hunk_starts(&self.lines);
             let hunks = parse_hunk_headers(diff_output);
             self.hunk_line_offsets = build_hunk_line_offsets(&hunks, &self.lines, 0);
@@ -815,10 +811,8 @@ impl DiffViewState {
 
                 // Compute diff lines for this file section
                 let section_start = self.lines.len();
-                let mut section_lines = super::diff_algo::compute_side_by_side_from_unified_diff(
-                    file_diff,
-                    self.tab_width,
-                );
+                let mut section_lines =
+                    diff_lines_from_unified_or_rename_only(file_diff, self.tab_width);
                 for line in &mut section_lines {
                     line.section_index = section_idx;
                 }
@@ -2765,7 +2759,55 @@ fn parse_unified_diff(diff: &str) -> (String, String) {
         }
     }
 
+    if old_lines.is_empty() && new_lines.is_empty() {
+        if let Some((old_path, new_path)) = rename_only_paths(diff) {
+            return (old_path, new_path);
+        }
+    }
+
     (old_lines.join("\n"), new_lines.join("\n"))
+}
+
+fn diff_lines_from_unified_or_rename_only(diff: &str, tab_width: usize) -> Vec<DiffLine> {
+    if let Some((old_path, new_path)) = rename_only_paths(diff) {
+        return rename_only_lines(&old_path, &new_path, tab_width);
+    }
+
+    super::diff_algo::compute_side_by_side_from_unified_diff(diff, tab_width)
+}
+
+fn rename_only_paths(diff: &str) -> Option<(String, String)> {
+    if diff.lines().any(|line| line.starts_with("@@")) {
+        return None;
+    }
+
+    let mut old_path = None;
+    let mut new_path = None;
+    for line in diff.lines() {
+        if let Some(path) = line.strip_prefix("rename from ") {
+            old_path = Some(path.to_string());
+        } else if let Some(path) = line.strip_prefix("rename to ") {
+            new_path = Some(path.to_string());
+        } else if let Some(path) = line.strip_prefix("copy from ") {
+            old_path = Some(path.to_string());
+        } else if let Some(path) = line.strip_prefix("copy to ") {
+            new_path = Some(path.to_string());
+        }
+    }
+
+    Some((old_path?, new_path?))
+}
+
+fn rename_only_lines(old_path: &str, new_path: &str, tab_width: usize) -> Vec<DiffLine> {
+    vec![DiffLine {
+        old_line: Some((1, super::expand_tabs(old_path, tab_width))),
+        new_line: Some((1, super::expand_tabs(new_path, tab_width))),
+        change_type: ChangeType::Modified,
+        old_segments: None,
+        new_segments: None,
+        file_header: None,
+        section_index: 0,
+    }]
 }
 
 /// Parse hunk headers from a unified diff, returning
@@ -2913,6 +2955,31 @@ mod tests {
         assert_eq!(
             state.line_chunk_panel_at_row(layout.inner_y + 1, &layout, DiffPanel::New),
             Some((0, 1, DiffPanel::New))
+        );
+    }
+
+    #[test]
+    fn pure_rename_diff_produces_visible_modified_row() {
+        let diff = "diff --git a/src/views/openai_oauth_flow.rs b/src/views/provider_oauth_flow.rs\nsimilarity index 100%\nrename from src/views/openai_oauth_flow.rs\nrename to src/views/provider_oauth_flow.rs\n";
+
+        let parsed = DiffViewState::parse_diff_output(
+            "src/views/openai_oauth_flow.rs -> src/views/provider_oauth_flow.rs",
+            diff,
+            4,
+            true,
+        );
+
+        assert_eq!(parsed.old_content, "src/views/openai_oauth_flow.rs");
+        assert_eq!(parsed.new_content, "src/views/provider_oauth_flow.rs");
+        assert_eq!(parsed.lines.len(), 1);
+        assert_eq!(parsed.lines[0].change_type, ChangeType::Modified);
+        assert_eq!(
+            parsed.lines[0].old_line,
+            Some((1, "src/views/openai_oauth_flow.rs".to_string()))
+        );
+        assert_eq!(
+            parsed.lines[0].new_line,
+            Some((1, "src/views/provider_oauth_flow.rs".to_string()))
         );
     }
 }

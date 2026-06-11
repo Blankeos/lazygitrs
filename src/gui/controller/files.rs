@@ -359,6 +359,11 @@ fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
     };
     let file_name = file.display_name.clone();
     let rel_path = file.name.clone();
+    let current_path = file.current_path().to_string();
+    let diff_paths: Vec<String> = file.diff_paths().into_iter().map(str::to_string).collect();
+    let old_path = file
+        .rename_paths()
+        .map_or_else(|| file.name.clone(), |(old, _)| old.to_string());
     let is_added = file.added;
     let is_deleted = file.deleted;
     drop(model);
@@ -366,14 +371,13 @@ fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
     let abs_path = gui
         .git
         .repo_path()
-        .join(&rel_path)
+        .join(&current_path)
         .to_string_lossy()
         .to_string();
-    let rel_for_diff = rel_path.clone();
     let file_name_copy = file_name.clone();
     let rel_path_copy = rel_path.clone();
-    let path_for_old = rel_path.clone();
-    let path_for_new = rel_path.clone();
+    let path_for_old = old_path.clone();
+    let path_for_new = current_path.clone();
 
     gui.popup = PopupState::Menu {
         title: "Copy to clipboard".to_string(),
@@ -446,8 +450,12 @@ fn copy_to_clipboard_menu(gui: &mut Gui) -> Result<()> {
                 description: String::new(),
                 key: Some("s".to_string()),
                 action: Some(Box::new(move |gui| {
-                    let mut diff = gui.git.diff_file(&rel_for_diff).unwrap_or_default();
-                    let staged = gui.git.diff_file_staged(&rel_for_diff).unwrap_or_default();
+                    let path_refs: Vec<&str> = diff_paths.iter().map(String::as_str).collect();
+                    let mut diff = gui.git.diff_file_paths(&path_refs).unwrap_or_default();
+                    let staged = gui
+                        .git
+                        .diff_file_staged_paths(&path_refs)
+                        .unwrap_or_default();
                     if !staged.is_empty() {
                         if !diff.is_empty() {
                             diff.push('\n');
@@ -487,7 +495,7 @@ fn open_in_editor(gui: &mut Gui) -> Result<()> {
     };
     let model = gui.model.lock().unwrap();
     if let Some(file) = model.files.get(file_idx) {
-        let rel_path = file.name.clone();
+        let rel_path = file.current_path().to_string();
         drop(model);
 
         let abs_path = gui
@@ -539,7 +547,7 @@ fn open_in_default_program(gui: &mut Gui) -> Result<()> {
     };
     let model = gui.model.lock().unwrap();
     if let Some(file) = model.files.get(file_idx) {
-        let rel_path = file.name.clone();
+        let rel_path = file.current_path().to_string();
         drop(model);
 
         let abs_path = gui
@@ -669,7 +677,12 @@ fn discard_file(gui: &mut Gui) -> Result<()> {
                 let model = gui.model.lock().unwrap();
                 let files_info: Vec<(String, bool)> = child_indices
                     .iter()
-                    .filter_map(|&i| model.files.get(i).map(|f| (f.name.clone(), f.added)))
+                    .filter_map(|&i| {
+                        model
+                            .files
+                            .get(i)
+                            .map(|f| (f.current_path().to_string(), f.added))
+                    })
                     .collect();
                 let dir_name = node.name.clone();
                 drop(model);
@@ -721,14 +734,15 @@ fn discard_file(gui: &mut Gui) -> Result<()> {
     };
     let model = gui.model.lock().unwrap();
     if let Some(file) = model.files.get(file_idx) {
-        let name = file.name.clone();
+        let name = file.current_path().to_string();
+        let display = file.display_name.clone();
         let added = file.added;
         drop(model);
 
         if !gui.config.user_config.gui.skip_discard_change_warning {
             let name_clone = name.clone();
             gui.popup = PopupState::Menu {
-                title: format!("Discard changes to '{}'?", name),
+                title: format!("Discard changes to '{}'?", display),
                 items: vec![
                     MenuItem {
                         label: "Discard".to_string(),
@@ -764,7 +778,7 @@ fn ignore_file(gui: &mut Gui) -> Result<()> {
     };
     let model = gui.model.lock().unwrap();
     if let Some(file) = model.files.get(file_idx) {
-        let name = file.name.clone();
+        let name = file.current_path().to_string();
         let display = file.display_name.clone();
         drop(model);
 

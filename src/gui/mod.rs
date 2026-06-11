@@ -1487,6 +1487,9 @@ impl Gui {
                 };
                 if let Some(file) = file_idx.and_then(|i| model.files.get(i)) {
                     let name = file.name.clone();
+                    let current_path = file.current_path().to_string();
+                    let diff_paths: Vec<String> =
+                        file.diff_paths().into_iter().map(str::to_string).collect();
                     let has_staged = file.has_staged_changes;
                     let has_unstaged = file.has_unstaged_changes;
                     let tracked = file.tracked;
@@ -1502,21 +1505,26 @@ impl Gui {
                         if gen_counter.load(Ordering::Relaxed) != generation {
                             return;
                         }
+                        let path_refs: Vec<&str> = diff_paths.iter().map(String::as_str).collect();
                         let diff_result = if has_unstaged {
-                            git.diff_file(&name)
+                            git.diff_file_paths(&path_refs)
                         } else if has_staged {
-                            git.diff_file_staged(&name)
+                            git.diff_file_staged_paths(&path_refs)
                         } else {
                             Ok(String::new())
                         };
 
-                        let exists = git.repo_path().join(&name).exists();
+                        let exists = git.repo_path().join(&current_path).exists();
                         let payload = match diff_result {
                             Ok(diff) if diff.is_empty() && !tracked => {
-                                match git.file_content(&name) {
+                                match git.file_content(&current_path) {
                                     Ok(content) if !content.is_empty() => {
                                         DiffPayload::Parsed(DiffViewState::parse_content(
-                                            &name, "", &content, 4, exists,
+                                            &current_path,
+                                            "",
+                                            &content,
+                                            4,
+                                            exists,
                                         ))
                                     }
                                     _ => DiffPayload::Empty,
@@ -1538,13 +1546,14 @@ impl Gui {
                     // Directory node: show combined diff of all child files (async)
                     if let Some(node) = self.file_tree_nodes.get(selected) {
                         if node.is_dir && !node.child_file_indices.is_empty() {
-                            let child_names: Vec<(String, bool, bool, bool)> = node
+                            let child_names: Vec<(String, Vec<String>, bool, bool, bool)> = node
                                 .child_file_indices
                                 .iter()
                                 .filter_map(|&i| model.files.get(i))
                                 .map(|f| {
                                     (
-                                        f.name.clone(),
+                                        f.current_path().to_string(),
+                                        f.diff_paths().into_iter().map(str::to_string).collect(),
                                         f.has_unstaged_changes,
                                         f.has_staged_changes,
                                         f.tracked,
@@ -1565,22 +1574,29 @@ impl Gui {
                                     return;
                                 }
                                 let mut combined_diff = String::new();
-                                for (name, has_unstaged, has_staged, tracked) in &child_names {
+                                for (current_path, diff_paths, has_unstaged, has_staged, tracked) in
+                                    &child_names
+                                {
                                     if gen_counter.load(Ordering::Relaxed) != generation {
                                         return;
                                     }
                                     let diff = if !tracked {
                                         // Untracked file: synthesize a unified diff from raw content
-                                        let content = git.file_content(name).unwrap_or_default();
+                                        let content =
+                                            git.file_content(current_path).unwrap_or_default();
                                         if content.is_empty() {
                                             String::new()
                                         } else {
-                                            synthesize_new_file_diff(name, &content)
+                                            synthesize_new_file_diff(current_path, &content)
                                         }
                                     } else if *has_unstaged {
-                                        git.diff_file(name).unwrap_or_default()
+                                        let path_refs: Vec<&str> =
+                                            diff_paths.iter().map(String::as_str).collect();
+                                        git.diff_file_paths(&path_refs).unwrap_or_default()
                                     } else if *has_staged {
-                                        git.diff_file_staged(name).unwrap_or_default()
+                                        let path_refs: Vec<&str> =
+                                            diff_paths.iter().map(String::as_str).collect();
+                                        git.diff_file_staged_paths(&path_refs).unwrap_or_default()
                                     } else {
                                         String::new()
                                     };
@@ -1769,6 +1785,7 @@ impl Gui {
                 };
                 if let Some(commit_file) = file_idx.and_then(|i| model.commit_files.get(i)) {
                     let name = commit_file.name.clone();
+                    let current_path = commit_file.current_path().to_string();
                     let hash = self.commit_files_hash.clone();
                     drop(model);
 
@@ -1786,7 +1803,7 @@ impl Gui {
                             if diff.is_empty() {
                                 DiffPayload::Empty
                             } else {
-                                let exists = git.repo_path().join(&name).exists();
+                                let exists = git.repo_path().join(&current_path).exists();
                                 DiffPayload::Parsed(DiffViewState::parse_diff_output(
                                     &name, &diff, 4, exists,
                                 ))

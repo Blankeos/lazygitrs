@@ -3,6 +3,74 @@ use std::collections::HashSet;
 use super::CommitFile;
 use super::File;
 
+fn tree_path_for_name(name: &str) -> &str {
+    name.split_once(" -> ").map_or(name, |(_, new)| new)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+    use crate::model::{FileChangeStatus, FileStatus};
+
+    #[test]
+    fn file_tree_groups_rename_under_new_path_and_uses_leaf_arrow_label() {
+        let files = vec![File {
+            name: "src/views/openai_oauth_flow.rs -> src/views/provider_oauth_flow.rs".to_string(),
+            display_name: "src/views/openai_oauth_flow.rs -> src/views/provider_oauth_flow.rs"
+                .to_string(),
+            status: FileStatus::Renamed,
+            has_staged_changes: true,
+            has_unstaged_changes: false,
+            tracked: true,
+            added: false,
+            deleted: false,
+            has_merge_conflicts: false,
+            short_status: "R ".to_string(),
+        }];
+
+        let nodes = build_file_tree(&files, &HashSet::new());
+
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].name, "src/views");
+        assert_eq!(nodes[0].path, "src/views");
+        assert!(nodes[0].is_dir);
+        assert_eq!(
+            nodes[1].name,
+            "openai_oauth_flow.rs -> provider_oauth_flow.rs"
+        );
+        assert_eq!(nodes[1].path, "src/views/provider_oauth_flow.rs");
+        assert_eq!(nodes[1].file_index, Some(0));
+    }
+
+    #[test]
+    fn commit_file_tree_groups_rename_under_new_path() {
+        let files = vec![CommitFile {
+            name: "src/views/openai_oauth_flow.rs -> src/views/provider_oauth_flow.rs".to_string(),
+            status: FileChangeStatus::Renamed,
+        }];
+
+        let nodes = build_commit_file_tree(&files, &HashSet::new());
+
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].name, "src/views");
+        assert_eq!(
+            nodes[1].name,
+            "openai_oauth_flow.rs -> provider_oauth_flow.rs"
+        );
+        assert_eq!(nodes[1].path, "src/views/provider_oauth_flow.rs");
+        assert_eq!(nodes[1].file_index, Some(0));
+    }
+}
+
+fn rename_leaf_name(name: &str) -> Option<String> {
+    let (old, new) = name.split_once(" -> ")?;
+    let old_leaf = old.rsplit('/').next().unwrap_or(old);
+    let new_leaf = new.rsplit('/').next().unwrap_or(new);
+    Some(format!("{} -> {}", old_leaf, new_leaf))
+}
+
 /// A node in the flattened file tree for display.
 #[derive(Debug, Clone)]
 pub struct FileTreeNode {
@@ -31,7 +99,7 @@ pub fn build_file_tree(files: &[File], collapsed_dirs: &HashSet<String>) -> Vec<
         .iter()
         .enumerate()
         .map(|(i, f)| {
-            let parts: Vec<&str> = f.name.split('/').collect();
+            let parts: Vec<&str> = tree_path_for_name(&f.name).split('/').collect();
             (parts, i)
         })
         .collect();
@@ -70,7 +138,8 @@ pub fn build_file_tree(files: &[File], collapsed_dirs: &HashSet<String>) -> Vec<
 
     for (parts, file_idx) in &entries {
         let dir_parts = &parts[..parts.len() - 1];
-        let file_name = parts[parts.len() - 1];
+        let file_name = rename_leaf_name(&files[*file_idx].name)
+            .unwrap_or_else(|| parts[parts.len() - 1].to_string());
 
         // Check if any ancestor directory is collapsed — if so, skip this file
         let mut hidden = false;
@@ -122,7 +191,7 @@ pub fn build_file_tree(files: &[File], collapsed_dirs: &HashSet<String>) -> Vec<
         if !hidden {
             nodes.push(FileTreeNode {
                 depth: dir_parts.len() + 1, // +1 for root node
-                name: file_name.to_string(),
+                name: file_name,
                 path: parts.join("/"),
                 file_index: Some(*file_idx),
                 is_dir: false,
@@ -238,7 +307,7 @@ pub fn build_commit_file_tree(
         .iter()
         .enumerate()
         .map(|(i, f)| {
-            let parts: Vec<&str> = f.name.split('/').collect();
+            let parts: Vec<&str> = tree_path_for_name(&f.name).split('/').collect();
             (parts, i)
         })
         .collect();
@@ -276,7 +345,8 @@ pub fn build_commit_file_tree(
 
     for (parts, file_idx) in &entries {
         let dir_parts = &parts[..parts.len() - 1];
-        let file_name = parts[parts.len() - 1];
+        let file_name = rename_leaf_name(&files[*file_idx].name)
+            .unwrap_or_else(|| parts[parts.len() - 1].to_string());
 
         let mut hidden = false;
         for depth in 0..dir_parts.len() {
@@ -320,7 +390,7 @@ pub fn build_commit_file_tree(
         if !hidden {
             nodes.push(CommitFileTreeNode {
                 depth: dir_parts.len() + 1, // +1 for root node
-                name: file_name.to_string(),
+                name: file_name,
                 path: parts.join("/"),
                 file_index: Some(*file_idx),
                 is_dir: false,

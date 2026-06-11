@@ -5,19 +5,31 @@ use super::GitCommands;
 impl GitCommands {
     /// Get diff for a specific file (unstaged changes).
     pub fn diff_file(&self, path: &str) -> Result<String> {
-        let result = self
-            .git()
-            .args(&["diff", "--color=never", "--", path])
-            .run_expecting_success()?;
+        let paths = diff_paths_for_label(path);
+        self.diff_file_paths(&paths)
+    }
+
+    /// Get diff for one logical file using one or more pathspecs.
+    /// Renames need both old and new pathspecs for Git to show the rename as a
+    /// single file rather than as independent delete/add halves.
+    pub fn diff_file_paths(&self, paths: &[&str]) -> Result<String> {
+        let mut args = vec!["diff", "--color=never", "--"];
+        args.extend(paths.iter().copied());
+        let result = self.git().args(&args).run_expecting_success()?;
         Ok(result.stdout)
     }
 
     /// Get diff for a specific file (staged changes).
     pub fn diff_file_staged(&self, path: &str) -> Result<String> {
-        let result = self
-            .git()
-            .args(&["diff", "--cached", "--color=never", "--", path])
-            .run_expecting_success()?;
+        let paths = diff_paths_for_label(path);
+        self.diff_file_staged_paths(&paths)
+    }
+
+    /// Get staged diff for one logical file using one or more pathspecs.
+    pub fn diff_file_staged_paths(&self, paths: &[&str]) -> Result<String> {
+        let mut args = vec!["diff", "--cached", "--color=never", "--"];
+        args.extend(paths.iter().copied());
+        let result = self.git().args(&args).run_expecting_success()?;
         Ok(result.stdout)
     }
 
@@ -153,9 +165,17 @@ impl GitCommands {
                 continue;
             }
             // Format: "M\tpath/to/file" or "R100\told\tnew"
-            let mut parts = line.splitn(2, '\t');
+            let mut parts = line.split('\t');
             let status_str = parts.next().unwrap_or("");
-            let name = parts.next().unwrap_or("").to_string();
+            let first_path = parts.next().unwrap_or("");
+            let second_path = parts.next();
+            let name = if matches!(status_str.chars().next(), Some('R' | 'C')) {
+                second_path
+                    .map(|new_path| format!("{} -> {}", first_path, new_path))
+                    .unwrap_or_else(|| first_path.to_string())
+            } else {
+                first_path.to_string()
+            };
             if name.is_empty() {
                 continue;
             }
@@ -178,23 +198,25 @@ impl GitCommands {
     /// Uses `hash^1..hash` to correctly handle merge commits (including stashes).
     /// Falls back to `git show` for root commits (no parent).
     pub fn diff_commit_file(&self, hash: &str, path: &str) -> Result<String> {
-        let result = self
-            .git()
-            .args(&[
-                "diff",
-                "--color=never",
-                &format!("{}^1", hash),
-                hash,
-                "--",
-                path,
-            ])
-            .run();
+        let parent = format!("{}^1", hash);
+        let paths = diff_paths_for_label(path);
+        let mut args = vec!["diff", "--color=never", parent.as_str(), hash, "--"];
+        args.extend(paths.iter().copied());
+        let result = self.git().args(&args).run();
         match result {
             Ok(r) if r.success => Ok(r.stdout),
             _ => {
+                let current_path = current_path_for_label(path);
                 let r = self
                     .git()
-                    .args(&["show", "--color=never", "--format=", hash, "--", path])
+                    .args(&[
+                        "show",
+                        "--color=never",
+                        "--format=",
+                        hash,
+                        "--",
+                        current_path,
+                    ])
                     .run_expecting_success()?;
                 Ok(r.stdout)
             }
@@ -218,9 +240,17 @@ impl GitCommands {
             if line.is_empty() {
                 continue;
             }
-            let mut parts = line.splitn(2, '\t');
+            let mut parts = line.split('\t');
             let status_str = parts.next().unwrap_or("");
-            let name = parts.next().unwrap_or("").to_string();
+            let first_path = parts.next().unwrap_or("");
+            let second_path = parts.next();
+            let name = if matches!(status_str.chars().next(), Some('R' | 'C')) {
+                second_path
+                    .map(|new_path| format!("{} -> {}", first_path, new_path))
+                    .unwrap_or_else(|| first_path.to_string())
+            } else {
+                first_path.to_string()
+            };
             if name.is_empty() {
                 continue;
             }
@@ -239,10 +269,10 @@ impl GitCommands {
 
     /// Get the diff of a single file between two refs (for diff/compare mode).
     pub fn diff_refs_file(&self, ref_a: &str, ref_b: &str, path: &str) -> Result<String> {
-        let result = self
-            .git()
-            .args(&["diff", "--color=never", ref_a, ref_b, "--", path])
-            .run_expecting_success()?;
+        let paths = diff_paths_for_label(path);
+        let mut args = vec!["diff", "--color=never", ref_a, ref_b, "--"];
+        args.extend(paths.iter().copied());
+        let result = self.git().args(&args).run_expecting_success()?;
         Ok(result.stdout)
     }
 
@@ -255,4 +285,15 @@ impl GitCommands {
             Ok(String::new())
         }
     }
+}
+
+fn diff_paths_for_label(path: &str) -> Vec<&str> {
+    match path.split_once(" -> ") {
+        Some((old, new)) => vec![old, new],
+        None => vec![path],
+    }
+}
+
+fn current_path_for_label(path: &str) -> &str {
+    path.split_once(" -> ").map_or(path, |(_, new)| new)
 }

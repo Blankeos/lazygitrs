@@ -33,12 +33,7 @@ impl GitCommands {
                 unquote_porcelain_path(raw)
             };
 
-            let display_name = if name.contains(" -> ") {
-                // Renamed file: "old -> new"
-                name.split(" -> ").last().unwrap_or(&name).to_string()
-            } else {
-                name.clone()
-            };
+            let display_name = name.clone();
 
             files.push(File {
                 short_status: format!("{}{}", x, y),
@@ -261,8 +256,10 @@ fn parse_status_codes(x: char, y: char) -> (bool, bool, bool, FileStatus) {
         ('M', 'M') => (true, true, true, FileStatus::Modified),
         ('D', ' ') => (true, false, true, FileStatus::Deleted),
         (' ', 'D') => (false, true, true, FileStatus::Deleted),
-        ('R', ' ') | ('R', 'M') => (true, false, true, FileStatus::Renamed),
-        ('C', ' ') | ('C', 'M') => (true, false, true, FileStatus::Copied),
+        ('R', ' ') => (true, false, true, FileStatus::Renamed),
+        ('R', 'M') => (true, true, true, FileStatus::Renamed),
+        ('C', ' ') => (true, false, true, FileStatus::Copied),
+        ('C', 'M') => (true, true, true, FileStatus::Copied),
         ('U', 'U')
         | ('A', 'A')
         | ('D', 'D')

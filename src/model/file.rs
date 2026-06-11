@@ -14,6 +14,49 @@ pub struct File {
     pub short_status: String,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn renamed_file() -> File {
+        File {
+            name: "src/views/openai_oauth_flow.rs -> src/views/provider_oauth_flow.rs".to_string(),
+            display_name: "src/views/openai_oauth_flow.rs -> src/views/provider_oauth_flow.rs"
+                .to_string(),
+            status: FileStatus::Renamed,
+            has_staged_changes: true,
+            has_unstaged_changes: false,
+            tracked: true,
+            added: false,
+            deleted: false,
+            has_merge_conflicts: false,
+            short_status: "R ".to_string(),
+        }
+    }
+
+    #[test]
+    fn rename_helpers_split_display_name_from_git_paths() {
+        let file = renamed_file();
+
+        assert_eq!(
+            file.rename_paths(),
+            Some((
+                "src/views/openai_oauth_flow.rs",
+                "src/views/provider_oauth_flow.rs"
+            ))
+        );
+        assert_eq!(file.current_path(), "src/views/provider_oauth_flow.rs");
+        assert_eq!(file.git_add_path(), "src/views/provider_oauth_flow.rs");
+        assert_eq!(
+            file.diff_paths(),
+            vec![
+                "src/views/openai_oauth_flow.rs",
+                "src/views/provider_oauth_flow.rs"
+            ]
+        );
+    }
+}
+
 impl File {
     pub fn is_tracked(&self) -> bool {
         self.tracked
@@ -29,13 +72,31 @@ impl File {
         self.name.split_once(" -> ")
     }
 
-    /// Pathspec to pass to `git add` for this file. For renames, this is
-    /// the post-rename path (the only one that exists on disk).
-    pub fn git_add_path(&self) -> &str {
+    /// The path that exists in the working tree / index for this change.
+    ///
+    /// Renames are represented in `name` as `old -> new`, but most filesystem
+    /// operations and tree grouping should use only the new path.
+    pub fn current_path(&self) -> &str {
         match self.rename_paths() {
             Some((_, new)) => new,
             None => &self.name,
         }
+    }
+
+    /// Git pathspecs that identify this file's diff. For staged renames, both
+    /// old and new paths are required; passing the synthetic `old -> new` label
+    /// matches nothing, and passing only one side makes Git show an add/delete.
+    pub fn diff_paths(&self) -> Vec<&str> {
+        match self.rename_paths() {
+            Some((old, new)) => vec![old, new],
+            None => vec![&self.name],
+        }
+    }
+
+    /// Pathspec to pass to `git add` for this file. For renames, this is
+    /// the post-rename path (the only one that exists on disk).
+    pub fn git_add_path(&self) -> &str {
+        self.current_path()
     }
 
     /// Pathspecs to pass to `git reset HEAD --` to fully unstage this file.

@@ -21,6 +21,13 @@ pub fn render_commit_file_list<'a>(model: &Model, theme: &Theme) -> Vec<ListItem
             let dim_style = Style::default().fg(theme.text_dimmed);
             let name_style = Style::default().fg(theme.text_strong);
 
+            if file.rename_paths().is_some() {
+                return ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {} ", status_icon), status_style),
+                    Span::styled(file.name.clone(), name_style),
+                ]));
+            }
+
             let path = file.name.as_str();
             let (dir, name) = match path.rfind('/') {
                 Some(idx) => (&path[..=idx], &path[idx + 1..]),

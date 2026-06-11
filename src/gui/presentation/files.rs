@@ -21,6 +21,13 @@ pub fn render_file_list<'a>(model: &Model, theme: &Theme) -> Vec<ListItem<'a>> {
             let name_style = file_name_style(file, theme);
             let dim_style = Style::default().fg(theme.text_dimmed);
 
+            if file.rename_paths().is_some() {
+                return ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {} ", status_icon), status_style),
+                    Span::styled(file.display_name.clone(), name_style),
+                ]));
+            }
+
             let path = file.display_name.as_str();
             let (dir, name) = match path.rfind('/') {
                 Some(idx) => (&path[..=idx], &path[idx + 1..]),
@@ -119,23 +126,27 @@ fn file_status_display<'a>(file: &crate::model::File, theme: &Theme) -> (Style, 
         theme.file_unstaged
     };
 
-    let status_icon: &str = if file.has_staged_changes && file.has_unstaged_changes {
-        "MM"
-    } else if file.has_staged_changes {
-        "A "
-    } else {
-        match file.short_status.as_str() {
-            "??" => "??",
-            "M " => "M ",
-            " M" => " M",
-            "A " => "A ",
-            "D " => "D ",
-            " D" => " D",
-            "R " => "R ",
-            "C " => "C ",
-            "UU" => "UU",
-            _ => "  ",
-        }
+    let status_icon: &str = match file.short_status.as_str() {
+        "??" => "??",
+        "M " => "M ",
+        " M" => " M",
+        "MM" => "MM",
+        "A " => "A ",
+        "AM" => "AM",
+        "D " => "D ",
+        " D" => " D",
+        "R " => "R ",
+        "RM" => "RM",
+        "C " => "C ",
+        "CM" => "CM",
+        "UU" => "UU",
+        "AA" => "AA",
+        "DD" => "DD",
+        "AU" => "AU",
+        "UA" => "UA",
+        "DU" => "DU",
+        "UD" => "UD",
+        _ => "  ",
     };
 
     (status_style, status_icon)

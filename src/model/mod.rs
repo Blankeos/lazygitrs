@@ -105,6 +105,19 @@ pub struct CommitFile {
     pub status: FileChangeStatus,
 }
 
+impl CommitFile {
+    pub fn rename_paths(&self) -> Option<(&str, &str)> {
+        self.name.split_once(" -> ")
+    }
+
+    pub fn current_path(&self) -> &str {
+        match self.rename_paths() {
+            Some((_, new)) => new,
+            None => &self.name,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileChangeStatus {
     Added,

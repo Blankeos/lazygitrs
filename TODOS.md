@@ -261,3 +261,5 @@ Where I observed this behavior: I noticed this for the "Commit Message" and "Des
   - [x] improvement, use the palette selector for branches and refs, find a way to reuse
 
 - [x] Bug, I get rect whatever error when the error box shows up. My hypothesis is out of bounds or something.
+
+- [x] Bug, git mv in non-filetree view and filetree view, broken and no diff.

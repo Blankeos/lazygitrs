@@ -336,11 +336,15 @@ fn show_commit_file_copy_menu(gui: &mut Gui) -> Result<()> {
     };
 
     let file_name = file.name.clone();
+    let old_path = file
+        .rename_paths()
+        .map_or_else(|| file.name.clone(), |(old, _)| old.to_string());
+    let new_path = file.current_path().to_string();
     let status = file.status;
     let ref_a = gui.diff_mode.ref_a.clone();
     let ref_b = gui.diff_mode.ref_b.clone();
-    let path_for_old = file_name.clone();
-    let path_for_new = file_name.clone();
+    let path_for_old = old_path.clone();
+    let path_for_new = new_path.clone();
     let path_for_diff = file_name.clone();
 
     // Added files have no old content, Deleted files have no new content
@@ -715,6 +719,7 @@ pub fn maybe_request_diff(gui: &mut Gui, generation: u64, diff_key: String) {
             return;
         };
         let name = file.name.clone();
+        let current_path = file.current_path().to_string();
 
         std::thread::spawn(move || {
             if gen_counter.load(Ordering::Relaxed) != generation {
@@ -723,7 +728,7 @@ pub fn maybe_request_diff(gui: &mut Gui, generation: u64, diff_key: String) {
             let payload = match git.diff_refs_file(&ref_a, &ref_b, &name) {
                 Ok(diff) if diff.is_empty() => DiffPayload::Empty,
                 Ok(diff) => {
-                    let exists = git.repo_path().join(&name).exists();
+                    let exists = git.repo_path().join(&current_path).exists();
                     DiffPayload::Parsed(DiffViewState::parse_diff_output(&name, &diff, 4, exists))
                 }
                 Err(_) => DiffPayload::Empty,
