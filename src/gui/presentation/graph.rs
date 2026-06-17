@@ -289,14 +289,17 @@ pub fn render_graph_spans(
         let (first, second) = box_drawing(cell.up, cell.down, cell.left, cell.right);
 
         let first_glyph: &'static str = match cell.cell_type {
-            CellType::Commit => {
+            CellType::Commit | CellType::Merge => {
                 if is_head && cell.style_col == row.commit_col {
                     "⬤"
                 } else {
-                    "◯"
+                    match cell.cell_type {
+                        CellType::Commit => "◯",
+                        CellType::Merge => "⏣",
+                        _ => unreachable!(),
+                    }
                 }
             }
-            CellType::Merge => "⏣",
             CellType::Connection => first,
         };
 
