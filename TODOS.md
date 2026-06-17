@@ -263,3 +263,7 @@ Where I observed this behavior: I noticed this for the "Commit Message" and "Des
 - [x] Bug, I get rect whatever error when the error box shows up. My hypothesis is out of bounds or something.
 
 - [x] Bug, git mv in non-filetree view and filetree view, broken and no diff.
+
+- [ ] Graph is still not good, the feature where it becomes a solid circle disappeared. But only for nodes that have like this connected + hexagon look.
+
+- [x] `-` in '3 Branches' does not work

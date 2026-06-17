@@ -108,7 +108,14 @@ fn checkout_branch(gui: &mut Gui) -> Result<()> {
 }
 
 fn checkout_previous(gui: &mut Gui) -> Result<()> {
-    show_checkout_error_or_refresh(gui, "-")?;
+    // Resolve @{-1} to an actual ref name before checking out. This is more
+    // reliable than `git checkout -`, which can fail when the previous ref is
+    // not a local branch or when the reflog entry has become invalid.
+    if let Some(name) = gui.git.previous_branch_name() {
+        show_checkout_error_or_refresh(gui, &name)?;
+    } else {
+        show_checkout_error_or_refresh(gui, "-")?;
+    }
     Ok(())
 }
 
@@ -120,10 +127,10 @@ fn checkout_picker(gui: &mut Gui) -> Result<()> {
 
     if let Some(prev) = gui.git.previous_branch_name() {
         items.push(ListPickerItem {
-            value: "-".to_string(),
-            // Label includes both "previous branch" and "prev branch" so that
-            // typing either phrase (or "-") jumps to this entry.
-            label: format!("Go to previous branch — {}", prev),
+            value: prev.clone(),
+            // "[-]" prefix lets typing "-" jump here; label also contains
+            // "previous branch" and "prev branch" for those search phrases.
+            label: format!("[-] Go to previous branch (prev branch) — {}", prev),
             category: "Quick Actions".to_string(),
         });
     }
