@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.23] - 2026-06-18
+
+### Bug Fixes
+
+- Restore head-marker behavior for merge nodes by Blankeos
+- Resolve previous branch checkout via explicit ref name by Blankeos
+- Handle rename/copy paths consistently across diffs and file actions by Blankeos
+
+### Chores
+
+- Publish Homebrew formula via release workflow by Blankeos
+
 ## [0.0.22] - 2026-06-10
 
 ### Bug Fixes
