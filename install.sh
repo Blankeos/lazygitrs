@@ -48,7 +48,13 @@ if curl -L "$BINARY_URL" -o "$INSTALL_DIR/$BINARY_NAME"; then
     chmod +x "$INSTALL_DIR/$BINARY_NAME"
     echo "lazygitrs installed successfully to $INSTALL_DIR/$BINARY_NAME"
 else
-    echo "Failed to download binary. Please install via cargo: cargo install lazygitrs"
+    echo "Failed to download binary. You can install lazygitrs directly using:"
+    echo "  brew install blankeos/tap/lazygitrs # Homebrew (macOS/Linux)"
+    echo "  npm install -g lazygitrs            # or npm"
+    echo "  bun install -g lazygitrs            # or bun"
+    echo "  cargo binstall lazygitrs            # or cargo-binstall (prebuilt binary, faster)"
+    echo "  cargo install lazygitrs             # or cargo (build from source)"
+    echo "  curl -sSL https://raw.githubusercontent.com/Blankeos/lazygitrs/main/install.sh | sh # or linux/macos (via curl)"
     exit 1
 fi
 

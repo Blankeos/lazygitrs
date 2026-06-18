@@ -100,7 +100,14 @@ function logInstallFailure(error) {
   console.error("❌ Installation failed:", message);
   console.error("\nYou can install lazygitrs directly using:");
   console.error(
-    "  cargo binstall lazygitrs",
+    [
+      "  brew install blankeos/tap/lazygitrs # Homebrew (macOS/Linux)",
+      "  npm install -g lazygitrs            # or npm",
+      "  bun install -g lazygitrs            # or bun",
+      "  cargo binstall lazygitrs            # or cargo-binstall (prebuilt binary, faster)",
+      "  cargo install lazygitrs             # or cargo (build from source)",
+      "  curl -sSL https://raw.githubusercontent.com/Blankeos/lazygitrs/main/install.sh | sh # or linux/macos (via curl)",
+    ].join("\n"),
   );
 }
 
