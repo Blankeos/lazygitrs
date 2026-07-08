@@ -2751,8 +2751,15 @@ fn parse_unified_diff(diff: &str) -> (String, String) {
         } else if let Some(ctx) = line.strip_prefix(' ') {
             old_lines.push(ctx);
             new_lines.push(ctx);
+        } else if line.starts_with('\\') {
+            // Git emits metadata like `\ No newline at end of file` inside
+            // hunks. It describes the preceding diff line, but it is not part
+            // of either file's contents. Including it shifts highlighter line
+            // numbers and can make later highlighted rows render the wrong
+            // text (for example duplicating the previous added markdown line).
+            continue;
         } else {
-            // Could be "\ No newline at end of file" or other metadata
+            // Bare context line in unusual diff output.
             old_lines.push(line);
             new_lines.push(line);
         }
@@ -2983,6 +2990,42 @@ mod tests {
             })
             .collect();
         assert_eq!(signs, " --+++ ");
+    }
+
+    #[test]
+    fn no_newline_marker_does_not_shift_unified_markdown_highlights() {
+        let diff = "diff --git a/_plans/TODOS.md b/_plans/TODOS.md\nindex f13d2a0..6186190 100644\n--- a/_plans/TODOS.md\n+++ b/_plans/TODOS.md\n@@ -63,4 +63,5 @@ Sidequests\n \n - [ ] Onboarding\n \n-- [ ] Cell wrapping when saving textarea for instance or description\n\\ No newline at end of file\n+- [ ] Cell wrapping when saving textarea for instance or description\n+- [ ] Currency input and parsing natural inputs like 1k. or even formulas like 4+12+34+12k\n";
+        let parsed = DiffViewState::parse_diff_output("_plans/TODOS.md", diff, 4, true);
+
+        assert!(!parsed.old_content.contains("No newline at end of file"));
+        assert!(!parsed.new_content.contains("No newline at end of file"));
+
+        let mut state = DiffViewState::new();
+        state.view_layout = DiffViewLayout::Unified;
+        state.apply_parsed(parsed);
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 8));
+        render_unified_diff_body(
+            &mut buf,
+            Rect::new(0, 0, 120, 8),
+            &state,
+            &Theme::dark(),
+            8,
+            false,
+        );
+
+        let row_text = |buf: &Buffer, row: u16| -> String {
+            (0..buf.area().width)
+                .map(|x| {
+                    buf.cell((x, row))
+                        .and_then(|cell| cell.symbol().chars().next())
+                        .unwrap_or(' ')
+                })
+                .collect::<String>()
+        };
+
+        assert!(row_text(&buf, 4).contains("Cell wrapping"));
+        assert!(row_text(&buf, 5).contains("Currency input"));
     }
 
     #[test]
