@@ -5,8 +5,7 @@ use crate::model::Branch;
 
 impl GitCommands {
     pub fn load_branches(&self) -> Result<Vec<Branch>> {
-        let format =
-            "%(HEAD)|%(refname:short)|%(objectname:short)|%(upstream:short)|%(upstream:track)";
+        let format = "%(HEAD)|%(refname:short)|%(objectname:short)|%(upstream:short)|%(upstream:track)|%(committerdate:relative)";
         let result = self
             .git()
             .args(&[
@@ -19,7 +18,7 @@ impl GitCommands {
 
         let mut branches = Vec::new();
         for line in result.stdout.lines() {
-            let parts: Vec<&str> = line.splitn(5, '|').collect();
+            let parts: Vec<&str> = line.splitn(6, '|').collect();
             if parts.len() < 3 {
                 continue;
             }
@@ -39,8 +38,11 @@ impl GitCommands {
                 ("0".to_string(), "0".to_string())
             };
 
-            // Get recency
-            let recency = self.branch_recency(&name).unwrap_or_default();
+            let recency = if parts.len() > 5 {
+                shorten_recency(parts[5])
+            } else {
+                String::new()
+            };
 
             branches.push(Branch {
                 name,
@@ -63,19 +65,6 @@ impl GitCommands {
         }
 
         Ok(branches)
-    }
-
-    fn branch_recency(&self, branch_name: &str) -> Result<String> {
-        let result = self
-            .git()
-            .args(&["log", "-1", "--format=%cr", branch_name, "--"])
-            .run()?;
-
-        if result.success {
-            Ok(shorten_recency(result.stdout_trimmed()))
-        } else {
-            Ok(String::new())
-        }
     }
 
     pub fn checkout_branch(&self, name: &str) -> Result<()> {

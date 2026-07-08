@@ -219,9 +219,9 @@ pub struct Gui {
     /// Receiver for silent auto-fetch results. Kept separate from remote_op
     /// so auto-fetch failures don't show error popups or clobber a
     /// user-initiated push/pull.
-    auto_fetch_rx: mpsc::Receiver<Result<()>>,
+    auto_fetch_rx: mpsc::Receiver<Result<bool>>,
     /// Sender cloned into background threads for auto-fetch.
-    auto_fetch_tx: mpsc::Sender<Result<()>>,
+    auto_fetch_tx: mpsc::Sender<Result<bool>>,
     /// When the last auto-fetch started. `None` means we haven't fetched yet;
     /// the main loop kicks off an immediate fetch on startup.
     last_auto_fetch_at: Option<Instant>,
@@ -1150,7 +1150,7 @@ impl Gui {
     fn receive_auto_fetch_results(&mut self) {
         while let Ok(result) = self.auto_fetch_rx.try_recv() {
             self.auto_fetch_in_flight = false;
-            if result.is_ok() {
+            if matches!(result, Ok(true)) {
                 self.needs_refresh = true;
             }
         }

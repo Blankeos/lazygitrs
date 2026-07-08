@@ -124,12 +124,13 @@ impl GitCommands {
     /// Non-interactive fetch for the periodic auto-fetch loop. Suppresses any
     /// terminal/credential prompts so a missing SSH passphrase or stored
     /// credential can't hang the TUI.
-    pub fn fetch_all_background(&self) -> Result<()> {
-        self.git()
+    pub fn fetch_all_background(&self) -> Result<bool> {
+        let result = self
+            .git()
             .args(&["fetch", "--all"])
             .env("GIT_TERMINAL_PROMPT", "0")
             .run_expecting_success()?;
-        Ok(())
+        Ok(!result.stdout.trim().is_empty() || !result.stderr.trim().is_empty())
     }
 
     pub fn pull(&self) -> Result<()> {
