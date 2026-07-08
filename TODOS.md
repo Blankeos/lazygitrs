@@ -2,7 +2,7 @@
   - [x] Better graph view (enabled by default)
   - [x] Filter by branch
   - [x] Filter by commit message (handy if you prefix with ticket IDs)
-- [x] ~Command palette (OpenCode-style) — still figuring this one out~ - It's `?`
+- [x] ~~Command palette (OpenCode-style) — still figuring this one out~~ - It's `?`
 
 - [x] Stash viewer:
   - Can we add the same viewer for files in the '[5] Stash' sidebar tab? (the same way we currently do with Commits tab)
@@ -64,8 +64,8 @@
   - Branches:
     - [x] In 'Branches', the original lazygit shows divergence info (ahead/behind counts relative to upstream). (already implemented)
   - Done / Won't Do:
-    - [x] ~Diff mode — the original lazygit has a way to diff any two commits/branches against each other (not just viewing a single commit's diff).~ (Author check: I have separate ideas for diff mode: comapring two commits/branches against each other, it'll be more intuitive)
-    - [x] ~In 'Branches', the original lazygit has `<c-o>` to copy PR URL, we might already have this in the `y` menu but worth verifying the direct shortcut.~ (Author check: so yeah we won't need this)
+    - [x] ~~Diff mode — the original lazygit has a way to diff any two commits/branches against each other (not just viewing a single commit's diff).~~ (Author check: I have separate ideas for diff mode: comapring two commits/branches against each other, it'll be more intuitive)
+    - [x] ~~In 'Branches', the original lazygit has `<c-o>` to copy PR URL, we might already have this in the `y` menu but worth verifying the direct shortcut.~~ (Author check: so yeah we won't need this)
 
 - [x] Improve the speeds still, very important for larger repos. Improve first-load speed. Either cache the data, or the render the TUI even before the git load model data isn't there yet. (perceived speed)
 - [x] regular push behavior to essentially do `git push origin HEAD`
@@ -135,7 +135,7 @@
 
 - [x] Make the combobox work with mouse (in diff_mode)
 - [x] In diff_mode, show the 'current branch' as the first option.
-- [x] ~In 'Commits' view, pressing 'd' to drop a commit.~ Just recommend using 'g' maybe?
+- [x] ~~In 'Commits' view, pressing 'd' to drop a commit.~~ Just recommend using 'g' maybe?
 
 - [x] Improve and standardize list-view mouse interaction behaviors:
   - Keyboard
@@ -143,8 +143,8 @@
     - Pressing up, Only start scrolling up when the selected/cursor is already on the first viewable element (not followed by '2 Files', '3 Branches', '4 Commits', '5 Stash' etc. - currently even if I'm on the last element, it will still scroll up when I press up)
   - Mouse
     - Clicking a list item - just essentially skips cursor to select the item as the new selected/cursor. Shouldn't really imitate 'enter', it just changes the selection. Currently works in '2 Files' tab. i.e. 'Keybindings' (?), Interactive rebase (I), Checkout (c on branches), Color Theme.
-    - Scroll down - ~should have the same behavior as pressing down on any of the cmdk-style components~ we decided later on that it has its own behavior, scroll down just scrolls the list view, does not change the selection.
-    - Scroll up - ~should have the same behavior as pressing up.~ we decided later on that it has its own behavior, scroll up just scrolls the list view, does not change the selection.
+    - Scroll down - ~~should have the same behavior as pressing down on any of the cmdk-style components~~ we decided later on that it has its own behavior, scroll down just scrolls the list view, does not change the selection.
+    - Scroll up - ~~should have the same behavior as pressing up.~~ we decided later on that it has its own behavior, scroll up just scrolls the list view, does not change the selection.
     - [x] In shift- or shift+ (meaning the sizebar is in the only view...), mouse scroll does not work for the list views i.e. Commits, Branches, etc.
     - [x] New change, scrolling up/down with mouse isn't same behavior as pressing down or up. It just scrolls, but doesn't change the current selection. Let's do this!
     - [x] As of Apr 29, 2026 - noticed that this isn't the behavior of the 'Interactive Rebase' UI.
@@ -236,7 +236,7 @@
 
 - [x] While 'generating commit messages' or 'pushing' the UI is blocked. Let's not block it. Let us move around a bit. The question is.. where to put this indicator.
 
-- [x] ~Use 'check' and 'checkmark' for staged and unstaged (not like lazygit), more like zed.~ (not planned)
+- [x] ~~Use 'check' and 'checkmark' for staged and unstaged (not like lazygit), more like zed.~~ (not planned)
 
 - [x] Allow me to scroll using mouse the 'Commit Messages' dialog.
 
@@ -267,3 +267,7 @@ Where I observed this behavior: I noticed this for the "Commit Message" and "Des
 - [x] Graph is still not good, the feature where it becomes a solid circle disappeared. But only for nodes that have like this connected + hexagon look.
 
 - [x] `-` in '3 Branches' does not work
+
+- [ ] hunk-like notes feature
+
+- [ ] in files list, show a `*2 +143 -71` on the justified end of the file item.
