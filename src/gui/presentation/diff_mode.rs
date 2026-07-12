@@ -402,7 +402,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &DiffModeState, theme
             ("1-4", "panel"),
             ("<c-s>", "swap"),
             ("`", "tree"),
-            ("v", "view"),
+            ("\\", "view"),
             ("?", "help"),
         ]
     };

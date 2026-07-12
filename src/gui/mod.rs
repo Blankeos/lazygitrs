@@ -1962,6 +1962,12 @@ impl Gui {
             return Ok(());
         }
 
+        if matches_key(key, &keybindings.universal.toggle_diff_view_layout) {
+            self.diff_view.toggle_view_layout();
+            self.persist_diff_view_layout();
+            return Ok(());
+        }
+
         // When diff panel is focused, handle diff-specific keys
         if self.diff_focused {
             return self.handle_diff_focused_key(key);
@@ -2561,11 +2567,6 @@ impl Gui {
                 } else {
                     self.diff_view.prev_hunk();
                 }
-            }
-            // v toggles unified / side-by-side diff layout
-            KeyCode::Char('v') => {
-                self.diff_view.toggle_view_layout();
-                self.persist_diff_view_layout();
             }
             // [ and ] toggle old-only / new-only view
             KeyCode::Char(']') => {
@@ -4060,6 +4061,10 @@ impl Gui {
                         description: "Stage / Unstage".into(),
                     },
                     HelpEntry {
+                        key: kb.universal.toggle_diff_view_layout.clone(),
+                        description: "Toggle unified / side-by-side view".into(),
+                    },
+                    HelpEntry {
                         key: kb.files.commit_changes.clone(),
                         description: "Commit".into(),
                     },
@@ -4313,6 +4318,10 @@ impl Gui {
                         description: "Toggle range select".into(),
                     },
                     HelpEntry {
+                        key: kb.universal.toggle_diff_view_layout.clone(),
+                        description: "Toggle unified / side-by-side view".into(),
+                    },
+                    HelpEntry {
                         key: kb.commits.tag_commit.clone(),
                         description: "Tag commit".into(),
                     },
@@ -4356,6 +4365,10 @@ impl Gui {
                     HelpEntry {
                         key: "<esc>".into(),
                         description: "Back to commits".into(),
+                    },
+                    HelpEntry {
+                        key: kb.universal.toggle_diff_view_layout.clone(),
+                        description: "Toggle unified / side-by-side view".into(),
                     },
                     HelpEntry {
                         key: kb.files.toggle_tree_view.clone(),
@@ -4412,6 +4425,10 @@ impl Gui {
                         description: "Apply stash".into(),
                     },
                     HelpEntry {
+                        key: kb.universal.toggle_diff_view_layout.clone(),
+                        description: "Toggle unified / side-by-side view".into(),
+                    },
+                    HelpEntry {
                         key: kb.stash.pop_stash.clone(),
                         description: "Pop stash".into(),
                     },
@@ -4435,6 +4452,10 @@ impl Gui {
                     HelpEntry {
                         key: "<esc>".into(),
                         description: "Back to stash".into(),
+                    },
+                    HelpEntry {
+                        key: kb.universal.toggle_diff_view_layout.clone(),
+                        description: "Toggle unified / side-by-side view".into(),
                     },
                     HelpEntry {
                         key: kb.files.toggle_tree_view.clone(),
@@ -4596,7 +4617,13 @@ impl Gui {
                     description: "Toggle new-only view".into(),
                 },
                 HelpEntry {
-                    key: "v".into(),
+                    key: self
+                        .config
+                        .user_config
+                        .keybinding
+                        .universal
+                        .toggle_diff_view_layout
+                        .clone(),
                     description: "Toggle unified / side-by-side view".into(),
                 },
                 HelpEntry {

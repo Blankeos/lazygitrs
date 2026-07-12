@@ -1914,18 +1914,30 @@ fn render_status_bar(
             DiffViewLayout::SideBySide => "unified view",
             DiffViewLayout::Unified => "split view",
         };
-        hints.push(("v", view_layout_hint));
+        hints.push(("\\", view_layout_hint));
     } else {
         // Sidebar-focused: context-specific hints.
+        let view_layout_hint = match diff_view.view_layout {
+            DiffViewLayout::SideBySide => "unified view",
+            DiffViewLayout::Unified => "split view",
+        };
         match ctx_mgr.active() {
             ContextId::Files => {
                 hints.extend([
                     ("c", "commit"),
                     ("a", "stage all"),
                     ("space", "toggle"),
+                    ("\\", view_layout_hint),
                     ("d", "discard"),
                     ("e", "edit"),
                     ("o", "open"),
+                ]);
+            }
+            ContextId::CommitFiles | ContextId::StashFiles => {
+                hints.extend([
+                    ("enter", "focus diff"),
+                    ("\\", view_layout_hint),
+                    ("y", "copy"),
                 ]);
             }
             ContextId::Branches => {
@@ -1943,11 +1955,17 @@ fn render_status_bar(
                     ("g", "reset"),
                     ("t", "revert"),
                     ("C", "cherry-pick"),
+                    ("\\", view_layout_hint),
                     ("ctrl+l", "filter branch"),
                 ]);
             }
             ContextId::Stash => {
-                hints.extend([("g", "pop"), ("space", "apply"), ("d", "drop")]);
+                hints.extend([
+                    ("g", "pop"),
+                    ("space", "apply"),
+                    ("d", "drop"),
+                    ("\\", view_layout_hint),
+                ]);
             }
             ContextId::Remotes => {
                 hints.extend([

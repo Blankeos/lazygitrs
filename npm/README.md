@@ -51,7 +51,7 @@ lazygitrs
       generateCommand: 'DIFF=$(git diff --cached) && modelcli "Generate a conventional commit message for this diff. Always provide a bulletpoint body. $DIFF"'
   ```
 
-- [x] **Side-by-side diffs** with syntax highlighting by default, no pager hacks needed
+- [x] **Side-by-side + unified diffs** with syntax highlighting by default and unified as well, no pager hacks needed
 - [x] **Better diff navigation UX** — `[]` new/old only views, `{}` for hunk traveling, `hjkl←↑↓→` for line-by-line scrolling, supports mouse select/scroll too. Lots inspired by [lumen](https://github.com/jnsahaj/lumen)
 - [x] **Default GitHub conveniences** — copy repo url, open repo url, copy PR create url, open PR create, copy pr url, open pr. (The 'copy' variants are useful if you use different default browsers for work/personal.)
 - [x] **Branch Filtering** — better experience in the Commits tab, compare what actually matters.

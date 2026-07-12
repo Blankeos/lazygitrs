@@ -42,6 +42,12 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
 
     let keybindings = &gui.config.user_config.keybinding;
 
+    if matches_key(key, &keybindings.universal.toggle_diff_view_layout) {
+        gui.diff_view.toggle_view_layout();
+        gui.persist_diff_view_layout();
+        return Ok(());
+    }
+
     // Start file search (/) — only when NOT focused on diff exploration
     // (diff exploration handles / for its own content search)
     if gui.diff_mode.focus != DiffModeFocus::DiffExploration
@@ -601,10 +607,6 @@ fn handle_diff_exploration_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         KeyCode::Char('{') => {
             gui.diff_view.prev_hunk();
         }
-        KeyCode::Char('v') => {
-            gui.diff_view.toggle_view_layout();
-            gui.persist_diff_view_layout();
-        }
         KeyCode::Char(']') => {
             use crate::pager::side_by_side::DiffSideView;
             gui.diff_view.side_view = match gui.diff_view.side_view {
@@ -841,7 +843,13 @@ fn show_diff_mode_help(gui: &mut Gui) {
                 description: "Toggle old / new only view".into(),
             },
             HelpEntry {
-                key: "v".into(),
+                key: gui
+                    .config
+                    .user_config
+                    .keybinding
+                    .universal
+                    .toggle_diff_view_layout
+                    .clone(),
                 description: "Toggle unified / side-by-side view".into(),
             },
             HelpEntry {
