@@ -27,7 +27,14 @@ pub fn render_file_list<'a>(model: &Model, theme: &Theme, width: usize) -> Vec<L
                     Span::styled(format!(" {} ", status_icon), status_style),
                     Span::styled(file.display_name.clone(), name_style),
                 ];
-                return ListItem::new(Line::from(append_file_stats(spans, file, theme, width)));
+                return ListItem::new(Line::from(append_file_stats(
+                    spans,
+                    file.hunk_count,
+                    file.additions,
+                    file.deletions,
+                    theme,
+                    width,
+                )));
             }
 
             let path = file.display_name.as_str();
@@ -44,35 +51,38 @@ pub fn render_file_list<'a>(model: &Model, theme: &Theme, width: usize) -> Vec<L
                 spans.push(Span::styled(format!(" {}", dir), dim_style));
             }
 
-            ListItem::new(Line::from(append_file_stats(spans, file, theme, width)))
+            ListItem::new(Line::from(append_file_stats(
+                spans,
+                file.hunk_count,
+                file.additions,
+                file.deletions,
+                theme,
+                width,
+            )))
         })
         .collect()
 }
 
-fn append_file_stats<'a>(
+pub(crate) fn append_file_stats<'a>(
     spans: Vec<Span<'a>>,
-    file: &crate::model::File,
+    hunk_count: usize,
+    additions: usize,
+    deletions: usize,
     theme: &Theme,
     width: usize,
 ) -> Vec<Span<'a>> {
     let mut stats = Vec::new();
-    if file.hunk_count > 0 {
+    if hunk_count > 0 {
         stats.push(Span::styled(
-            format!("*{}", file.hunk_count),
+            format!("*{}", hunk_count),
             Style::default().fg(theme.accent_secondary),
         ));
     }
-    if file.additions > 0 {
-        stats.push(Span::styled(
-            format!(" +{}", file.additions),
-            theme.diff_add,
-        ));
+    if additions > 0 {
+        stats.push(Span::styled(format!(" +{}", additions), theme.diff_add));
     }
-    if file.deletions > 0 {
-        stats.push(Span::styled(
-            format!(" -{}", file.deletions),
-            theme.diff_remove,
-        ));
+    if deletions > 0 {
+        stats.push(Span::styled(format!(" -{}", deletions), theme.diff_remove));
     }
     if stats.is_empty() {
         return spans;
@@ -172,7 +182,14 @@ pub fn render_file_tree<'a>(
                     Span::raw(indent),
                     Span::styled(node.name.clone(), name_style),
                 ];
-                let line = Line::from(append_file_stats(spans, file, theme, width));
+                let line = Line::from(append_file_stats(
+                    spans,
+                    file.hunk_count,
+                    file.additions,
+                    file.deletions,
+                    theme,
+                    width,
+                ));
                 ListItem::new(line)
             } else {
                 ListItem::new(Line::raw(""))
@@ -254,7 +271,9 @@ mod tests {
 
         let spans = append_file_stats(
             vec![Span::raw(" M very-long-file-name.rs")],
-            &file,
+            file.hunk_count,
+            file.additions,
+            file.deletions,
             &theme,
             width,
         );

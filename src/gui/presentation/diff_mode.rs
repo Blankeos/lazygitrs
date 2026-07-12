@@ -6,8 +6,9 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 
 use crate::config::Theme;
 use crate::gui::modes::diff_mode::{DiffModeFocus, DiffModeState, RefKind};
+use crate::gui::presentation::commit_files::commit_file_status_display;
+use crate::gui::presentation::files::append_file_stats;
 use crate::model::file_tree::CommitFileTreeNode;
-use crate::model::{CommitFile, FileChangeStatus};
 use crate::pager::side_by_side::{self, DiffViewState};
 
 /// Max items visible in the dropdown at once.
@@ -111,7 +112,6 @@ fn render_selector(
         .title(number_label)
         .borders(Borders::ALL)
         .border_style(border);
-
     if editing {
         // Render the textarea inside the block
         if let Some(ref ta) = state.textarea {
@@ -152,6 +152,7 @@ fn render_commit_files(frame: &mut Frame, area: Rect, state: &mut DiffModeState,
         .title(title)
         .borders(Borders::ALL)
         .border_style(border);
+    let content_width = area.width.saturating_sub(2) as usize;
 
     if state.diff_files.is_empty() {
         let msg = if state.has_both_refs() {
@@ -173,7 +174,7 @@ fn render_commit_files(frame: &mut Frame, area: Rect, state: &mut DiffModeState,
         state
             .tree_nodes
             .iter()
-            .map(|node| render_tree_node(node, state, theme))
+            .map(|node| render_tree_node(node, state, theme, content_width))
             .collect()
     } else {
         state
@@ -185,10 +186,18 @@ fn render_commit_files(frame: &mut Frame, area: Rect, state: &mut DiffModeState,
                 let name_style = Style::default().fg(theme.text_strong);
 
                 if file.rename_paths().is_some() {
-                    return ListItem::new(Line::from(vec![
+                    let spans = vec![
                         Span::styled(format!(" {} ", status_icon), status_style),
                         Span::styled(file.name.clone(), name_style),
-                    ]));
+                    ];
+                    return ListItem::new(Line::from(append_file_stats(
+                        spans,
+                        file.hunk_count,
+                        file.additions,
+                        file.deletions,
+                        theme,
+                        content_width,
+                    )));
                 }
 
                 let path = file.name.as_str();
@@ -205,7 +214,14 @@ fn render_commit_files(frame: &mut Frame, area: Rect, state: &mut DiffModeState,
                     spans.push(Span::styled(format!(" {}", dir), dim_style));
                 }
 
-                ListItem::new(Line::from(spans))
+                ListItem::new(Line::from(append_file_stats(
+                    spans,
+                    file.hunk_count,
+                    file.additions,
+                    file.deletions,
+                    theme,
+                    content_width,
+                )))
             })
             .collect()
     };
@@ -262,6 +278,7 @@ fn render_tree_node<'a>(
     node: &CommitFileTreeNode,
     state: &DiffModeState,
     theme: &Theme,
+    width: usize,
 ) -> ListItem<'a> {
     let indent = "  ".repeat(node.depth);
     if node.is_dir {
@@ -281,11 +298,19 @@ fn render_tree_node<'a>(
     } else if let Some(file_idx) = node.file_index {
         if let Some(file) = state.diff_files.get(file_idx) {
             let (status_style, status_icon) = commit_file_status_display(file, theme);
-            let line = Line::from(vec![
+            let spans = vec![
                 Span::styled(format!(" {} ", status_icon), status_style),
                 Span::raw(indent),
                 Span::styled(node.name.clone(), Style::default().fg(theme.text_strong)),
-            ]);
+            ];
+            let line = Line::from(append_file_stats(
+                spans,
+                file.hunk_count,
+                file.additions,
+                file.deletions,
+                theme,
+                width,
+            ));
             ListItem::new(line)
         } else {
             ListItem::new(Line::raw(""))
@@ -517,15 +542,4 @@ fn render_dropdown(
     let relative_selected = state.search_selected.saturating_sub(scroll);
     list_state.select(Some(relative_selected));
     frame.render_stateful_widget(list, dropdown_area, &mut list_state);
-}
-
-fn commit_file_status_display<'a>(file: &CommitFile, theme: &Theme) -> (Style, &'a str) {
-    match file.status {
-        FileChangeStatus::Added => (theme.file_staged, "A "),
-        FileChangeStatus::Deleted => (Style::default().fg(theme.change_deleted), "D "),
-        FileChangeStatus::Modified => (theme.file_unstaged, "M "),
-        FileChangeStatus::Renamed => (Style::default().fg(theme.change_renamed), "R "),
-        FileChangeStatus::Copied => (Style::default().fg(theme.change_copied), "C "),
-        FileChangeStatus::Unmerged => (Style::default().fg(theme.change_unmerged), "U "),
-    }
 }

@@ -52,6 +52,9 @@ mod tests {
         let files = vec![CommitFile {
             name: "src/views/openai_oauth_flow.rs -> src/views/provider_oauth_flow.rs".to_string(),
             status: FileChangeStatus::Renamed,
+            hunk_count: 0,
+            additions: 0,
+            deletions: 0,
         }];
 
         let nodes = build_commit_file_tree(&files, &HashSet::new());

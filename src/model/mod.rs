@@ -103,6 +103,9 @@ impl Model {
 pub struct CommitFile {
     pub name: String,
     pub status: FileChangeStatus,
+    pub hunk_count: usize,
+    pub additions: usize,
+    pub deletions: usize,
 }
 
 impl CommitFile {

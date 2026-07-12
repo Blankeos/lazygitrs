@@ -226,7 +226,7 @@ impl GitCommands {
     }
 }
 
-fn parse_numstat_z(output: &str) -> HashMap<String, (usize, usize)> {
+pub(super) fn parse_numstat_z(output: &str) -> HashMap<String, (usize, usize)> {
     let mut stats = HashMap::new();
     let fields: Vec<&str> = output.split('\0').collect();
     let mut index = 0;
@@ -262,7 +262,7 @@ fn parse_numstat_z(output: &str) -> HashMap<String, (usize, usize)> {
     stats
 }
 
-fn parse_hunk_counts(output: &str) -> HashMap<String, usize> {
+pub(super) fn parse_hunk_counts(output: &str) -> HashMap<String, usize> {
     let mut counts = HashMap::new();
     let mut current_path: Option<String> = None;
     let mut old_path: Option<String> = None;

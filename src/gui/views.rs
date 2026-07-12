@@ -327,6 +327,7 @@ pub fn render(
                             theme,
                             commit_file_tree_nodes,
                             commit_files_collapsed_dirs,
+                            fl.main_panel.width.saturating_sub(2) as usize,
                         );
                         render_list_ctx(
                             frame,
@@ -340,8 +341,11 @@ pub fn render(
                             ctx_id,
                         );
                     } else {
-                        let items =
-                            presentation::commit_files::render_commit_file_list(model, theme);
+                        let items = presentation::commit_files::render_commit_file_list(
+                            model,
+                            theme,
+                            fl.main_panel.width.saturating_sub(2) as usize,
+                        );
                         render_list_ctx(
                             frame,
                             fl.main_panel,
@@ -529,6 +533,7 @@ pub fn render(
                             theme,
                             commit_file_tree_nodes,
                             commit_files_collapsed_dirs,
+                            rect.width.saturating_sub(2) as usize,
                         );
                         render_list_ctx(
                             frame,
@@ -542,8 +547,11 @@ pub fn render(
                             ContextId::BranchCommitFiles,
                         );
                     } else {
-                        let items =
-                            presentation::commit_files::render_commit_file_list(model, theme);
+                        let items = presentation::commit_files::render_commit_file_list(
+                            model,
+                            theme,
+                            rect.width.saturating_sub(2) as usize,
+                        );
                         render_list_ctx(
                             frame,
                             rect,
@@ -609,6 +617,7 @@ pub fn render(
                             theme,
                             commit_file_tree_nodes,
                             commit_files_collapsed_dirs,
+                            rect.width.saturating_sub(2) as usize,
                         );
                         render_list_ctx(
                             frame,
@@ -622,8 +631,11 @@ pub fn render(
                             ContextId::BranchCommitFiles,
                         );
                     } else {
-                        let items =
-                            presentation::commit_files::render_commit_file_list(model, theme);
+                        let items = presentation::commit_files::render_commit_file_list(
+                            model,
+                            theme,
+                            rect.width.saturating_sub(2) as usize,
+                        );
                         render_list_ctx(
                             frame,
                             rect,
@@ -707,6 +719,7 @@ pub fn render(
                             theme,
                             commit_file_tree_nodes,
                             commit_files_collapsed_dirs,
+                            rect.width.saturating_sub(2) as usize,
                         );
                         render_list_ctx(
                             frame,
@@ -720,8 +733,11 @@ pub fn render(
                             ContextId::BranchCommitFiles,
                         );
                     } else {
-                        let items =
-                            presentation::commit_files::render_commit_file_list(model, theme);
+                        let items = presentation::commit_files::render_commit_file_list(
+                            model,
+                            theme,
+                            rect.width.saturating_sub(2) as usize,
+                        );
                         render_list_ctx(
                             frame,
                             rect,
@@ -780,6 +796,7 @@ pub fn render(
                             theme,
                             commit_file_tree_nodes,
                             commit_files_collapsed_dirs,
+                            rect.width.saturating_sub(2) as usize,
                         );
                         render_list_ctx(
                             frame,
@@ -793,8 +810,11 @@ pub fn render(
                             ContextId::CommitFiles,
                         );
                     } else {
-                        let items =
-                            presentation::commit_files::render_commit_file_list(model, theme);
+                        let items = presentation::commit_files::render_commit_file_list(
+                            model,
+                            theme,
+                            rect.width.saturating_sub(2) as usize,
+                        );
                         render_list_ctx(
                             frame,
                             rect,
@@ -844,6 +864,7 @@ pub fn render(
                             theme,
                             commit_file_tree_nodes,
                             commit_files_collapsed_dirs,
+                            rect.width.saturating_sub(2) as usize,
                         );
                         render_list_ctx(
                             frame,
@@ -857,8 +878,11 @@ pub fn render(
                             ContextId::CommitFiles,
                         );
                     } else {
-                        let items =
-                            presentation::commit_files::render_commit_file_list(model, theme);
+                        let items = presentation::commit_files::render_commit_file_list(
+                            model,
+                            theme,
+                            rect.width.saturating_sub(2) as usize,
+                        );
                         render_list_ctx(
                             frame,
                             rect,
@@ -898,6 +922,7 @@ pub fn render(
                             theme,
                             commit_file_tree_nodes,
                             commit_files_collapsed_dirs,
+                            rect.width.saturating_sub(2) as usize,
                         );
                         render_list_ctx(
                             frame,
@@ -911,8 +936,11 @@ pub fn render(
                             ContextId::StashFiles,
                         );
                     } else {
-                        let items =
-                            presentation::commit_files::render_commit_file_list(model, theme);
+                        let items = presentation::commit_files::render_commit_file_list(
+                            model,
+                            theme,
+                            rect.width.saturating_sub(2) as usize,
+                        );
                         render_list_ctx(
                             frame,
                             rect,

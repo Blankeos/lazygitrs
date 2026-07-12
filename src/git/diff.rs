@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 use super::GitCommands;
+use super::file::{parse_hunk_counts, parse_numstat_z};
 
 impl GitCommands {
     /// Get diff for a specific file (unstaged changes).
@@ -150,12 +151,21 @@ impl GitCommands {
                 hash,
             ])
             .run();
-        let result = match result {
-            Ok(r) if r.success => r,
-            _ => self
-                .git()
-                .args(&["diff-tree", "--no-commit-id", "--name-status", "-r", hash])
-                .run_expecting_success()?,
+        let (result, stats_base) = match result {
+            Ok(r) if r.success => (
+                r,
+                vec!["diff".to_string(), format!("{}^1", hash), hash.to_string()],
+            ),
+            _ => (
+                self.git()
+                    .args(&["diff-tree", "--no-commit-id", "--name-status", "-r", hash])
+                    .run_expecting_success()?,
+                vec![
+                    "show".to_string(),
+                    "--format=".to_string(),
+                    hash.to_string(),
+                ],
+            ),
         };
 
         let mut files = Vec::new();
@@ -189,8 +199,15 @@ impl GitCommands {
                 _ => crate::model::FileChangeStatus::Modified,
             };
 
-            files.push(crate::model::CommitFile { name, status });
+            files.push(crate::model::CommitFile {
+                name,
+                status,
+                hunk_count: 0,
+                additions: 0,
+                deletions: 0,
+            });
         }
+        self.populate_commit_file_stats(&mut files, &stats_base);
         Ok(files)
     }
 
@@ -262,9 +279,56 @@ impl GitCommands {
                 Some('U') => crate::model::FileChangeStatus::Unmerged,
                 _ => crate::model::FileChangeStatus::Modified,
             };
-            files.push(crate::model::CommitFile { name, status });
+            files.push(crate::model::CommitFile {
+                name,
+                status,
+                hunk_count: 0,
+                additions: 0,
+                deletions: 0,
+            });
         }
+        self.populate_commit_file_stats(
+            &mut files,
+            &["diff".to_string(), ref_a.to_string(), ref_b.to_string()],
+        );
         Ok(files)
+    }
+
+    /// Enrich a commit-like file list with line and hunk counts in two bulk
+    /// Git calls. Stats are best-effort so the file list remains available if
+    /// a particular diff cannot be produced.
+    fn populate_commit_file_stats(
+        &self,
+        files: &mut [crate::model::CommitFile],
+        diff_base: &[String],
+    ) {
+        let run = |extra: &[&str]| {
+            let mut args = diff_base.to_vec();
+            args.extend(extra.iter().map(|arg| (*arg).to_string()));
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            self.git()
+                .args(&refs)
+                .run()
+                .ok()
+                .filter(|result| result.success)
+                .map(|result| result.stdout)
+        };
+
+        let line_stats = run(&["--numstat", "-z", "--find-renames", "--no-color"])
+            .map(|output| parse_numstat_z(&output))
+            .unwrap_or_default();
+        let hunk_counts = run(&["--unified=0", "--find-renames", "--no-color", "--no-prefix"])
+            .map(|output| parse_hunk_counts(&output))
+            .unwrap_or_default();
+
+        for file in files {
+            let path = file.current_path().to_string();
+            if let Some(&(additions, deletions)) = line_stats.get(&path) {
+                file.additions = additions;
+                file.deletions = deletions;
+            }
+            file.hunk_count = hunk_counts.get(&path).copied().unwrap_or(0);
+        }
     }
 
     /// Get the diff of a single file between two refs (for diff/compare mode).
