@@ -12,6 +12,9 @@ pub struct File {
     pub deleted: bool,
     pub has_merge_conflicts: bool,
     pub short_status: String,
+    pub hunk_count: usize,
+    pub additions: usize,
+    pub deletions: usize,
 }
 
 #[cfg(test)]
@@ -31,6 +34,9 @@ mod tests {
             deleted: false,
             has_merge_conflicts: false,
             short_status: "R ".to_string(),
+            hunk_count: 0,
+            additions: 0,
+            deletions: 0,
         }
     }
 

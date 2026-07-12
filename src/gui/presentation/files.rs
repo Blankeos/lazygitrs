@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::ListItem;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::config::Theme;
 use crate::model::Model;
@@ -12,7 +13,7 @@ use crate::model::file_tree::FileTreeNode;
 ///
 /// Filename is shown first in the strong style, followed by the directory
 /// path in a dimmed style — Zed-style.
-pub fn render_file_list<'a>(model: &Model, theme: &Theme) -> Vec<ListItem<'a>> {
+pub fn render_file_list<'a>(model: &Model, theme: &Theme, width: usize) -> Vec<ListItem<'a>> {
     model
         .files
         .iter()
@@ -22,10 +23,11 @@ pub fn render_file_list<'a>(model: &Model, theme: &Theme) -> Vec<ListItem<'a>> {
             let dim_style = Style::default().fg(theme.text_dimmed);
 
             if file.rename_paths().is_some() {
-                return ListItem::new(Line::from(vec![
+                let spans = vec![
                     Span::styled(format!(" {} ", status_icon), status_style),
                     Span::styled(file.display_name.clone(), name_style),
-                ]));
+                ];
+                return ListItem::new(Line::from(append_file_stats(spans, file, theme, width)));
             }
 
             let path = file.display_name.as_str();
@@ -42,9 +44,80 @@ pub fn render_file_list<'a>(model: &Model, theme: &Theme) -> Vec<ListItem<'a>> {
                 spans.push(Span::styled(format!(" {}", dir), dim_style));
             }
 
-            ListItem::new(Line::from(spans))
+            ListItem::new(Line::from(append_file_stats(spans, file, theme, width)))
         })
         .collect()
+}
+
+fn append_file_stats<'a>(
+    spans: Vec<Span<'a>>,
+    file: &crate::model::File,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Span<'a>> {
+    let mut stats = Vec::new();
+    if file.hunk_count > 0 {
+        stats.push(Span::styled(
+            format!("*{}", file.hunk_count),
+            Style::default().fg(theme.accent_secondary),
+        ));
+    }
+    if file.additions > 0 {
+        stats.push(Span::styled(
+            format!(" +{}", file.additions),
+            theme.diff_add,
+        ));
+    }
+    if file.deletions > 0 {
+        stats.push(Span::styled(
+            format!(" -{}", file.deletions),
+            theme.diff_remove,
+        ));
+    }
+    if stats.is_empty() {
+        return spans;
+    }
+
+    let stats_width: usize = stats.iter().map(|span| span.content.width()).sum();
+    let content_width = width.saturating_sub(stats_width + 1);
+    let mut fitted = truncate_spans(spans, content_width);
+    let fitted_width: usize = fitted.iter().map(|span| span.content.width()).sum();
+    fitted.push(Span::raw(
+        " ".repeat(width.saturating_sub(fitted_width + stats_width)),
+    ));
+    fitted.extend(stats);
+    fitted
+}
+
+fn truncate_spans<'a>(spans: Vec<Span<'a>>, max_width: usize) -> Vec<Span<'a>> {
+    let mut remaining = max_width;
+    let mut fitted = Vec::new();
+
+    for span in spans {
+        if remaining == 0 {
+            break;
+        }
+        let span_width = span.content.width();
+        if span_width <= remaining {
+            remaining -= span_width;
+            fitted.push(span);
+            continue;
+        }
+
+        let mut text = String::new();
+        for ch in span.content.chars() {
+            let ch_width = ch.width().unwrap_or(0);
+            if ch_width > remaining {
+                break;
+            }
+            text.push(ch);
+            remaining -= ch_width;
+        }
+        fitted.push(Span::styled(text, span.style));
+        break;
+    }
+
+    fitted
 }
 
 /// Render the cached file tree nodes into list items.
@@ -53,6 +126,7 @@ pub fn render_file_tree<'a>(
     theme: &Theme,
     nodes: &[FileTreeNode],
     collapsed_dirs: &HashSet<String>,
+    width: usize,
 ) -> Vec<ListItem<'a>> {
     nodes
         .iter()
@@ -93,11 +167,12 @@ pub fn render_file_tree<'a>(
                 let (status_style, status_icon) = file_status_display(file, theme);
                 let name_style = file_name_style(file, theme);
 
-                let line = Line::from(vec![
+                let spans = vec![
                     Span::styled(format!("{} ", status_icon), status_style),
                     Span::raw(indent),
                     Span::styled(node.name.clone(), name_style),
-                ]);
+                ];
+                let line = Line::from(append_file_stats(spans, file, theme, width));
                 ListItem::new(line)
             } else {
                 ListItem::new(Line::raw(""))
@@ -150,4 +225,42 @@ fn file_status_display<'a>(file: &crate::model::File, theme: &Theme) -> (Style, 
     };
 
     (status_style, status_icon)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{File, FileStatus};
+
+    #[test]
+    fn file_stats_are_right_aligned_and_preserved_when_name_is_truncated() {
+        let file = File {
+            name: "very-long-file-name.rs".into(),
+            display_name: "very-long-file-name.rs".into(),
+            status: FileStatus::Modified,
+            has_staged_changes: false,
+            has_unstaged_changes: true,
+            tracked: true,
+            added: false,
+            deleted: false,
+            has_merge_conflicts: false,
+            short_status: " M".into(),
+            hunk_count: 2,
+            additions: 143,
+            deletions: 71,
+        };
+        let theme = Theme::default();
+        let width = 24;
+
+        let spans = append_file_stats(
+            vec![Span::raw(" M very-long-file-name.rs")],
+            &file,
+            &theme,
+            width,
+        );
+        let rendered: String = spans.iter().map(|span| span.content.as_ref()).collect();
+
+        assert_eq!(rendered.width(), width);
+        assert!(rendered.ends_with("*2 +143 -71"));
+    }
 }

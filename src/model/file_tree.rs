@@ -28,6 +28,9 @@ mod tests {
             deleted: false,
             has_merge_conflicts: false,
             short_status: "R ".to_string(),
+            hunk_count: 0,
+            additions: 0,
+            deletions: 0,
         }];
 
         let nodes = build_file_tree(&files, &HashSet::new());

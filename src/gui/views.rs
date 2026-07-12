@@ -168,6 +168,7 @@ pub fn render(
                             theme,
                             file_tree_nodes,
                             collapsed_dirs,
+                            fl.main_panel.width.saturating_sub(2) as usize,
                         );
                         render_list_ctx(
                             frame,
@@ -181,7 +182,11 @@ pub fn render(
                             ctx_id,
                         );
                     } else {
-                        let items = presentation::files::render_file_list(model, theme);
+                        let items = presentation::files::render_file_list(
+                            model,
+                            theme,
+                            fl.main_panel.width.saturating_sub(2) as usize,
+                        );
                         render_list_ctx(
                             frame,
                             fl.main_panel,
@@ -455,12 +460,17 @@ pub fn render(
                         theme,
                         file_tree_nodes,
                         collapsed_dirs,
+                        rect.width.saturating_sub(2) as usize,
                     );
                     render_list_ctx(
                         frame, rect, block, items, selected, is_active, theme, ctx_mgr, ctx_id,
                     );
                 } else {
-                    let items = presentation::files::render_file_list(model, theme);
+                    let items = presentation::files::render_file_list(
+                        model,
+                        theme,
+                        rect.width.saturating_sub(2) as usize,
+                    );
                     render_list_ctx(
                         frame, rect, block, items, selected, is_active, theme, ctx_mgr, ctx_id,
                     );

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 
 use super::GitCommands;
@@ -49,10 +51,67 @@ impl GitCommands {
                     || y == 'U'
                     || (x == 'A' && y == 'A')
                     || (x == 'D' && y == 'D'),
+                hunk_count: 0,
+                additions: 0,
+                deletions: 0,
             });
         }
 
+        self.populate_file_diff_stats(&mut files);
+
         Ok(files)
+    }
+
+    /// Populate final working-tree stats relative to HEAD. Failures are
+    /// intentionally non-fatal: status remains useful even when a diff cannot
+    /// be produced (for example, during unusual index states).
+    fn populate_file_diff_stats(&self, files: &mut [File]) {
+        let diff_base = if self
+            .git()
+            .args(&["rev-parse", "--verify", "HEAD"])
+            .run()
+            .is_ok_and(|result| result.success)
+        {
+            vec!["diff", "HEAD"]
+        } else {
+            vec!["diff", "--cached"]
+        };
+
+        let mut numstat_args = diff_base.clone();
+        numstat_args.extend(["--numstat", "-z", "--find-renames", "--no-color"]);
+        let line_stats = self
+            .git()
+            .args(&numstat_args)
+            .run()
+            .ok()
+            .filter(|result| result.success)
+            .map(|result| parse_numstat_z(&result.stdout))
+            .unwrap_or_default();
+
+        let mut patch_args = diff_base;
+        patch_args.extend(["--unified=0", "--find-renames", "--no-color", "--no-prefix"]);
+        let hunk_counts = self
+            .git()
+            .args(&patch_args)
+            .run()
+            .ok()
+            .filter(|result| result.success)
+            .map(|result| parse_hunk_counts(&result.stdout))
+            .unwrap_or_default();
+
+        for file in files {
+            let path = file.current_path().to_string();
+            if file.tracked {
+                if let Some(&(additions, deletions)) = line_stats.get(&path) {
+                    file.additions = additions;
+                    file.deletions = deletions;
+                }
+                file.hunk_count = hunk_counts.get(&path).copied().unwrap_or(0);
+            } else if let Ok(content) = std::fs::read_to_string(self.repo_path().join(&path)) {
+                file.additions = content.lines().count();
+                file.hunk_count = usize::from(file.additions > 0);
+            }
+        }
     }
 
     pub fn stage_file(&self, path: &str) -> Result<()> {
@@ -164,6 +223,99 @@ impl GitCommands {
         contents.push('\n');
         std::fs::write(exclude, contents)?;
         Ok(())
+    }
+}
+
+fn parse_numstat_z(output: &str) -> HashMap<String, (usize, usize)> {
+    let mut stats = HashMap::new();
+    let fields: Vec<&str> = output.split('\0').collect();
+    let mut index = 0;
+
+    while index < fields.len() {
+        let Some((additions, rest)) = fields[index].split_once('\t') else {
+            index += 1;
+            continue;
+        };
+        let Some((deletions, path)) = rest.split_once('\t') else {
+            index += 1;
+            continue;
+        };
+        let (Ok(additions), Ok(deletions)) = (additions.parse(), deletions.parse()) else {
+            // Binary files use "-" for both counts.
+            index += 1;
+            continue;
+        };
+
+        if path.is_empty() {
+            // With -z, renames are encoded as an empty path followed by old
+            // and new path fields. Attribute the stats to the current path.
+            if let Some(new_path) = fields.get(index + 2).filter(|path| !path.is_empty()) {
+                stats.insert((*new_path).to_string(), (additions, deletions));
+            }
+            index += 3;
+        } else {
+            stats.insert(path.to_string(), (additions, deletions));
+            index += 1;
+        }
+    }
+
+    stats
+}
+
+fn parse_hunk_counts(output: &str) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
+    let mut current_path: Option<String> = None;
+    let mut old_path: Option<String> = None;
+
+    for line in output.lines() {
+        if let Some(path) = line.strip_prefix("--- ") {
+            old_path = (path != "/dev/null").then(|| unquote_porcelain_path(path));
+        } else if let Some(path) = line.strip_prefix("+++ ") {
+            current_path = if path == "/dev/null" {
+                old_path.take()
+            } else {
+                Some(unquote_porcelain_path(path))
+            };
+        } else if line.starts_with("@@") {
+            if let Some(path) = &current_path {
+                *counts.entry(path.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    counts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_numstat_for_regular_renamed_and_binary_files() {
+        let output = "3\t2\tsrc/lib.rs\0".to_string()
+            + "1\t0\t\0src/old name.rs\0src/new name.rs\0"
+            + "-\t-\timage.png\0";
+
+        let stats = parse_numstat_z(&output);
+
+        assert_eq!(stats.get("src/lib.rs"), Some(&(3, 2)));
+        assert_eq!(stats.get("src/new name.rs"), Some(&(1, 0)));
+        assert!(!stats.contains_key("image.png"));
+    }
+
+    #[test]
+    fn counts_hunks_for_modified_renamed_and_deleted_files() {
+        let output = concat!(
+            "--- src/lib.rs\n+++ src/lib.rs\n@@ -1 +1 @@\n@@ -8 +8 @@\n",
+            "--- old.rs\n+++ new.rs\n@@ -2 +2 @@\n",
+            "--- removed.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n",
+        );
+
+        let counts = parse_hunk_counts(output);
+
+        assert_eq!(counts.get("src/lib.rs"), Some(&2));
+        assert_eq!(counts.get("new.rs"), Some(&1));
+        assert_eq!(counts.get("removed.rs"), Some(&1));
     }
 }
 

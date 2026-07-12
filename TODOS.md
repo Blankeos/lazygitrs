@@ -270,10 +270,24 @@ Where I observed this behavior: I noticed this for the "Commit Message" and "Des
 
 - [ ] hunk-like notes feature
 
-- [ ] in files list, show a `*2 +143 -71` on the justified end of the file item.
+- [x] in files list, show a `*2 +143 -71` on the justified end of the file item.
+- [ ] When doing shift+] and shift+[ (the diff exploration) on the diff view, give me a way to see the current "hunk block" that I'm reading in the top right with this indication: [1/5] meaning 1 out of 5 hunks.
 
 - [x] Detached head.. When I'm making a commit. Like press 'c'. Immediately show a warning, but allow the action to continue anyway. Like 'You are in a detached head, not a branch. Are you sure you want to commit?' And it's just a simple yes or no alert.
 
 - [x] Better cherry picks tips.
   - [x] 'C' currently says 'Cherry pick', but also say 'C Copy (cherry-pick)'.
   - [x] I can do 'C' to copy. Let me do see 'V Paste (cherry-pick)' in the tips and help `?`. It must be at the very beginning of tips. Make sure the alert says the branch it will put it onto (which I assume is always the currently checked-out branch - am I right?), not just "On this branch?" - because the user would kinda assume that it would be on the branch that their cursor hovered on.
+
+- [ ] TBD (if I want to implement GitHub): tabs at the very top for: 'Git', 'Compare', 'Github'
+  - [ ] Git is just the current
+  - [ ] Compare is just the 'W' global key we already have
+  - [ ] TBD: Github is just Kit Langton's `ghui` https://github.com/kitlangton/ghui rebuit in rust.
+    - [ ] Issues
+    - [ ] Pull Requests
+    - [ ] Repos
+  - [ ] TBD: GitLab?
+
+- [ ] jj support? https://github.com/jj-vcs/jj
+
+- [ ] Resize the sidebar using mouse, click and drag.
