@@ -271,7 +271,7 @@ Where I observed this behavior: I noticed this for the "Commit Message" and "Des
 - [ ] hunk-like notes feature
 
 - [x] in files list, show a `*2 +143 -71` on the justified end of the file item.
-- [ ] When doing shift+] and shift+[ (the diff exploration) on the diff view, give me a way to see the current "hunk block" that I'm reading in the top right with this indication: [1/5] meaning 1 out of 5 hunks.
+- [x] When doing shift+] and shift+[ (the diff exploration) on the diff view, give me a way to see the current "hunk block" that I'm reading in the top right with this indication: [1/5] meaning 1 out of 5 hunks.
 
 - [x] Detached head.. When I'm making a commit. Like press 'c'. Immediately show a warning, but allow the action to continue anyway. Like 'You are in a detached head, not a branch. Are you sure you want to commit?' And it's just a simple yes or no alert.
 

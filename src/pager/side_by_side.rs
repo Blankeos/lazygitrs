@@ -891,6 +891,22 @@ impl DiffViewState {
         }
     }
 
+    /// Return the one-based hunk at the current viewport position and the
+    /// total number of hunks. Context before the first hunk is considered part
+    /// of the first hunk so the indicator starts at `1/N`.
+    pub fn hunk_position(&self) -> Option<(usize, usize)> {
+        let total = self.hunk_starts.len();
+        if total == 0 {
+            return None;
+        }
+
+        let current = self
+            .hunk_starts
+            .partition_point(|&start| start <= self.scroll_offset)
+            .max(1);
+        Some((current, total))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty()
     }
@@ -1198,6 +1214,16 @@ pub fn render_diff(
         .title(title)
         .borders(Borders::ALL)
         .border_style(border_style);
+
+    if let Some((current, total)) = state.hunk_position() {
+        block = block.title(
+            Line::from(Span::styled(
+                format!(" [{current}/{total}] "),
+                Style::default().fg(theme.text_dimmed),
+            ))
+            .alignment(ratatui::layout::Alignment::Right),
+        );
+    }
 
     // Bottom-right footnote: revert-hunk undo indicator. Only shown when
     // there's something to undo; the denominator is the peak stack depth
@@ -2914,6 +2940,8 @@ fn build_hunk_line_offsets(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn diff_line(change_type: ChangeType) -> DiffLine {
         DiffLine {
@@ -2925,6 +2953,61 @@ mod tests {
             file_header: None,
             section_index: 0,
         }
+    }
+
+    #[test]
+    fn hunk_position_tracks_the_viewport() {
+        let mut state = DiffViewState::new();
+        state.hunk_starts = vec![3, 8, 14];
+
+        state.scroll_offset = 0;
+        assert_eq!(state.hunk_position(), Some((1, 3)));
+
+        state.scroll_offset = 3;
+        assert_eq!(state.hunk_position(), Some((1, 3)));
+
+        state.scroll_offset = 12;
+        assert_eq!(state.hunk_position(), Some((2, 3)));
+
+        state.scroll_offset = 14;
+        assert_eq!(state.hunk_position(), Some((3, 3)));
+    }
+
+    #[test]
+    fn diff_border_shows_hunk_position_at_top_right() {
+        let backend = TestBackend::new(40, 6);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut state = DiffViewState::new();
+        state.filename = "file.txt".to_string();
+        state.lines = (0..5).map(|_| diff_line(ChangeType::Equal)).collect();
+        state.hunk_starts = vec![1, 4];
+        state.scroll_offset = 4;
+
+        terminal
+            .draw(|frame| {
+                render_diff(
+                    frame,
+                    Rect::new(0, 0, 40, 6),
+                    &state,
+                    &Theme::dark(),
+                    true,
+                    false,
+                    false,
+                );
+            })
+            .expect("diff should render");
+
+        let top_border: String = (0..40)
+            .map(|x| {
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell((x, 0))
+                    .and_then(|cell| cell.symbol().chars().next())
+                    .unwrap_or(' ')
+            })
+            .collect();
+        assert!(top_border.ends_with(" [2/2] ┐"), "{top_border:?}");
     }
 
     #[test]
