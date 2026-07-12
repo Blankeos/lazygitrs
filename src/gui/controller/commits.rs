@@ -259,9 +259,17 @@ fn cherry_pick_copy(gui: &mut Gui) -> Result<()> {
 
     let model = gui.model.lock().unwrap();
     let mut added = 0;
+    let mut removed = 0;
     for i in lo..=hi {
         if let Some(commit) = model.commits.get(i) {
-            if !gui.cherry_pick_clipboard.contains(&commit.hash) {
+            if let Some(index) = gui
+                .cherry_pick_clipboard
+                .iter()
+                .position(|hash| hash == &commit.hash)
+            {
+                gui.cherry_pick_clipboard.remove(index);
+                removed += 1;
+            } else {
                 gui.cherry_pick_clipboard.push(commit.hash.clone());
                 added += 1;
             }
@@ -273,14 +281,30 @@ fn cherry_pick_copy(gui: &mut Gui) -> Result<()> {
     gui.range_select_anchor = None;
 
     let n = gui.cherry_pick_clipboard.len();
-    gui.popup = PopupState::Message {
-        title: "Cherry-pick".to_string(),
-        message: format!(
+    let message = match (added, removed) {
+        (0, removed) => format!(
+            "Uncopied {} commit{} ({} total)",
+            removed,
+            if removed == 1 { "" } else { "s" },
+            n,
+        ),
+        (added, 0) => format!(
             "Copied {} commit{} ({} total)",
             added,
             if added == 1 { "" } else { "s" },
             n,
         ),
+        (added, removed) => format!(
+            "Copied {} and uncopied {} commit{} ({} total)",
+            added,
+            removed,
+            if added + removed == 1 { "" } else { "s" },
+            n,
+        ),
+    };
+    gui.popup = PopupState::Message {
+        title: "Cherry-pick".to_string(),
+        message,
         kind: crate::gui::popup::MessageKind::Info,
     };
     Ok(())
@@ -307,6 +331,14 @@ fn paste_commits(gui: &mut Gui) -> Result<()> {
 
     let n = gui.cherry_pick_clipboard.len();
     let mut hashes = gui.cherry_pick_clipboard.clone();
+    let target_branch = {
+        let model = gui.model.lock().unwrap();
+        if model.head_branch_name.is_empty() {
+            "detached HEAD".to_string()
+        } else {
+            format!("branch '{}'", model.head_branch_name)
+        }
+    };
     // The clipboard stores commits newest-first (matching the visual list order).
     // git cherry-pick applies commits in argument order, so we must reverse to
     // apply oldest-first and preserve the intended history.
@@ -315,9 +347,10 @@ fn paste_commits(gui: &mut Gui) -> Result<()> {
     gui.popup = PopupState::Confirm {
         title: "Cherry-pick".to_string(),
         message: format!(
-            "Cherry-pick {} copied commit{} onto this branch?",
+            "Cherry-pick {} copied commit{} onto {}?",
             n,
-            if n == 1 { "" } else { "s" }
+            if n == 1 { "" } else { "s" },
+            target_branch,
         ),
         on_confirm: Box::new(move |gui| {
             gui.git.cherry_pick(&hashes)?;

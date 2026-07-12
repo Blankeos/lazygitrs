@@ -4258,9 +4258,12 @@ impl Gui {
                     },
                 ],
             },
-            ContextId::Commits => HelpSection {
-                title: "Commits".into(),
-                entries: vec![
+            ContextId::Commits => {
+                let mut entries = vec![
+                    HelpEntry {
+                        key: kb.commits.cherry_pick_copy.clone(),
+                        description: "Copy (cherry-pick)".into(),
+                    },
                     HelpEntry {
                         key: "<enter>".into(),
                         description: "View commit files".into(),
@@ -4310,14 +4313,6 @@ impl Gui {
                         description: "Revert commit".into(),
                     },
                     HelpEntry {
-                        key: kb.commits.cherry_pick_copy.clone(),
-                        description: "Cherry-pick copy".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.paste_commits.clone(),
-                        description: "Paste commits".into(),
-                    },
-                    HelpEntry {
                         key: "v".into(),
                         description: "Toggle range select".into(),
                     },
@@ -4357,8 +4352,21 @@ impl Gui {
                         key: ".".into(),
                         description: "Toggle commit details panel".into(),
                     },
-                ],
-            },
+                ];
+                if !self.cherry_pick_clipboard.is_empty() {
+                    entries.insert(
+                        0,
+                        HelpEntry {
+                            key: kb.commits.paste_commits.clone(),
+                            description: "Paste (cherry-pick)".into(),
+                        },
+                    );
+                }
+                HelpSection {
+                    title: "Commits".into(),
+                    entries,
+                }
+            }
             ContextId::CommitFiles => HelpSection {
                 title: "Commit Files".into(),
                 entries: vec![
@@ -4409,7 +4417,7 @@ impl Gui {
                     },
                     HelpEntry {
                         key: kb.commits.cherry_pick_copy.clone(),
-                        description: "Cherry-pick".into(),
+                        description: "Copy (cherry-pick)".into(),
                     },
                     HelpEntry {
                         key: "y".into(),

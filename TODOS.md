@@ -274,6 +274,6 @@ Where I observed this behavior: I noticed this for the "Commit Message" and "Des
 
 - [x] Detached head.. When I'm making a commit. Like press 'c'. Immediately show a warning, but allow the action to continue anyway. Like 'You are in a detached head, not a branch. Are you sure you want to commit?' And it's just a simple yes or no alert.
 
-- [ ] Better cherry picks tips.
-  - [ ] 'C' currently says 'Cherry pick', but also say 'C Copy (cherry-pick)'.
-  - [ ] I can do 'C' to copy. Let me do see 'V Paste (cherry-pick)' in the tips and help `?`. It must be at the very beginning of tips. Make sure the alert says the branch it will put it onto (which I assume is always the currently checked-out branch - am I right?), not just "On this branch?" - because the user would kinda assume that it would be on the branch that their cursor hovered on.
+- [x] Better cherry picks tips.
+  - [x] 'C' currently says 'Cherry pick', but also say 'C Copy (cherry-pick)'.
+  - [x] I can do 'C' to copy. Let me do see 'V Paste (cherry-pick)' in the tips and help `?`. It must be at the very beginning of tips. Make sure the alert says the branch it will put it onto (which I assume is always the currently checked-out branch - am I right?), not just "On this branch?" - because the user would kinda assume that it would be on the branch that their cursor hovered on.

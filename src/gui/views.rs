@@ -384,6 +384,7 @@ pub fn render(
             theme,
             model,
             diff_focused,
+            !cherry_pick_clipboard.is_empty(),
         );
         // Render text selection highlight overlay and tooltip (must be before popup)
         render_selection_overlay(frame, diff_view, fl.main_panel, theme);
@@ -1060,6 +1061,7 @@ pub fn render(
             theme,
             model,
             diff_focused,
+            !cherry_pick_clipboard.is_empty(),
         );
     }
 
@@ -1874,6 +1876,7 @@ fn render_status_bar(
     _theme: &crate::config::Theme,
     model: &Model,
     diff_focused: bool,
+    has_copied_commits: bool,
 ) {
     let mut hints: Vec<(&str, &str)> = Vec::new();
     let mut emphasized: Vec<&str> = Vec::new();
@@ -1964,11 +1967,14 @@ fn render_status_bar(
                 ]);
             }
             ContextId::Commits => {
+                if has_copied_commits {
+                    hints.push(("V", "paste (cherry-pick)"));
+                }
                 hints.extend([
+                    ("C", "copy (cherry-pick)"),
                     ("r", "reword"),
                     ("g", "reset"),
                     ("t", "revert"),
-                    ("C", "cherry-pick"),
                     ("\\", view_layout_hint),
                     ("ctrl+l", "filter branch"),
                 ]);
