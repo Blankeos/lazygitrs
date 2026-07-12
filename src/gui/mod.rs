@@ -4249,6 +4249,10 @@ impl Gui {
                         description: "Back to branches".into(),
                     },
                     HelpEntry {
+                        key: kb.universal.toggle_diff_view_layout.clone(),
+                        description: "Toggle unified / side-by-side view".into(),
+                    },
+                    HelpEntry {
                         key: ".".into(),
                         description: "Toggle commit details panel".into(),
                     },
@@ -4390,6 +4394,10 @@ impl Gui {
                     HelpEntry {
                         key: "<enter>".into(),
                         description: "View commit files".into(),
+                    },
+                    HelpEntry {
+                        key: kb.universal.toggle_diff_view_layout.clone(),
+                        description: "Toggle unified / side-by-side view".into(),
                     },
                     HelpEntry {
                         key: kb.commits.checkout_commit.clone(),

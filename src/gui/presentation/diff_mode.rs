@@ -63,7 +63,7 @@ pub fn render(
     crate::gui::views::render_selection_overlay(frame, diff_view, content[1], theme);
 
     // Status bar
-    render_status_bar(frame, outer[1], state, theme);
+    render_status_bar(frame, outer[1], state, diff_view, theme);
 
     // Render combobox dropdown overlay on top of the sidebar
     if state.editing.is_some() {
@@ -333,7 +333,13 @@ fn render_diff_panel(
     }
 }
 
-fn render_status_bar(frame: &mut Frame, area: Rect, state: &DiffModeState, theme: &Theme) {
+fn render_status_bar(
+    frame: &mut Frame,
+    area: Rect,
+    state: &DiffModeState,
+    diff_view: &DiffViewState,
+    theme: &Theme,
+) {
     // If search is active or has results, show search bar instead of hints
     if state.file_search_active {
         if let Some(ref ta) = state.file_search_textarea {
@@ -396,13 +402,17 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &DiffModeState, theme
     let hints = if state.editing.is_some() {
         vec![("Enter", "select"), ("Esc", "cancel"), ("↑↓", "navigate")]
     } else {
+        let view_layout_hint = match diff_view.view_layout {
+            side_by_side::DiffViewLayout::SideBySide => "unified view",
+            side_by_side::DiffViewLayout::Unified => "split view",
+        };
         vec![
             ("q", "exit"),
             ("Tab", "cycle"),
             ("1-4", "panel"),
             ("<c-s>", "swap"),
             ("`", "tree"),
-            ("\\", "view"),
+            ("\\", view_layout_hint),
             ("?", "help"),
         ]
     };

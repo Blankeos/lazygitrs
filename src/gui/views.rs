@@ -1933,11 +1933,25 @@ fn render_status_bar(
                     ("o", "open"),
                 ]);
             }
-            ContextId::CommitFiles | ContextId::StashFiles => {
+            ContextId::CommitFiles | ContextId::StashFiles | ContextId::BranchCommitFiles => {
                 hints.extend([
                     ("enter", "focus diff"),
                     ("\\", view_layout_hint),
                     ("y", "copy"),
+                ]);
+            }
+            ContextId::BranchCommits => {
+                hints.extend([
+                    ("enter", "commit files"),
+                    ("\\", view_layout_hint),
+                    (".", "details"),
+                ]);
+            }
+            ContextId::Reflog => {
+                hints.extend([
+                    ("enter", "commit files"),
+                    ("\\", view_layout_hint),
+                    (".", "details"),
                 ]);
             }
             ContextId::Branches => {
