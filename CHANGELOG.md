@@ -2,17 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.24] - 2026-07-12
+
+### Bug Fixes
+
+- Force plain unified output for stash diff by @Blankeos
+- Ignore no-newline metadata in unified diff parsing by @Blankeos
+- Render unified modified hunks in old-then-new chunk order by @Blankeos
+
+### Features
+
+- Show diff hunk/addition/deletion stats in commit file lists by @Blankeos
+- Show current hunk position in side-by-side header by @Blankeos
+- Show inline diff stats in staged file lists by @Blankeos
+- Clarify cherry-pick copy/paste UX by @Blankeos
+- Add confirmation before committing from detached HEAD by @Blankeos
+- Show diff layout mode in status and help hints by @Blankeos
+- Make diff layout toggle keybinding configurable by @Blankeos
+
+### Performance
+
+- Avoid extra branch recency calls and gate auto-refresh on fetch output by @Blankeos
+
 ## [0.0.23] - 2026-06-18
 
 ### Bug Fixes
 
-- Restore head-marker behavior for merge nodes by Blankeos
-- Resolve previous branch checkout via explicit ref name by Blankeos
-- Handle rename/copy paths consistently across diffs and file actions by Blankeos
+- Restore head-marker behavior for merge nodes by @Blankeos
+- Resolve previous branch checkout via explicit ref name by @Blankeos
+- Handle rename/copy paths consistently across diffs and file actions by @Blankeos
 
 ### Chores
 
-- Publish Homebrew formula via release workflow by Blankeos
+- Publish Homebrew formula via release workflow by @Blankeos
 
 ## [0.0.22] - 2026-06-10
 
