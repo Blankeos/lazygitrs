@@ -80,7 +80,13 @@ impl GitCommands {
     pub fn stash_diff(&self, index: usize) -> Result<String> {
         let result = self
             .git()
-            .args(&["stash", "show", "-p", &format!("stash@{{{}}}", index)])
+            .args(&[
+                "stash",
+                "show",
+                "-p",
+                "--color=never",
+                &format!("stash@{{{}}}", index),
+            ])
             .run()?;
         if result.success {
             Ok(result.stdout)
@@ -150,5 +156,100 @@ impl GitCommands {
                 .run_expecting_success()?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::git::GitCommands;
+    use crate::pager::side_by_side::DiffViewState;
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(prefix: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time before unix epoch")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "lazygitrs-{prefix}-{unique}-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .status()
+                .expect("run git command")
+                .success()
+        );
+    }
+
+    #[test]
+    fn stash_diff_is_plain_unified_output_when_git_color_is_forced() {
+        let temp = TempDir::new("stash-diff");
+        let repo = &temp.path;
+        git(repo, &["init", "-q"]);
+        git(repo, &["config", "user.email", "test@example.com"]);
+        git(repo, &["config", "user.name", "Test"]);
+        git(repo, &["config", "color.ui", "always"]);
+
+        let original = (1..=25)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(repo.join("file.txt"), &original).expect("write original file");
+        git(repo, &["add", "file.txt"]);
+        git(repo, &["commit", "-q", "-m", "initial"]);
+
+        let changed = original.replace("line 13\nline 14\nline 15", "LINE 13\nLINE 14\nLINE 15");
+        std::fs::write(repo.join("file.txt"), changed).expect("write changed file");
+        git(repo, &["stash", "push", "-q", "-m", "replacement"]);
+
+        let commands = GitCommands::new(repo).expect("create git commands");
+        let diff = commands.stash_diff(0).expect("load stash diff");
+
+        assert!(!diff.contains('\x1b'), "stash diff contains ANSI escapes");
+
+        let parsed = DiffViewState::parse_diff_output("stash@{0}", &diff, 4, false);
+        let replacement_rows: Vec<_> = parsed
+            .lines
+            .iter()
+            .filter_map(|line| match (&line.old_line, &line.new_line) {
+                (Some((_, old)), Some((_, new))) if new.starts_with("LINE ") => {
+                    Some((old.as_str(), new.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            replacement_rows,
+            vec![
+                ("line 13", "LINE 13"),
+                ("line 14", "LINE 14"),
+                ("line 15", "LINE 15"),
+            ]
+        );
     }
 }
