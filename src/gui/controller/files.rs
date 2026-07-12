@@ -202,6 +202,21 @@ fn open_commit_prompt(gui: &mut Gui) -> Result<()> {
         return Ok(());
     }
 
+    let head_is_detached = gui.model.lock().unwrap().head_branch_name.is_empty();
+    if head_is_detached {
+        gui.popup = PopupState::Confirm {
+            title: "Detached HEAD".to_string(),
+            message: "You are in a detached HEAD, not a branch. Are you sure you want to commit?"
+                .to_string(),
+            on_confirm: Box::new(open_commit_prompt_after_detached_head_warning),
+        };
+        return Ok(());
+    }
+
+    open_commit_prompt_after_detached_head_warning(gui)
+}
+
+fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
     let model = gui.model.lock().unwrap();
     let any_staged = model.files.iter().any(|f| f.has_staged_changes);
     let no_files = model.files.is_empty();
