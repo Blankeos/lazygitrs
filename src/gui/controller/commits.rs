@@ -8,6 +8,7 @@ use crate::config::keybindings::parse_key;
 use crate::git::rebase::RebaseAction;
 use crate::gui::Gui;
 use crate::gui::popup::{MenuItem, PopupState, make_textarea};
+use crate::model::Branch;
 use crate::os::platform::Platform;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
@@ -614,19 +615,69 @@ fn checkout_commit(gui: &mut Gui) -> Result<()> {
     if let Some(commit) = model.commits.get(selected) {
         let hash = commit.hash.clone();
         let short = commit.short_hash().to_string();
+        let branch_names = branches_at_commit(&hash, &model.branches, &model.head_branch_name);
         drop(model);
 
-        gui.popup = PopupState::Confirm {
-            title: "Checkout commit".to_string(),
-            message: format!("Checkout commit {}? (detached HEAD)", short),
-            on_confirm: Box::new(move |gui| {
+        let mut items = vec![MenuItem {
+            label: format!("Checkout commit {} as detached head", short),
+            description: String::new(),
+            key: Some("d".to_string()),
+            action: Some(Box::new(move |gui| {
                 gui.git.checkout_branch(&hash)?;
                 gui.needs_refresh = true;
                 Ok(())
-            }),
+            })),
+        }];
+
+        if branch_names.is_empty() {
+            items.push(MenuItem {
+                label: "Checkout branch".to_string(),
+                description: "No branches found at selected commit.".to_string(),
+                key: Some("1".to_string()),
+                action: None,
+            });
+        } else {
+            items.extend(
+                branch_names
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, name)| MenuItem {
+                        label: format!("Checkout branch '{}'", name),
+                        description: String::new(),
+                        key: checkout_branch_key(index),
+                        action: Some(Box::new(move |gui| {
+                            gui.git.checkout_branch(&name)?;
+                            gui.needs_refresh = true;
+                            Ok(())
+                        })),
+                    }),
+            );
+        }
+
+        gui.popup = PopupState::Menu {
+            title: "Checkout branch or commit".to_string(),
+            items,
+            selected: 0,
+            loading_index: None,
         };
     }
     Ok(())
+}
+
+fn branches_at_commit(commit_hash: &str, branches: &[Branch], current_branch: &str) -> Vec<String> {
+    branches
+        .iter()
+        .filter(|branch| {
+            branch.name != current_branch
+                && !branch.hash.is_empty()
+                && (branch.hash == commit_hash || commit_hash.starts_with(&branch.hash))
+        })
+        .map(|branch| branch.name.clone())
+        .collect()
+}
+
+fn checkout_branch_key(index: usize) -> Option<String> {
+    (index < 9).then(|| (index + 1).to_string())
 }
 
 fn open_commit_in_browser_menu(gui: &mut Gui) -> Result<()> {
@@ -956,5 +1007,58 @@ fn matches_key(key: KeyEvent, binding: &str) -> bool {
         key.code == expected.code && key.modifiers == expected.modifiers
     } else {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{branches_at_commit, checkout_branch_key};
+    use crate::model::Branch;
+
+    fn branch(name: &str, hash: &str) -> Branch {
+        Branch {
+            name: name.to_string(),
+            hash: hash.to_string(),
+            recency: String::new(),
+            pushables: String::new(),
+            pullables: String::new(),
+            upstream: None,
+            head: false,
+        }
+    }
+
+    #[test]
+    fn finds_local_branches_at_commit_in_model_order() {
+        let branches = vec![
+            branch("other", "9999999"),
+            branch("feature", "b838172"),
+            branch("release", "b838172aabbccdd"),
+        ];
+
+        assert_eq!(
+            branches_at_commit("b838172aabbccdd", &branches, "main"),
+            vec!["feature", "release"]
+        );
+    }
+
+    #[test]
+    fn excludes_the_current_branch_and_empty_hashes() {
+        let branches = vec![
+            branch("main", "b838172"),
+            branch("feature", "b838172"),
+            branch("invalid", ""),
+        ];
+
+        assert_eq!(
+            branches_at_commit("b838172aabbccdd", &branches, "main"),
+            vec!["feature"]
+        );
+    }
+
+    #[test]
+    fn assigns_number_shortcuts_to_the_first_nine_branches() {
+        assert_eq!(checkout_branch_key(0).as_deref(), Some("1"));
+        assert_eq!(checkout_branch_key(8).as_deref(), Some("9"));
+        assert_eq!(checkout_branch_key(9), None);
     }
 }

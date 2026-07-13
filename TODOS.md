@@ -291,3 +291,5 @@ Where I observed this behavior: I noticed this for the "Commit Message" and "Des
 - [ ] jj support? https://github.com/jj-vcs/jj
 
 - [ ] Resize the sidebar using mouse, click and drag.
+
+- [x] in original lazygit, space in the '4 Commits' view actually isn't by default always entering the 'detached head' context. Most of the time (as long as you see the branch name in the list item, like if it's the item that's the head of that branch), it actually shows `l checkout branch '<branchname>'` as a second option and the first option is like `d checkout commit b838172 as detached head`
