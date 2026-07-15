@@ -2164,7 +2164,7 @@ impl Gui {
 
         // Diff/Compare mode (W)
         if key.code == KeyCode::Char('W') {
-            self.diff_mode.enter();
+            self.diff_mode.enter(self.show_file_tree);
             self.diff_view.reset_keep_prefs();
             return Ok(());
         }

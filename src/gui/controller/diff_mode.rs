@@ -255,9 +255,13 @@ fn handle_file_search_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
 fn handle_commit_files_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
     let keybindings = &gui.config.user_config.keybinding;
 
-    // Toggle tree view (backtick)
+    // Toggle tree view (backtick) — keep in sync with Files / Commit Files and persist
     if matches_key(key, &keybindings.files.toggle_tree_view) {
         gui.diff_mode.show_tree = !gui.diff_mode.show_tree;
+        gui.show_file_tree = gui.diff_mode.show_tree;
+        gui.show_commit_file_tree = gui.diff_mode.show_tree;
+        gui.update_file_tree_state();
+        gui.persist_file_tree_visibility();
         update_diff_mode_tree(gui);
         gui.diff_mode.diff_files_selected = 0;
         return Ok(());

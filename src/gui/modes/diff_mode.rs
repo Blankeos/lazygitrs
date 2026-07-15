@@ -124,7 +124,7 @@ impl DiffModeState {
         }
     }
 
-    pub fn enter(&mut self) {
+    pub fn enter(&mut self, show_tree: bool) {
         self.active = true;
         self.ref_a.clear();
         self.ref_b.clear();
@@ -139,7 +139,8 @@ impl DiffModeState {
         self.diff_files.clear();
         self.diff_files_selected = 0;
         self.diff_files_scroll = 0;
-        self.show_tree = false;
+        // Use the same persisted showFileTree preference as Files / Commit Files.
+        self.show_tree = show_tree;
         self.tree_nodes.clear();
         self.collapsed_dirs.clear();
         self.file_search_active = false;
