@@ -7116,6 +7116,18 @@ fn rect_contains(r: ratatui::layout::Rect, col: u16, row: u16) -> bool {
     col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
 }
 
+fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
+    // Keep printable input on the terminal's normal text path. In particular,
+    // REPORT_ALL_KEYS_AS_ESCAPE_CODES replaces produced text with a logical key
+    // identity. Crossterm 0.28 does not expose the protocol's associated-text
+    // field, so keyboard layouts, IMEs, or remappers can otherwise turn a typed
+    // character into a different shortcut (for example, `q` into `u`).
+    //
+    // REPORT_EVENT_TYPES is also unnecessary: the UI handles press events only,
+    // and enabling it would turn key auto-repeat into ignored Repeat events.
+    crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+}
+
 /// Enables button, drag, and scroll events without passive pointer-motion events.
 ///
 /// Crossterm's `EnableMouseCapture` also enables DEC mode 1003 (all motion), which can
@@ -7142,6 +7154,22 @@ impl Command for EnableMouseCaptureWithoutHover {
 #[cfg(test)]
 mod terminal_mouse_tests {
     use super::*;
+
+    #[test]
+    fn keyboard_enhancement_preserves_terminal_text_input() {
+        let flags = keyboard_enhancement_flags();
+
+        assert_eq!(
+            flags,
+            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        );
+        assert!(
+            !flags.contains(
+                crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+            )
+        );
+        assert!(!flags.contains(crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
+    }
 
     #[test]
     fn mouse_capture_does_not_request_passive_motion_events() {
@@ -7172,11 +7200,7 @@ fn setup_terminal() -> Result<(Term, bool)> {
     if keyboard_enhanced {
         execute!(
             stdout,
-            crossterm::event::PushKeyboardEnhancementFlags(
-                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    | crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-            )
+            crossterm::event::PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
         )?;
     }
     let backend = CrosstermBackend::new(stdout);
