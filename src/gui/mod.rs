@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
-use crossterm::{cursor, execute};
+use crossterm::{Command, cursor, execute};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
@@ -315,9 +315,6 @@ pub struct Gui {
     /// Whether the commit-details box is visible.  Toggled with `.` in any
     /// commit-related context.
     pub show_commit_details: bool,
-    /// Whether the mouse is currently hovering the AI-generate button (✦)
-    /// in the commit message popup. Drives tooltip visibility.
-    pub commit_ai_button_hovered: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -491,7 +488,6 @@ impl Gui {
             commit_details_scroll: 0,
             commit_details_scroll_hash: String::new(),
             show_commit_details,
-            commit_ai_button_hovered: false,
         })
     }
 
@@ -631,7 +627,7 @@ impl Gui {
                             frame.area(),
                             self.spinner_frame,
                             &theme,
-                            self.commit_ai_button_hovered,
+                            false,
                             !self
                                 .config
                                 .user_config
@@ -674,7 +670,7 @@ impl Gui {
                             frame.area(),
                             self.spinner_frame,
                             &theme,
-                            self.commit_ai_button_hovered,
+                            false,
                             !self
                                 .config
                                 .user_config
@@ -756,7 +752,7 @@ impl Gui {
                         &mut self.commit_details_scroll,
                         &mut self.commit_details_scroll_hash,
                         self.show_commit_details,
-                        self.commit_ai_button_hovered,
+                        false,
                         !self
                             .config
                             .user_config
@@ -5313,19 +5309,13 @@ impl Gui {
             return;
         }
 
-        // ✦ AI-generate button on commit-message popups: track hover, handle clicks.
+        // ✦ AI-generate button on commit-message popups: handle clicks.
         if matches!(self.popup, PopupState::CommitInput { .. }) {
             let area = ratatui::layout::Rect::new(0, 0, self.layout.width, self.layout.height);
             if let Some(btn_rect) = views::commit_ai_button_geometry(&self.popup, area) {
                 let over = rect_contains(btn_rect, mouse.column, mouse.row);
                 match mouse.kind {
-                    MouseEventKind::Moved | MouseEventKind::Drag(_) => {
-                        if self.commit_ai_button_hovered != over {
-                            self.commit_ai_button_hovered = over;
-                        }
-                    }
                     MouseEventKind::Down(MouseButton::Left) if over => {
-                        self.commit_ai_button_hovered = false;
                         let configured = !self
                             .config
                             .user_config
@@ -5350,11 +5340,7 @@ impl Gui {
                     }
                     _ => {}
                 }
-            } else if self.commit_ai_button_hovered {
-                self.commit_ai_button_hovered = false;
             }
-        } else if self.commit_ai_button_hovered {
-            self.commit_ai_button_hovered = false;
         }
 
         if matches!(self.popup, PopupState::CommitInput { .. }) {
@@ -7130,13 +7116,54 @@ fn rect_contains(r: ratatui::layout::Rect, col: u16, row: u16) -> bool {
     col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
 }
 
+/// Enables button, drag, and scroll events without passive pointer-motion events.
+///
+/// Crossterm's `EnableMouseCapture` also enables DEC mode 1003 (all motion), which can
+/// cause terminals to repeatedly focus or redraw while merely moving the pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EnableMouseCaptureWithoutHover;
+
+impl Command for EnableMouseCaptureWithoutHover {
+    fn write_ansi(&self, f: &mut impl std::fmt::Write) -> std::fmt::Result {
+        f.write_str("\x1b[?1000h\x1b[?1002h\x1b[?1015h\x1b[?1006h")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> io::Result<()> {
+        Command::execute_winapi(&crossterm::event::EnableMouseCapture)
+    }
+
+    #[cfg(windows)]
+    fn is_ansi_code_supported(&self) -> bool {
+        Command::is_ansi_code_supported(&crossterm::event::EnableMouseCapture)
+    }
+}
+
+#[cfg(test)]
+mod terminal_mouse_tests {
+    use super::*;
+
+    #[test]
+    fn mouse_capture_does_not_request_passive_motion_events() {
+        let mut ansi = String::new();
+        EnableMouseCaptureWithoutHover
+            .write_ansi(&mut ansi)
+            .unwrap();
+
+        assert!(ansi.contains("\x1b[?1000h"));
+        assert!(ansi.contains("\x1b[?1002h"));
+        assert!(ansi.contains("\x1b[?1006h"));
+        assert!(!ansi.contains("\x1b[?1003h"));
+    }
+}
+
 fn setup_terminal() -> Result<(Term, bool)> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(
         stdout,
         EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture,
+        EnableMouseCaptureWithoutHover,
         crossterm::event::EnableFocusChange,
         crossterm::event::EnableBracketedPaste,
         cursor::Hide
