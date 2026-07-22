@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.25] - 2026-07-22
+
+### Bug Fixes
+
+- #20 hover disabled optimistic so it doesn't hit ghostty users by @Blankeos
+- Persist file-tree visibility in compare mode by @Blankeos
+
+### Features
+
+- Add branch-aware commit checkout menu by @Blankeos
+
 ## [0.0.24] - 2026-07-12
 
 ### Bug Fixes
