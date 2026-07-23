@@ -67,8 +67,9 @@ fn list_picker_visible_height(terminal_height: usize) -> usize {
 
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
 const EVENT_DRAIN_LIMIT: usize = 256;
-const ESCAPE_CONTINUATION_TIMEOUT: Duration = Duration::from_millis(25);
+const ESCAPE_CONTINUATION_TIMEOUT: Duration = Duration::from_millis(50);
 const MAX_ESCAPE_SEQUENCE_EVENTS: usize = 256;
+const POPUP_KEY_TAIL_TIMEOUT: Duration = Duration::from_millis(50);
 const COMMIT_DETAILS_DEBOUNCE: Duration = Duration::from_millis(120);
 const MAX_CONCURRENT_DIFF_JOBS: usize = 2;
 const DIFF_PREVIEW_CACHE_ENTRIES: usize = 8;
@@ -101,7 +102,71 @@ fn parse_kitty_modifiers(value: &str) -> KeyModifiers {
     modifiers
 }
 
+fn parse_kitty_event_kind(value: &str) -> crossterm::event::KeyEventKind {
+    match value
+        .split(':')
+        .nth(1)
+        .and_then(|value| value.parse::<u8>().ok())
+    {
+        Some(2) => crossterm::event::KeyEventKind::Repeat,
+        Some(3) => crossterm::event::KeyEventKind::Release,
+        _ => crossterm::event::KeyEventKind::Press,
+    }
+}
+
+fn parse_sgr_mouse(sequence: &str) -> Option<Event> {
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    let sgr = sequence.strip_prefix("[<")?;
+    let final_byte = sgr.chars().last()?;
+    if !matches!(final_byte, 'M' | 'm') {
+        return None;
+    }
+    let body = &sgr[..sgr.len().saturating_sub(final_byte.len_utf8())];
+    let mut values = body.trim_end_matches(';').split(';');
+    let cb = values.next()?.parse::<u8>().ok()?;
+    let column = values.next()?.parse::<u16>().ok()?.checked_sub(1)?;
+    let row = values.next()?.parse::<u16>().ok()?.checked_sub(1)?;
+
+    let button_number = (cb & 0b0000_0011) | ((cb & 0b1100_0000) >> 4);
+    let dragging = cb & 0b0010_0000 != 0;
+    let mut kind = match (button_number, dragging) {
+        (0, false) => MouseEventKind::Down(MouseButton::Left),
+        (1, false) => MouseEventKind::Down(MouseButton::Middle),
+        (2, false) => MouseEventKind::Down(MouseButton::Right),
+        (0, true) => MouseEventKind::Drag(MouseButton::Left),
+        (1, true) => MouseEventKind::Drag(MouseButton::Middle),
+        (2, true) => MouseEventKind::Drag(MouseButton::Right),
+        (3, false) => MouseEventKind::Up(MouseButton::Left),
+        (3..=5, true) => MouseEventKind::Moved,
+        (4, false) => MouseEventKind::ScrollUp,
+        (5, false) => MouseEventKind::ScrollDown,
+        (6, false) => MouseEventKind::ScrollLeft,
+        (7, false) => MouseEventKind::ScrollRight,
+        _ => return None,
+    };
+    if final_byte == 'm'
+        && let MouseEventKind::Down(button) = kind
+    {
+        kind = MouseEventKind::Up(button);
+    }
+
+    let mut modifiers = KeyModifiers::NONE;
+    modifiers.set(KeyModifiers::SHIFT, cb & 0b0000_0100 != 0);
+    modifiers.set(KeyModifiers::ALT, cb & 0b0000_1000 != 0);
+    modifiers.set(KeyModifiers::CONTROL, cb & 0b0001_0000 != 0);
+    Some(Event::Mouse(MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers,
+    }))
+}
+
 fn parse_fragmented_escape_sequence(sequence: &str) -> Option<Event> {
+    if sequence.starts_with("[<") {
+        return parse_sgr_mouse(sequence);
+    }
     if let Some(csi) = sequence.strip_prefix('[') {
         let final_byte = csi.chars().last()?;
         let body = &csi[..csi.len().saturating_sub(final_byte.len_utf8())];
@@ -120,12 +185,13 @@ fn parse_fragmented_escape_sequence(sequence: &str) -> Option<Event> {
             }
         }
 
-        let modifiers = body
-            .rsplit(';')
-            .next()
-            .filter(|_| body.contains(';'))
+        let modifier_field = body.split(';').nth(1);
+        let modifiers = modifier_field
             .map(parse_kitty_modifiers)
             .unwrap_or(KeyModifiers::NONE);
+        let kind = modifier_field
+            .map(parse_kitty_event_kind)
+            .unwrap_or(crossterm::event::KeyEventKind::Press);
         let code = match final_byte {
             'A' => KeyCode::Up,
             'B' => KeyCode::Down,
@@ -154,7 +220,7 @@ fn parse_fragmented_escape_sequence(sequence: &str) -> Option<Event> {
             },
             _ => return None,
         };
-        return Some(Event::Key(KeyEvent::new(code, modifiers)));
+        return Some(Event::Key(KeyEvent::new_with_kind(code, modifiers, kind)));
     }
 
     let code = match sequence {
@@ -233,6 +299,120 @@ fn read_terminal_events() -> io::Result<Vec<Event>> {
     // A confirmed but malformed/incomplete terminal sequence must never leak
     // its payload into shortcut handling or text inputs.
     Ok(Vec::new())
+}
+
+#[derive(Debug)]
+struct QueuedTerminalEvent {
+    event: Event,
+    repetitions: usize,
+}
+
+fn coalescible_mouse_kind(kind: crossterm::event::MouseEventKind) -> bool {
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    matches!(
+        kind,
+        MouseEventKind::Moved
+            | MouseEventKind::Drag(MouseButton::Left)
+            | MouseEventKind::Drag(MouseButton::Middle)
+            | MouseEventKind::Drag(MouseButton::Right)
+            | MouseEventKind::ScrollDown
+            | MouseEventKind::ScrollUp
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight
+    )
+}
+
+fn push_coalesced_terminal_event(queue: &mut VecDeque<QueuedTerminalEvent>, event: Event) {
+    if let Event::Mouse(mouse) = event {
+        if coalescible_mouse_kind(mouse.kind)
+            && let Some(QueuedTerminalEvent {
+                event: Event::Mouse(previous),
+                repetitions,
+            }) = queue.back_mut()
+            && previous.kind == mouse.kind
+            && previous.modifiers == mouse.modifiers
+        {
+            *previous = mouse;
+            if matches!(
+                mouse.kind,
+                crossterm::event::MouseEventKind::ScrollDown
+                    | crossterm::event::MouseEventKind::ScrollUp
+                    | crossterm::event::MouseEventKind::ScrollLeft
+                    | crossterm::event::MouseEventKind::ScrollRight
+            ) {
+                *repetitions = repetitions.saturating_add(1);
+            }
+            return;
+        }
+
+        queue.push_back(QueuedTerminalEvent {
+            event: Event::Mouse(mouse),
+            repetitions: 1,
+        });
+        return;
+    }
+
+    queue.push_back(QueuedTerminalEvent {
+        event,
+        repetitions: 1,
+    });
+}
+
+fn read_terminal_event_batch() -> io::Result<VecDeque<QueuedTerminalEvent>> {
+    let mut queue = VecDeque::new();
+    for _ in 0..EVENT_DRAIN_LIMIT {
+        for event in read_terminal_events()? {
+            push_coalesced_terminal_event(&mut queue, event);
+        }
+        if !event::poll(Duration::ZERO)? {
+            break;
+        }
+    }
+    Ok(queue)
+}
+
+fn should_dispatch_key(kind: crossterm::event::KeyEventKind) -> bool {
+    matches!(
+        kind,
+        crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PopupKeyTail {
+    key: KeyEvent,
+    expires_at: Instant,
+}
+
+fn suppress_popup_key_tail(tail: &mut Option<PopupKeyTail>, key: KeyEvent, now: Instant) -> bool {
+    let Some(blocked) = *tail else {
+        return false;
+    };
+    if now > blocked.expires_at {
+        *tail = None;
+        return false;
+    }
+
+    let same_key = key.code == blocked.key.code && key.modifiers == blocked.key.modifiers;
+    if !same_key {
+        if key.kind != crossterm::event::KeyEventKind::Release {
+            *tail = None;
+        }
+        return false;
+    }
+
+    match key.kind {
+        crossterm::event::KeyEventKind::Repeat => true,
+        crossterm::event::KeyEventKind::Release => {
+            *tail = None;
+            true
+        }
+        crossterm::event::KeyEventKind::Press => {
+            *tail = None;
+            false
+        }
+    }
 }
 
 fn has_command_modifier(modifiers: KeyModifiers) -> bool {
@@ -889,6 +1069,9 @@ impl Gui {
     }
 
     fn main_loop(&mut self, terminal: &mut Term) -> Result<()> {
+        let mut terminal_focused = true;
+        let mut popup_key_tail = None;
+
         loop {
             // Drain any model parts that have arrived from the background load.
             if let Some(rx) = &self.initial_load_rx {
@@ -1154,14 +1337,44 @@ impl Gui {
 
             // Handle events
             if event::poll(std::time::Duration::from_millis(16))? {
-                for terminal_event in read_terminal_events()? {
+                let mut terminal_events = read_terminal_event_batch()?;
+                // Ghostty may enqueue the character component of a macOS tab
+                // shortcut immediately before its FocusLost report. Quarantine
+                // that transition batch, but resume normally after FocusGained.
+                let mut focus_transition_pending = terminal_events
+                    .iter()
+                    .find_map(|queued| match queued.event {
+                        Event::FocusGained => Some(false),
+                        Event::FocusLost => Some(true),
+                        _ => None,
+                    })
+                    .unwrap_or(false);
+                while let Some(QueuedTerminalEvent {
+                    event: terminal_event,
+                    repetitions,
+                }) = terminal_events.pop_front()
+                {
+                    let popup_was_open = self.popup != PopupState::None;
+                    let dispatched_key = match &terminal_event {
+                        Event::Key(key) => Some(*key),
+                        _ => None,
+                    };
                     match terminal_event {
-                        Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
-                            if let Err(err) = self.handle_key(key) {
+                        Event::Key(key) if terminal_focused && !focus_transition_pending => {
+                            let suppressed =
+                                suppress_popup_key_tail(&mut popup_key_tail, key, Instant::now());
+                            if should_dispatch_key(key.kind)
+                                && !suppressed
+                                && let Err(err) = self.handle_key(key)
+                            {
                                 self.show_error("Command failed", err);
                             }
                         }
-                        Event::Mouse(mouse) => self.handle_mouse(mouse),
+                        Event::Mouse(mouse) if terminal_focused && !focus_transition_pending => {
+                            for _ in 0..repetitions {
+                                self.handle_mouse(mouse);
+                            }
+                        }
                         Event::Resize(w, h) => {
                             self.layout.update_size(w, h);
                             // Re-flow any active commit-message textarea to the new width so
@@ -1210,13 +1423,32 @@ impl Gui {
                                 _ => {}
                             }
                         }
-                        Event::FocusGained if self.config.user_config.git.auto_refresh => {
-                            self.needs_refresh = true;
+                        Event::FocusGained => {
+                            terminal_focused = true;
+                            focus_transition_pending = false;
+                            if self.config.user_config.git.auto_refresh {
+                                self.needs_refresh = true;
+                            }
                         }
-                        Event::Paste(data) => {
+                        Event::FocusLost => {
+                            terminal_focused = false;
+                            focus_transition_pending = false;
+                        }
+                        Event::Paste(data) if terminal_focused && !focus_transition_pending => {
                             self.handle_paste(data);
                         }
                         _ => {}
+                    }
+
+                    let popup_is_open = self.popup != PopupState::None;
+                    if popup_was_open
+                        && !popup_is_open
+                        && let Some(key) = dispatched_key
+                    {
+                        popup_key_tail = Some(PopupKeyTail {
+                            key,
+                            expires_at: Instant::now() + POPUP_KEY_TAIL_TIMEOUT,
+                        });
                     }
                 }
             }
@@ -5916,7 +6148,7 @@ impl Gui {
                         } = &mut self.popup
                         {
                             body_textarea.scroll((rows, 0));
-                            let (row, col) = body_textarea.cursor();
+                            let tui_textarea::DataCursor(row, col) = body_textarea.cursor();
                             body_state.set_cursor_from_visual(row, col, wrap_width);
                         }
                         return;
@@ -7524,7 +7756,7 @@ fn soft_wrap_textarea(textarea: &mut tui_textarea::TextArea<'static>, wrap_width
     }
 
     // Track absolute char offset of cursor so we can restore it after rewrap.
-    let (cursor_row, cursor_col) = textarea.cursor();
+    let tui_textarea::DataCursor(cursor_row, cursor_col) = textarea.cursor();
     let mut cursor_abs = 0usize;
     for (i, line) in textarea.lines().iter().enumerate() {
         let line_chars = line.chars().count();
@@ -7574,7 +7806,7 @@ fn auto_wrap_textarea(textarea: &mut tui_textarea::TextArea<'static>, wrap_width
     }
 
     // Compute cursor's absolute char offset in the original text
-    let (cursor_row, cursor_col) = textarea.cursor();
+    let tui_textarea::DataCursor(cursor_row, cursor_col) = textarea.cursor();
     let original_lines: Vec<String> = textarea.lines().iter().map(|s| s.to_string()).collect();
 
     let mut cursor_abs = 0usize;
@@ -7674,13 +7906,14 @@ fn rect_contains(r: ratatui::layout::Rect, col: u16, row: u16) -> bool {
 fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
     // Keep printable input on the terminal's normal text path. In particular,
     // REPORT_ALL_KEYS_AS_ESCAPE_CODES replaces produced text with a logical key
-    // identity. Crossterm 0.28 does not expose the protocol's associated-text
+    // identity. Crossterm does not expose the protocol's associated-text
     // field, so keyboard layouts, IMEs, or remappers can otherwise turn a typed
     // character into a different shortcut (for example, `q` into `u`).
     //
-    // REPORT_EVENT_TYPES is also unnecessary: the UI handles press events only,
-    // and enabling it would turn key auto-repeat into ignored Repeat events.
+    // Event types let us explicitly accept Press and Repeat while rejecting
+    // Release, preventing a released key from acting on a newly opened view.
     crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
 }
 
 /// Enables button, drag, and scroll events without passive pointer-motion events.
@@ -7715,16 +7948,195 @@ mod terminal_mouse_tests {
     fn keyboard_enhancement_preserves_terminal_text_input() {
         let flags = keyboard_enhancement_flags();
 
-        assert_eq!(
-            flags,
-            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        assert!(
+            flags.contains(crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         );
+        assert!(flags.contains(crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
         assert!(
             !flags.contains(
                 crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
             )
         );
-        assert!(!flags.contains(crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
+    }
+
+    #[test]
+    fn reconstructed_kitty_keys_preserve_repeat_and_release_kinds() {
+        assert_eq!(
+            parse_fragmented_escape_sequence("[49;9:2u"),
+            Some(Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('1'),
+                KeyModifiers::SUPER,
+                crossterm::event::KeyEventKind::Repeat,
+            )))
+        );
+        assert_eq!(
+            parse_fragmented_escape_sequence("[49;9:3u"),
+            Some(Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('1'),
+                KeyModifiers::SUPER,
+                crossterm::event::KeyEventKind::Release,
+            )))
+        );
+    }
+
+    #[test]
+    fn reconstructs_fragmented_sgr_mouse_events() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        assert_eq!(
+            parse_fragmented_escape_sequence("[<0;20;10M"),
+            Some(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 19,
+                row: 9,
+                modifiers: KeyModifiers::NONE,
+            }))
+        );
+        assert_eq!(
+            parse_fragmented_escape_sequence("[<0;20;10m"),
+            Some(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: 19,
+                row: 9,
+                modifiers: KeyModifiers::NONE,
+            }))
+        );
+    }
+
+    #[test]
+    fn dispatches_key_presses_and_repeats_but_not_releases() {
+        assert!(should_dispatch_key(crossterm::event::KeyEventKind::Press));
+        assert!(should_dispatch_key(crossterm::event::KeyEventKind::Repeat));
+        assert!(!should_dispatch_key(
+            crossterm::event::KeyEventKind::Release
+        ));
+    }
+
+    #[test]
+    fn coalesces_mouse_motion_without_dropping_button_boundaries() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let mouse = |kind, column| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let mut queue = VecDeque::new();
+        push_coalesced_terminal_event(
+            &mut queue,
+            mouse(MouseEventKind::Down(MouseButton::Left), 1),
+        );
+        push_coalesced_terminal_event(
+            &mut queue,
+            mouse(MouseEventKind::Drag(MouseButton::Left), 2),
+        );
+        push_coalesced_terminal_event(
+            &mut queue,
+            mouse(MouseEventKind::Drag(MouseButton::Left), 8),
+        );
+        push_coalesced_terminal_event(&mut queue, mouse(MouseEventKind::Up(MouseButton::Left), 8));
+
+        assert_eq!(queue.len(), 3);
+        assert!(matches!(
+            queue[0].event,
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                ..
+            })
+        ));
+        assert!(matches!(
+            queue[1].event,
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: 8,
+                ..
+            })
+        ));
+        assert!(matches!(
+            queue[2].event,
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn coalesces_adjacent_scrolls_but_not_across_key_events() {
+        use crossterm::event::MouseEventKind;
+
+        let scroll = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 3,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        });
+        let mut queue = VecDeque::new();
+        push_coalesced_terminal_event(&mut queue, scroll.clone());
+        push_coalesced_terminal_event(&mut queue, scroll.clone());
+        push_coalesced_terminal_event(
+            &mut queue,
+            Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+        );
+        push_coalesced_terminal_event(&mut queue, scroll);
+
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue[0].repetitions, 2);
+        assert_eq!(queue[1].repetitions, 1);
+        assert_eq!(queue[2].repetitions, 1);
+    }
+
+    #[test]
+    fn popup_close_suppresses_only_the_closing_keys_tail() {
+        let now = Instant::now();
+        let closing_key = KeyEvent::new_with_kind(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+            crossterm::event::KeyEventKind::Press,
+        );
+        let mut tail = Some(PopupKeyTail {
+            key: closing_key,
+            expires_at: now + POPUP_KEY_TAIL_TIMEOUT,
+        });
+
+        assert!(suppress_popup_key_tail(
+            &mut tail,
+            KeyEvent::new_with_kind(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+                crossterm::event::KeyEventKind::Repeat,
+            ),
+            now,
+        ));
+        assert!(!suppress_popup_key_tail(
+            &mut tail,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            now,
+        ));
+        assert!(tail.is_none());
+    }
+
+    #[test]
+    fn popup_close_release_clears_the_tail() {
+        let now = Instant::now();
+        let mut tail = Some(PopupKeyTail {
+            key: KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            expires_at: now + POPUP_KEY_TAIL_TIMEOUT,
+        });
+
+        assert!(suppress_popup_key_tail(
+            &mut tail,
+            KeyEvent::new_with_kind(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+                crossterm::event::KeyEventKind::Release,
+            ),
+            now,
+        ));
+        assert!(tail.is_none());
     }
 
     #[test]
@@ -7882,21 +8294,28 @@ mod terminal_mouse_tests {
 fn setup_terminal() -> Result<(Term, bool)> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
+    // The capability probe reads terminal responses. Run it before enabling
+    // focus and mouse reporting so their control sequences cannot interleave
+    // with the probe response.
+    let keyboard_enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+
     execute!(
         stdout,
         EnterAlternateScreen,
-        EnableMouseCaptureWithoutHover,
-        crossterm::event::EnableFocusChange,
         crossterm::event::EnableBracketedPaste,
         cursor::Hide
     )?;
-    let keyboard_enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
     if keyboard_enhanced {
         execute!(
             stdout,
             crossterm::event::PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
         )?;
     }
+    execute!(
+        stdout,
+        EnableMouseCaptureWithoutHover,
+        crossterm::event::EnableFocusChange
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok((terminal, keyboard_enhanced))

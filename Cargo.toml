@@ -10,9 +10,9 @@ license = "MIT"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-crossterm = { version = "0.28", features = ["event-stream"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
 dirs = "6"
-ratatui = "0.29"
+ratatui = "0.30.2"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1"
@@ -37,7 +37,7 @@ tree-sitter-css = "0.23"
 tree-sitter-html = "0.23"
 tree-sitter-md = "0.3"
 unicode-width = "0.2"
-tui-textarea = { version = "0.7", features = ["crossterm"] }
+tui-textarea = { package = "ratatui-textarea", version = "0.9.2", features = ["crossterm"] }
 textwrap = "0.16.2"
 
 [profile.release]
