@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.26] - 2026-07-23
+
+### Bug Fixes
+
+- Preserve terminal text input when enabling keyboard enhancements by @Blankeos
+
 ## [0.0.25] - 2026-07-22
 
 ### Bug Fixes
