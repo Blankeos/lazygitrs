@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.27] - 2026-07-23
+
+### Bug Fixes
+
+- Handle fragmented escape sequences and suppress command modifiers by @Blankeos
+
+### Performance
+
+- Optimize async diff loading and commit detail fetching by @Blankeos
+
 ## [0.0.26] - 2026-07-23
 
 ### Bug Fixes
