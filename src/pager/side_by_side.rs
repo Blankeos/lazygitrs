@@ -606,8 +606,6 @@ impl DiffViewState {
             let mut hunk_line_offsets = Vec::new();
 
             for (section_idx, (file_name, file_diff)) in file_diffs.iter().enumerate() {
-                let (old, new) = parse_unified_diff(file_diff);
-
                 lines.push(DiffLine {
                     old_line: None,
                     new_line: None,
@@ -632,9 +630,14 @@ impl DiffViewState {
                     hunk_line_offsets.push((section_start + idx, old_off, new_off));
                 }
 
+                // A commit preview can span dozens of files. Eagerly running
+                // tree-sitter over every section delays the first visible
+                // frame even though most sections are off-screen. Keep the
+                // structural diff ready immediately; change coloring still
+                // applies and single-file previews retain syntax highlighting.
                 sections.push(FileSection {
-                    old_highlighter: FileHighlighter::new(&old, file_name),
-                    new_highlighter: FileHighlighter::new(&new, file_name),
+                    old_highlighter: FileHighlighter::default(),
+                    new_highlighter: FileHighlighter::default(),
                 });
             }
 

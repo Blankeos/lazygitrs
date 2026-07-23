@@ -80,7 +80,7 @@ fn enter_branch_commits(gui: &mut Gui) -> Result<()> {
         let commits = gui.git.load_commits_for_branch(&name, 300)?;
         {
             let mut model = gui.model.lock().unwrap();
-            model.sub_commits = commits;
+            model.set_sub_commits(commits);
         }
         gui.branch_commits_name = name;
 

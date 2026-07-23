@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::config::keybindings::parse_key;
 use crate::gui::modes::diff_mode::{DiffModeFocus, DiffModeSelector};
 use crate::gui::popup::{HelpEntry, HelpSection, MenuItem, PopupState};
-use crate::gui::{DiffPayload, DiffResult, Gui, textarea_input};
+use crate::gui::{DiffPayload, Gui, textarea_input};
 use crate::model::FileChangeStatus;
 use crate::os::platform::Platform;
 use crate::pager::side_by_side::{DiffPanelLayout, DiffViewState};
@@ -691,7 +691,7 @@ fn update_diff_mode_tree(gui: &mut Gui) {
 }
 
 /// Called from the main loop to request diff loading for the currently selected file in diff mode.
-/// Spawns a background thread using the shared diff_tx/diff_generation infrastructure.
+/// Queues the request on the shared latest-only diff worker.
 pub fn maybe_request_diff(gui: &mut Gui, generation: u64, diff_key: String) {
     if !gui.diff_mode.has_both_refs() || gui.diff_mode.diff_files.is_empty() {
         gui.diff_loading = false;
@@ -714,7 +714,6 @@ pub fn maybe_request_diff(gui: &mut Gui, generation: u64, diff_key: String) {
     };
 
     let git = Arc::clone(&gui.git);
-    let tx = gui.diff_tx.clone();
     let gen_counter = Arc::clone(&gui.diff_generation);
 
     if let Some(idx) = file_idx {
@@ -727,23 +726,15 @@ pub fn maybe_request_diff(gui: &mut Gui, generation: u64, diff_key: String) {
         let name = file.name.clone();
         let current_path = file.current_path().to_string();
 
-        std::thread::spawn(move || {
-            if gen_counter.load(Ordering::Relaxed) != generation {
-                return;
-            }
-            let payload = match git.diff_refs_file(&ref_a, &ref_b, &name) {
+        gui.queue_diff_job(generation, diff_key, move || {
+            match git.diff_refs_file(&ref_a, &ref_b, &name) {
                 Ok(diff) if diff.is_empty() => DiffPayload::Empty,
                 Ok(diff) => {
                     let exists = git.repo_path().join(&current_path).exists();
                     DiffPayload::Parsed(DiffViewState::parse_diff_output(&name, &diff, 4, exists))
                 }
                 Err(_) => DiffPayload::Empty,
-            };
-            let _ = tx.send(DiffResult {
-                generation,
-                diff_key,
-                payload,
-            });
+            }
         });
     } else if gui.diff_mode.show_tree {
         // Directory node: combined diff of all child files
@@ -757,14 +748,11 @@ pub fn maybe_request_diff(gui: &mut Gui, generation: u64, diff_key: String) {
                     .collect();
                 let dir_name = node.name.clone();
 
-                std::thread::spawn(move || {
-                    if gen_counter.load(Ordering::Relaxed) != generation {
-                        return;
-                    }
+                gui.queue_diff_job(generation, diff_key, move || {
                     let mut combined_diff = String::new();
                     for name in &child_names {
                         if gen_counter.load(Ordering::Relaxed) != generation {
-                            return;
+                            return DiffPayload::Empty;
                         }
                         let diff = git.diff_refs_file(&ref_a, &ref_b, name).unwrap_or_default();
                         if !diff.is_empty() {
@@ -784,11 +772,7 @@ pub fn maybe_request_diff(gui: &mut Gui, generation: u64, diff_key: String) {
                             true,
                         ))
                     };
-                    let _ = tx.send(DiffResult {
-                        generation,
-                        diff_key,
-                        payload,
-                    });
+                    payload
                 });
             } else {
                 gui.diff_loading = false;

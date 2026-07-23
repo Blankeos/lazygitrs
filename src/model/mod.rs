@@ -32,6 +32,9 @@ pub struct Model {
     pub files: Vec<File>,
     pub branches: Vec<Branch>,
     pub commits: Vec<Commit>,
+    /// Changes whenever `commits` is replaced or extended. Used to cache the
+    /// expensive commit graph layout between terminal frames.
+    pub commits_revision: u64,
     pub stash_entries: Vec<StashEntry>,
     pub remotes: Vec<Remote>,
     pub tags: Vec<Tag>,
@@ -39,6 +42,8 @@ pub struct Model {
     pub submodules: Vec<Submodule>,
     pub reflog_commits: Vec<Commit>,
     pub sub_commits: Vec<Commit>,
+    /// Changes whenever `sub_commits` is replaced or cleared.
+    pub sub_commits_revision: u64,
     pub sub_remote_branches: Vec<RemoteBranch>,
     pub commit_files: Vec<CommitFile>,
     pub authors: HashMap<String, Author>,
@@ -67,11 +72,40 @@ impl Model {
     /// Wholesale-replace the model with a freshly-loaded one, but keep the
     /// previous file display order via `set_files`.
     pub fn replace_keeping_file_order(&mut self, mut new_model: Model) {
+        let commits_revision = self.commits_revision.wrapping_add(1);
+        let sub_commits_revision = self.sub_commits_revision.wrapping_add(1);
         let prev_files = std::mem::take(&mut self.files);
         let new_files = std::mem::take(&mut new_model.files);
         *self = new_model;
+        self.commits_revision = commits_revision;
+        self.sub_commits_revision = sub_commits_revision;
         self.files = prev_files;
         self.set_files(new_files);
+    }
+
+    pub fn set_commits(&mut self, commits: Vec<Commit>) {
+        self.commits = commits;
+        self.commits_revision = self.commits_revision.wrapping_add(1);
+    }
+
+    pub fn extend_commits(&mut self, commits: impl IntoIterator<Item = Commit>) {
+        let previous_len = self.commits.len();
+        self.commits.extend(commits);
+        if self.commits.len() != previous_len {
+            self.commits_revision = self.commits_revision.wrapping_add(1);
+        }
+    }
+
+    pub fn set_sub_commits(&mut self, commits: Vec<Commit>) {
+        self.sub_commits = commits;
+        self.sub_commits_revision = self.sub_commits_revision.wrapping_add(1);
+    }
+
+    pub fn clear_sub_commits(&mut self) {
+        if !self.sub_commits.is_empty() {
+            self.sub_commits.clear();
+            self.sub_commits_revision = self.sub_commits_revision.wrapping_add(1);
+        }
     }
 
     pub fn set_files(&mut self, new_files: Vec<File>) {
@@ -129,4 +163,46 @@ pub enum FileChangeStatus {
     Renamed,
     Copied,
     Unmerged,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::commit::{CommitStatus, Divergence};
+
+    fn commit(hash: &str) -> Commit {
+        Commit {
+            hash: hash.to_string(),
+            name: hash.to_string(),
+            status: CommitStatus::Pushed,
+            action: String::new(),
+            tags: Vec::new(),
+            refs: Vec::new(),
+            extra_info: String::new(),
+            author_name: String::new(),
+            author_email: String::new(),
+            unix_timestamp: 0,
+            parents: Vec::new(),
+            divergence: Divergence::None,
+        }
+    }
+
+    #[test]
+    fn commit_mutators_advance_revisions() {
+        let mut model = Model::default();
+
+        model.set_commits(vec![commit("one")]);
+        assert_eq!(model.commits_revision, 1);
+        model.extend_commits([commit("two")]);
+        assert_eq!(model.commits_revision, 2);
+        model.extend_commits(Vec::new());
+        assert_eq!(model.commits_revision, 2);
+
+        model.set_sub_commits(vec![commit("sub")]);
+        assert_eq!(model.sub_commits_revision, 1);
+        model.clear_sub_commits();
+        assert_eq!(model.sub_commits_revision, 2);
+        model.clear_sub_commits();
+        assert_eq!(model.sub_commits_revision, 2);
+    }
 }

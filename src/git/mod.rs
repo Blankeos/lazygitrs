@@ -174,7 +174,7 @@ impl GitCommands {
 
             model.files = h_files.join().unwrap()?;
             model.branches = h_branches.join().unwrap()?;
-            model.commits = h_commits.join().unwrap()?;
+            model.set_commits(h_commits.join().unwrap()?);
             model.stash_entries = h_stash.join().unwrap()?;
             model.remotes = h_remotes.join().unwrap()?;
             model.tags = h_tags.join().unwrap()?;

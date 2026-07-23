@@ -14,7 +14,13 @@ impl GitCommands {
     /// Renames need both old and new pathspecs for Git to show the rename as a
     /// single file rather than as independent delete/add halves.
     pub fn diff_file_paths(&self, paths: &[&str]) -> Result<String> {
-        let mut args = vec!["diff", "--color=never", "--"];
+        let mut args = vec![
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--color=never",
+            "--",
+        ];
         args.extend(paths.iter().copied());
         let result = self.git().args(&args).run_expecting_success()?;
         Ok(result.stdout)
@@ -28,7 +34,14 @@ impl GitCommands {
 
     /// Get staged diff for one logical file using one or more pathspecs.
     pub fn diff_file_staged_paths(&self, paths: &[&str]) -> Result<String> {
-        let mut args = vec!["diff", "--cached", "--color=never", "--"];
+        let mut args = vec![
+            "diff",
+            "--cached",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--color=never",
+            "--",
+        ];
         args.extend(paths.iter().copied());
         let result = self.git().args(&args).run_expecting_success()?;
         Ok(result.stdout)
@@ -56,7 +69,14 @@ impl GitCommands {
     pub fn diff_commit(&self, hash: &str) -> Result<String> {
         let result = self
             .git()
-            .args(&["show", "--color=never", "--format=", hash])
+            .args(&[
+                "show",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--color=never",
+                "--format=",
+                hash,
+            ])
             .run_expecting_success()?;
         Ok(result.stdout)
     }
@@ -217,7 +237,15 @@ impl GitCommands {
     pub fn diff_commit_file(&self, hash: &str, path: &str) -> Result<String> {
         let parent = format!("{}^1", hash);
         let paths = diff_paths_for_label(path);
-        let mut args = vec!["diff", "--color=never", parent.as_str(), hash, "--"];
+        let mut args = vec![
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--color=never",
+            parent.as_str(),
+            hash,
+            "--",
+        ];
         args.extend(paths.iter().copied());
         let result = self.git().args(&args).run();
         match result {
@@ -228,6 +256,8 @@ impl GitCommands {
                     .git()
                     .args(&[
                         "show",
+                        "--no-ext-diff",
+                        "--no-textconv",
                         "--color=never",
                         "--format=",
                         hash,
@@ -334,7 +364,15 @@ impl GitCommands {
     /// Get the diff of a single file between two refs (for diff/compare mode).
     pub fn diff_refs_file(&self, ref_a: &str, ref_b: &str, path: &str) -> Result<String> {
         let paths = diff_paths_for_label(path);
-        let mut args = vec!["diff", "--color=never", ref_a, ref_b, "--"];
+        let mut args = vec![
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--color=never",
+            ref_a,
+            ref_b,
+            "--",
+        ];
         args.extend(paths.iter().copied());
         let result = self.git().args(&args).run_expecting_success()?;
         Ok(result.stdout)

@@ -7,7 +7,7 @@ pub mod presentation;
 pub mod scroll;
 pub mod views;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Stdout, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -69,6 +69,11 @@ pub type Term = Terminal<CrosstermBackend<Stdout>>;
 const EVENT_DRAIN_LIMIT: usize = 256;
 const ESCAPE_CONTINUATION_TIMEOUT: Duration = Duration::from_millis(25);
 const MAX_ESCAPE_SEQUENCE_EVENTS: usize = 256;
+const COMMIT_DETAILS_DEBOUNCE: Duration = Duration::from_millis(120);
+const MAX_CONCURRENT_DIFF_JOBS: usize = 2;
+const DIFF_PREVIEW_CACHE_ENTRIES: usize = 8;
+const DIFF_PREVIEW_CACHE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_CACHED_DIFF_BYTES: usize = 8 * 1024 * 1024;
 
 fn plain_char_key(key: KeyEvent, expected: char) -> bool {
     let modifiers = if expected.is_uppercase() {
@@ -298,6 +303,193 @@ pub(crate) enum DiffPayload {
     Empty,
 }
 
+struct DiffJob {
+    generation: u64,
+    diff_key: String,
+    load: Box<dyn FnOnce() -> DiffPayload + Send>,
+}
+
+enum DiffSchedulerEvent {
+    Job(DiffJob),
+    Complete,
+}
+
+struct CachedDiffPreview {
+    key: String,
+    view: DiffViewState,
+    estimated_bytes: usize,
+}
+
+#[derive(Default)]
+struct DiffPreviewCache {
+    entries: VecDeque<CachedDiffPreview>,
+    estimated_bytes: usize,
+}
+
+impl DiffPreviewCache {
+    fn insert(&mut self, key: String, view: DiffViewState) {
+        self.remove(&key);
+        let estimated_bytes = estimate_diff_view_bytes(&view);
+        if estimated_bytes > MAX_CACHED_DIFF_BYTES {
+            return;
+        }
+
+        while self.entries.len() >= DIFF_PREVIEW_CACHE_ENTRIES
+            || self.estimated_bytes.saturating_add(estimated_bytes) > DIFF_PREVIEW_CACHE_BYTES
+        {
+            let Some(evicted) = self.entries.pop_front() else {
+                break;
+            };
+            self.estimated_bytes = self.estimated_bytes.saturating_sub(evicted.estimated_bytes);
+        }
+
+        self.estimated_bytes = self.estimated_bytes.saturating_add(estimated_bytes);
+        self.entries.push_back(CachedDiffPreview {
+            key,
+            view,
+            estimated_bytes,
+        });
+    }
+
+    fn take(&mut self, key: &str) -> Option<DiffViewState> {
+        let index = self.entries.iter().position(|entry| entry.key == key)?;
+        let entry = self.entries.remove(index)?;
+        self.estimated_bytes = self.estimated_bytes.saturating_sub(entry.estimated_bytes);
+        Some(entry.view)
+    }
+
+    fn remove(&mut self, key: &str) {
+        if let Some(index) = self.entries.iter().position(|entry| entry.key == key) {
+            if let Some(entry) = self.entries.remove(index) {
+                self.estimated_bytes = self.estimated_bytes.saturating_sub(entry.estimated_bytes);
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.estimated_bytes = 0;
+    }
+}
+
+fn estimate_diff_view_bytes(view: &DiffViewState) -> usize {
+    let line_bytes = view.lines.iter().fold(0usize, |total, line| {
+        let text_bytes = line
+            .old_line
+            .as_ref()
+            .map(|(_, text)| text.len())
+            .unwrap_or(0)
+            .saturating_add(
+                line.new_line
+                    .as_ref()
+                    .map(|(_, text)| text.len())
+                    .unwrap_or(0),
+            );
+        let segment_bytes = line
+            .old_segments
+            .iter()
+            .chain(line.new_segments.iter())
+            .flatten()
+            .map(|segment| segment.text.len())
+            .sum::<usize>();
+        total
+            .saturating_add(text_bytes)
+            .saturating_add(segment_bytes)
+    });
+
+    view.filename
+        .len()
+        .saturating_add(view.old_content.len())
+        .saturating_add(view.new_content.len())
+        .saturating_add(line_bytes)
+        .saturating_mul(2)
+}
+
+type BackgroundJob = Box<dyn FnOnce() + Send>;
+
+fn spawn_diff_scheduler(
+    rx: mpsc::Receiver<DiffSchedulerEvent>,
+    scheduler_tx: mpsc::Sender<DiffSchedulerEvent>,
+    result_tx: mpsc::Sender<DiffResult>,
+    generation: Arc<AtomicU64>,
+) {
+    std::thread::spawn(move || {
+        let mut active_jobs = 0usize;
+        let mut pending_job: Option<DiffJob> = None;
+
+        while let Ok(event) = rx.recv() {
+            match event {
+                DiffSchedulerEvent::Job(job) => {
+                    if generation.load(Ordering::Relaxed) != job.generation {
+                        continue;
+                    }
+                    if active_jobs < MAX_CONCURRENT_DIFF_JOBS {
+                        active_jobs += 1;
+                        spawn_diff_job(
+                            job,
+                            result_tx.clone(),
+                            scheduler_tx.clone(),
+                            Arc::clone(&generation),
+                        );
+                    } else {
+                        pending_job = Some(job);
+                    }
+                }
+                DiffSchedulerEvent::Complete => {
+                    active_jobs = active_jobs.saturating_sub(1);
+                    if let Some(job) = pending_job.take() {
+                        if generation.load(Ordering::Relaxed) == job.generation {
+                            active_jobs += 1;
+                            spawn_diff_job(
+                                job,
+                                result_tx.clone(),
+                                scheduler_tx.clone(),
+                                Arc::clone(&generation),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn spawn_diff_job(
+    job: DiffJob,
+    result_tx: mpsc::Sender<DiffResult>,
+    scheduler_tx: mpsc::Sender<DiffSchedulerEvent>,
+    generation: Arc<AtomicU64>,
+) {
+    std::thread::spawn(move || {
+        if generation.load(Ordering::Relaxed) == job.generation {
+            let payload = (job.load)();
+            if generation.load(Ordering::Relaxed) == job.generation {
+                let _ = result_tx.send(DiffResult {
+                    generation: job.generation,
+                    diff_key: job.diff_key,
+                    payload,
+                });
+            }
+        }
+        let _ = scheduler_tx.send(DiffSchedulerEvent::Complete);
+    });
+}
+
+fn spawn_latest_background_worker(rx: mpsc::Receiver<BackgroundJob>) {
+    std::thread::spawn(move || {
+        while let Ok(mut job) = rx.recv() {
+            loop {
+                match rx.recv_timeout(COMMIT_DETAILS_DEBOUNCE) {
+                    Ok(newer_job) => job = newer_job,
+                    Err(mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                }
+            }
+            job();
+        }
+    });
+}
+
 struct AiCommitJob {
     generation: u64,
     cancel: Arc<AtomicBool>,
@@ -324,6 +516,8 @@ pub struct Gui {
     pub layout: LayoutState,
     pub popup: PopupState,
     pub diff_view: DiffViewState,
+    /// Cached graph layouts used to render only the visible commit rows.
+    commit_list_cache: presentation::commits::CommitListCache,
     pub command_log: crate::os::cmd::CommandLog,
     pub show_command_log: bool,
     pub should_quit: bool,
@@ -355,8 +549,11 @@ pub struct Gui {
     pub(crate) diff_generation: Arc<AtomicU64>,
     /// Sender for background diff loading.
     diff_rx: mpsc::Receiver<DiffResult>,
-    /// Keep sender around so we can clone it for background threads.
-    pub(crate) diff_tx: mpsc::Sender<DiffResult>,
+    /// Bounded scheduler: starts immediately, caps parallelism, and retains
+    /// only the newest overflow request while navigation is rapid.
+    diff_scheduler_tx: mpsc::Sender<DiffSchedulerEvent>,
+    /// Recently completed parsed previews, moved in and out for instant revisits.
+    diff_preview_cache: DiffPreviewCache,
     /// Receiver for AI commit message generation results.
     ai_commit_rx: mpsc::Receiver<AiCommitResult>,
     /// Sender cloned into background threads for AI commit generation.
@@ -461,14 +658,15 @@ pub struct Gui {
     /// by background threads so the render path never blocks on git.
     pub commit_stats_cache:
         std::sync::Arc<std::sync::Mutex<HashMap<String, crate::model::commit::CommitStat>>>,
-    /// Set of commit hashes with an in-flight stat fetch, so we don't spawn
-    /// duplicate workers on each frame.
-    pub commit_stats_inflight: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
     /// Cache of full commit messages (subject + body) per hash, fetched
     /// asynchronously so the details panel can render the full description.
     pub commit_messages_cache: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
-    /// In-flight guard for full-message fetches.
-    pub commit_messages_inflight: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
+    /// Latest-only queue for commit metadata shown below the commit list.
+    commit_details_job_tx: mpsc::Sender<BackgroundJob>,
+    /// Invalidates commit-detail jobs when selection changes while one is running.
+    commit_details_generation: Arc<AtomicU64>,
+    /// Commit hash most recently considered for details loading.
+    last_commit_details_key: String,
     /// Vertical scroll offset (rows) for the commit-details box.  Reset
     /// whenever the selected commit hash changes.
     pub commit_details_scroll: u16,
@@ -517,6 +715,8 @@ impl Gui {
 
     pub fn new(config: AppConfig, git: GitCommands) -> Result<Self> {
         let (diff_tx, diff_rx) = mpsc::channel();
+        let (diff_scheduler_tx, diff_scheduler_rx) = mpsc::channel();
+        let (commit_details_job_tx, commit_details_job_rx) = mpsc::channel();
         let (ai_commit_tx, ai_commit_rx) = mpsc::channel();
         let (commit_page_tx, commit_page_rx) = mpsc::channel();
         let (remote_op_tx, remote_op_rx) = mpsc::channel();
@@ -545,6 +745,15 @@ impl Gui {
         // background and streams in as it becomes ready, so the UI can
         // paint immediately and waterfall-display results.
         let git = Arc::new(git);
+        let diff_generation = Arc::new(AtomicU64::new(0));
+        let commit_details_generation = Arc::new(AtomicU64::new(0));
+        spawn_diff_scheduler(
+            diff_scheduler_rx,
+            diff_scheduler_tx.clone(),
+            diff_tx.clone(),
+            Arc::clone(&diff_generation),
+        );
+        spawn_latest_background_worker(commit_details_job_rx);
         let mut model = Model::default();
         model.repo_name = git.repo_name();
         model.head_hash = git.head_hash().unwrap_or_default();
@@ -578,6 +787,7 @@ impl Gui {
                 dv.view_layout = diff_view_layout;
                 dv
             },
+            commit_list_cache: presentation::commits::CommitListCache::default(),
             command_log,
             show_command_log: show_command_log_default,
             should_quit: false,
@@ -596,9 +806,10 @@ impl Gui {
             diff_loading: false,
             diff_loading_since: None,
             last_diff_key: String::new(),
-            diff_generation: Arc::new(AtomicU64::new(0)),
+            diff_generation,
             diff_rx,
-            diff_tx,
+            diff_scheduler_tx,
+            diff_preview_cache: DiffPreviewCache::default(),
             ai_commit_rx,
             ai_commit_tx,
             commit_page_rx,
@@ -645,9 +856,10 @@ impl Gui {
             commit_history_draft: String::new(),
             current_theme_index,
             commit_stats_cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-            commit_stats_inflight: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
             commit_messages_cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-            commit_messages_inflight: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
+            commit_details_job_tx,
+            commit_details_generation,
+            last_commit_details_key: String::new(),
             commit_details_scroll: 0,
             commit_details_scroll_hash: String::new(),
             show_commit_details,
@@ -692,7 +904,7 @@ impl Gui {
                         ModelPart::Branches(v) => model.branches = v,
                         ModelPart::Commits(v) => {
                             self.commit_history_complete = v.len() < DEFAULT_COMMIT_LIMIT;
-                            model.commits = v;
+                            model.set_commits(v);
                         }
                         ModelPart::Stash(v) => model.stash_entries = v,
                         ModelPart::Remotes(v) => model.remotes = v,
@@ -756,6 +968,9 @@ impl Gui {
 
             // Check for completed background diff results
             self.receive_diff_results();
+
+            // Queue details for only the commit where navigation has settled.
+            self.maybe_request_commit_details();
 
             // Check for AI commit message generation results
             self.receive_ai_commit_results();
@@ -875,6 +1090,7 @@ impl Gui {
                         &self.config,
                         &theme,
                         &mut self.diff_view,
+                        &mut self.commit_list_cache,
                         self.screen_mode,
                         self.show_file_tree,
                         &self.file_tree_nodes,
@@ -908,10 +1124,7 @@ impl Gui {
                                 .map(|t| t.elapsed() >= std::time::Duration::from_millis(50))
                                 .unwrap_or(false),
                         &self.commit_stats_cache,
-                        &self.commit_stats_inflight,
                         &self.commit_messages_cache,
-                        &self.commit_messages_inflight,
-                        &self.git,
                         &mut self.commit_details_scroll,
                         &mut self.commit_details_scroll_hash,
                         self.show_commit_details,
@@ -1058,7 +1271,7 @@ impl Gui {
         let current_gen = self.diff_generation.load(Ordering::Relaxed);
         while let Ok(result) = self.diff_rx.try_recv() {
             // Discard stale results from older generations
-            if result.generation != current_gen {
+            if result.generation != current_gen || result.diff_key != self.last_diff_key {
                 continue;
             }
             self.diff_loading = false;
@@ -1086,6 +1299,254 @@ impl Gui {
                 }
             }
         }
+    }
+
+    fn current_diff_key(&self) -> String {
+        if self.diff_mode.active {
+            let item_key = if self.diff_mode.show_tree {
+                self.diff_mode
+                    .tree_nodes
+                    .get(self.diff_mode.diff_files_selected)
+                    .map(|node| {
+                        node.file_index
+                            .and_then(|index| self.diff_mode.diff_files.get(index))
+                            .map(|file| format!("file:{}", file.name))
+                            .unwrap_or_else(|| format!("dir:{}", node.path))
+                    })
+                    .unwrap_or_else(|| "none".to_string())
+            } else {
+                self.diff_mode
+                    .diff_files
+                    .get(self.diff_mode.diff_files_selected)
+                    .map(|file| format!("file:{}", file.name))
+                    .unwrap_or_else(|| "none".to_string())
+            };
+            return format!(
+                "DiffMode:{}..{}:{}",
+                self.diff_mode.ref_a, self.diff_mode.ref_b, item_key
+            );
+        }
+
+        let active = self.context_mgr.active();
+        let selected = self.context_mgr.selected_active();
+        let model = self.model.lock().unwrap();
+        match active {
+            ContextId::Files => {
+                if self.show_file_tree {
+                    self.file_tree_nodes
+                        .get(selected)
+                        .map(|node| {
+                            node.file_index
+                                .and_then(|index| model.files.get(index))
+                                .map(|file| format!("Files:file:{}", file.name))
+                                .unwrap_or_else(|| format!("Files:dir:{}", node.path))
+                        })
+                        .unwrap_or_else(|| "Files:none".to_string())
+                } else {
+                    model
+                        .files
+                        .get(selected)
+                        .map(|file| format!("Files:file:{}", file.name))
+                        .unwrap_or_else(|| "Files:none".to_string())
+                }
+            }
+            ContextId::Commits => model
+                .commits
+                .get(selected)
+                .map(|commit| format!("Commits:{}", commit.hash))
+                .unwrap_or_else(|| "Commits:none".to_string()),
+            ContextId::Reflog => model
+                .reflog_commits
+                .get(selected)
+                .map(|commit| format!("Reflog:{}", commit.hash))
+                .unwrap_or_else(|| "Reflog:none".to_string()),
+            ContextId::Stash => model
+                .stash_entries
+                .get(selected)
+                .map(|entry| format!("Stash:{}", entry.hash))
+                .unwrap_or_else(|| "Stash:none".to_string()),
+            ContextId::BranchCommits => model
+                .sub_commits
+                .get(selected)
+                .map(|commit| format!("BranchCommits:{}", commit.hash))
+                .unwrap_or_else(|| "BranchCommits:none".to_string()),
+            ContextId::CommitFiles | ContextId::StashFiles | ContextId::BranchCommitFiles => {
+                let prefix = format!("{:?}:{}", active, self.commit_files_hash);
+                if self.show_commit_file_tree {
+                    self.commit_file_tree_nodes
+                        .get(selected)
+                        .map(|node| {
+                            node.file_index
+                                .and_then(|index| model.commit_files.get(index))
+                                .map(|file| format!("{}:file:{}", prefix, file.name))
+                                .unwrap_or_else(|| format!("{}:dir:{}", prefix, node.path))
+                        })
+                        .unwrap_or_else(|| format!("{}:none", prefix))
+                } else {
+                    model
+                        .commit_files
+                        .get(selected)
+                        .map(|file| format!("{}:file:{}", prefix, file.name))
+                        .unwrap_or_else(|| format!("{}:none", prefix))
+                }
+            }
+            _ => format!("{:?}:{}", active, selected),
+        }
+    }
+
+    fn begin_diff_request(&mut self, diff_key: String) -> Option<u64> {
+        if diff_key == self.last_diff_key && !self.needs_diff_refresh {
+            return None;
+        }
+
+        let selection_changed = diff_key != self.last_diff_key;
+        if selection_changed {
+            self.cache_current_diff_for_revisit();
+        }
+        self.last_diff_key = diff_key.clone();
+        self.needs_diff_refresh = false;
+
+        let generation = self.diff_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        if selection_changed {
+            if let Some(mut cached) = self.diff_preview_cache.take(&diff_key) {
+                cached.wrap = self.diff_view.wrap;
+                cached.view_layout = self.diff_view.view_layout;
+                self.diff_view = cached;
+                self.diff_loading = false;
+                self.diff_loading_since = None;
+                return None;
+            }
+            self.diff_view.reset_keep_prefs();
+        }
+
+        self.diff_loading = false;
+        self.diff_loading_since = None;
+        Some(generation)
+    }
+
+    fn cache_current_diff_for_revisit(&mut self) {
+        if self.diff_loading || self.diff_view.is_empty() || self.last_diff_key.is_empty() {
+            return;
+        }
+
+        let mut replacement = DiffViewState::new();
+        replacement.wrap = self.diff_view.wrap;
+        replacement.view_layout = self.diff_view.view_layout;
+        let view = std::mem::replace(&mut self.diff_view, replacement);
+        self.diff_preview_cache
+            .insert(self.last_diff_key.clone(), view);
+    }
+
+    fn clear_diff_preview_cache(&mut self) {
+        self.diff_preview_cache.clear();
+    }
+
+    fn maybe_request_commit_details(&mut self) {
+        if !self.show_commit_details {
+            if !self.last_commit_details_key.is_empty() {
+                self.last_commit_details_key.clear();
+                self.commit_details_generation
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            return;
+        }
+
+        let active = self.context_mgr.active();
+        let selected = self.context_mgr.selected_active();
+        let hash = {
+            let model = self.model.lock().unwrap();
+            match active {
+                ContextId::Commits => model
+                    .commits
+                    .get(selected)
+                    .map(|commit| commit.hash.clone()),
+                ContextId::BranchCommits => model
+                    .sub_commits
+                    .get(selected)
+                    .map(|commit| commit.hash.clone()),
+                ContextId::Reflog => model
+                    .reflog_commits
+                    .get(selected)
+                    .map(|commit| commit.hash.clone()),
+                ContextId::CommitFiles | ContextId::StashFiles | ContextId::BranchCommitFiles => {
+                    (!self.commit_files_hash.is_empty()).then(|| self.commit_files_hash.clone())
+                }
+                _ => None,
+            }
+        };
+        let Some(hash) = hash else {
+            if !self.last_commit_details_key.is_empty() {
+                self.last_commit_details_key.clear();
+                self.commit_details_generation
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            return;
+        };
+
+        let details_key = format!("{:?}:{}", active, hash);
+        if details_key == self.last_commit_details_key {
+            return;
+        }
+        self.last_commit_details_key = details_key;
+        let generation = self
+            .commit_details_generation
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+
+        let stat_cached = self
+            .commit_stats_cache
+            .lock()
+            .map(|cache| cache.contains_key(&hash))
+            .unwrap_or(false);
+        let message_cached = self
+            .commit_messages_cache
+            .lock()
+            .map(|cache| cache.contains_key(&hash))
+            .unwrap_or(false);
+        if stat_cached && message_cached {
+            return;
+        }
+
+        let git = Arc::clone(&self.git);
+        let stat_cache = Arc::clone(&self.commit_stats_cache);
+        let message_cache = Arc::clone(&self.commit_messages_cache);
+        let generation_counter = Arc::clone(&self.commit_details_generation);
+        let _ = self.commit_details_job_tx.send(Box::new(move || {
+            if generation_counter.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            if !stat_cached {
+                if let Ok(stat) = git.commit_stat(&hash) {
+                    if let Ok(mut cache) = stat_cache.lock() {
+                        cache.insert(hash.clone(), stat);
+                    }
+                }
+            }
+
+            if generation_counter.load(Ordering::Relaxed) != generation {
+                return;
+            }
+            if !message_cached {
+                if let Ok(message) = git.commit_message_full(&hash) {
+                    if let Ok(mut cache) = message_cache.lock() {
+                        cache.insert(hash, message);
+                    }
+                }
+            }
+        }));
+    }
+
+    pub(crate) fn queue_diff_job<F>(&self, generation: u64, diff_key: String, load: F)
+    where
+        F: FnOnce() -> DiffPayload + Send + 'static,
+    {
+        let _ = self
+            .diff_scheduler_tx
+            .send(DiffSchedulerEvent::Job(DiffJob {
+                generation,
+                diff_key,
+                load: Box::new(load),
+            }));
     }
 
     /// Check for completed AI commit message generation results.
@@ -1201,9 +1662,11 @@ impl Gui {
                     let mut model = self.model.lock().unwrap();
                     let mut seen: HashSet<String> =
                         model.commits.iter().map(|c| c.hash.clone()).collect();
-                    model
-                        .commits
-                        .extend(commits.into_iter().filter(|c| seen.insert(c.hash.clone())));
+                    let new_commits: Vec<_> = commits
+                        .into_iter()
+                        .filter(|c| seen.insert(c.hash.clone()))
+                        .collect();
+                    model.extend_commits(new_commits);
                     self.commit_history_complete = page_len < DEFAULT_COMMIT_LIMIT;
                     self.context_mgr.clamp_selections(&model);
                 }
@@ -1593,21 +2056,10 @@ impl Gui {
 
         // Diff mode has its own diff loading
         if self.diff_mode.active {
-            let diff_key = format!("diffmode:{}", self.diff_mode.diff_files_selected);
-            if diff_key == self.last_diff_key && !self.needs_diff_refresh {
+            let diff_key = self.current_diff_key();
+            let Some(generation) = self.begin_diff_request(diff_key.clone()) else {
                 return;
-            }
-            let selection_changed = diff_key != self.last_diff_key;
-            self.last_diff_key = diff_key.clone();
-            self.needs_diff_refresh = false;
-
-            // Bump generation to invalidate any in-flight results
-            let generation = self.diff_generation.fetch_add(1, Ordering::Relaxed) + 1;
-
-            // Clear stale diff when selection changes
-            if selection_changed {
-                self.diff_view.reset_keep_prefs();
-            }
+            };
 
             self.diff_loading = true;
             self.diff_loading_since = Some(Instant::now());
@@ -1618,22 +2070,10 @@ impl Gui {
 
         let active = self.context_mgr.active();
         let selected = self.context_mgr.selected_active();
-        let diff_key = format!("{:?}:{}", active, selected);
-
-        if diff_key == self.last_diff_key && !self.needs_diff_refresh {
+        let diff_key = self.current_diff_key();
+        let Some(generation) = self.begin_diff_request(diff_key.clone()) else {
             return;
-        }
-        let selection_changed = diff_key != self.last_diff_key;
-        self.last_diff_key = diff_key.clone();
-        self.needs_diff_refresh = false;
-
-        // Bump generation to invalidate any in-flight results
-        let generation = self.diff_generation.fetch_add(1, Ordering::Relaxed) + 1;
-
-        // Clear stale diff when selection changes so user sees "Loading..." instead of old content
-        if selection_changed {
-            self.diff_view.reset_keep_prefs();
-        }
+        };
 
         let model = self.model.lock().unwrap();
         match active {
@@ -1657,15 +2097,10 @@ impl Gui {
                     drop(model);
 
                     let git = Arc::clone(&self.git);
-                    let tx = self.diff_tx.clone();
-                    let gen_counter = Arc::clone(&self.diff_generation);
 
                     self.diff_loading = true;
                     self.diff_loading_since = Some(Instant::now());
-                    std::thread::spawn(move || {
-                        if gen_counter.load(Ordering::Relaxed) != generation {
-                            return;
-                        }
+                    self.queue_diff_job(generation, diff_key, move || {
                         let path_refs: Vec<&str> = diff_paths.iter().map(String::as_str).collect();
                         let diff_result = if has_unstaged {
                             git.diff_file_paths(&path_refs)
@@ -1676,7 +2111,7 @@ impl Gui {
                         };
 
                         let exists = git.repo_path().join(&current_path).exists();
-                        let payload = match diff_result {
+                        match diff_result {
                             Ok(diff) if diff.is_empty() && !tracked => {
                                 match git.file_content(&current_path) {
                                     Ok(content) if !content.is_empty() => {
@@ -1696,12 +2131,7 @@ impl Gui {
                                 &name, &diff, 4, exists,
                             )),
                             Err(_) => DiffPayload::Empty,
-                        };
-                        let _ = tx.send(DiffResult {
-                            generation,
-                            diff_key,
-                            payload,
-                        });
+                        }
                     });
                 } else if self.show_file_tree {
                     // Directory node: show combined diff of all child files (async)
@@ -1725,21 +2155,17 @@ impl Gui {
                             drop(model);
 
                             let git = Arc::clone(&self.git);
-                            let tx = self.diff_tx.clone();
                             let gen_counter = Arc::clone(&self.diff_generation);
 
                             self.diff_loading = true;
                             self.diff_loading_since = Some(Instant::now());
-                            std::thread::spawn(move || {
-                                if gen_counter.load(Ordering::Relaxed) != generation {
-                                    return;
-                                }
+                            self.queue_diff_job(generation, diff_key, move || {
                                 let mut combined_diff = String::new();
                                 for (current_path, diff_paths, has_unstaged, has_staged, tracked) in
                                     &child_names
                                 {
                                     if gen_counter.load(Ordering::Relaxed) != generation {
-                                        return;
+                                        return DiffPayload::Empty;
                                     }
                                     let diff = if !tracked {
                                         // Untracked file: synthesize a unified diff from raw content
@@ -1779,11 +2205,7 @@ impl Gui {
                                         true,
                                     ))
                                 };
-                                let _ = tx.send(DiffResult {
-                                    generation,
-                                    diff_key,
-                                    payload,
-                                });
+                                payload
                             });
                         } else {
                             drop(model);
@@ -1805,28 +2227,18 @@ impl Gui {
                     drop(model);
 
                     let git = Arc::clone(&self.git);
-                    let tx = self.diff_tx.clone();
-                    let gen_counter = Arc::clone(&self.diff_generation);
 
                     self.diff_loading = true;
                     self.diff_loading_since = Some(Instant::now());
-                    std::thread::spawn(move || {
-                        if gen_counter.load(Ordering::Relaxed) != generation {
-                            return;
-                        }
-                        let payload = if let Ok(diff) = git.diff_commit(&hash) {
+                    self.queue_diff_job(generation, diff_key, move || {
+                        if let Ok(diff) = git.diff_commit(&hash) {
                             let filename = format!("commit:{}", &hash[..7.min(hash.len())]);
                             DiffPayload::Parsed(DiffViewState::parse_diff_output(
                                 &filename, &diff, 4, false,
                             ))
                         } else {
                             DiffPayload::Empty
-                        };
-                        let _ = tx.send(DiffResult {
-                            generation,
-                            diff_key,
-                            payload,
-                        });
+                        }
                     });
                 }
             }
@@ -1837,28 +2249,18 @@ impl Gui {
                     drop(model);
 
                     let git = Arc::clone(&self.git);
-                    let tx = self.diff_tx.clone();
-                    let gen_counter = Arc::clone(&self.diff_generation);
 
                     self.diff_loading = true;
                     self.diff_loading_since = Some(Instant::now());
-                    std::thread::spawn(move || {
-                        if gen_counter.load(Ordering::Relaxed) != generation {
-                            return;
-                        }
-                        let payload = if let Ok(diff) = git.diff_commit(&hash) {
+                    self.queue_diff_job(generation, diff_key, move || {
+                        if let Ok(diff) = git.diff_commit(&hash) {
                             let filename = format!("reflog:{}", &hash[..7.min(hash.len())]);
                             DiffPayload::Parsed(DiffViewState::parse_diff_output(
                                 &filename, &diff, 4, false,
                             ))
                         } else {
                             DiffPayload::Empty
-                        };
-                        let _ = tx.send(DiffResult {
-                            generation,
-                            diff_key,
-                            payload,
-                        });
+                        }
                     });
                 }
             }
@@ -1869,16 +2271,11 @@ impl Gui {
                     drop(model);
 
                     let git = Arc::clone(&self.git);
-                    let tx = self.diff_tx.clone();
-                    let gen_counter = Arc::clone(&self.diff_generation);
 
                     self.diff_loading = true;
                     self.diff_loading_since = Some(Instant::now());
-                    std::thread::spawn(move || {
-                        if gen_counter.load(Ordering::Relaxed) != generation {
-                            return;
-                        }
-                        let payload = if let Ok(diff) = git.stash_diff(index) {
+                    self.queue_diff_job(generation, diff_key, move || {
+                        if let Ok(diff) = git.stash_diff(index) {
                             if diff.is_empty() {
                                 DiffPayload::Empty
                             } else {
@@ -1890,12 +2287,7 @@ impl Gui {
                             }
                         } else {
                             DiffPayload::Empty
-                        };
-                        let _ = tx.send(DiffResult {
-                            generation,
-                            diff_key,
-                            payload,
-                        });
+                        }
                     });
                 } else {
                     drop(model);
@@ -1908,28 +2300,18 @@ impl Gui {
                     drop(model);
 
                     let git = Arc::clone(&self.git);
-                    let tx = self.diff_tx.clone();
-                    let gen_counter = Arc::clone(&self.diff_generation);
 
                     self.diff_loading = true;
                     self.diff_loading_since = Some(Instant::now());
-                    std::thread::spawn(move || {
-                        if gen_counter.load(Ordering::Relaxed) != generation {
-                            return;
-                        }
-                        let payload = if let Ok(diff) = git.diff_commit(&hash) {
+                    self.queue_diff_job(generation, diff_key, move || {
+                        if let Ok(diff) = git.diff_commit(&hash) {
                             let filename = format!("commit:{}", &hash[..7.min(hash.len())]);
                             DiffPayload::Parsed(DiffViewState::parse_diff_output(
                                 &filename, &diff, 4, false,
                             ))
                         } else {
                             DiffPayload::Empty
-                        };
-                        let _ = tx.send(DiffResult {
-                            generation,
-                            diff_key,
-                            payload,
-                        });
+                        }
                     });
                 } else {
                     drop(model);
@@ -1951,16 +2333,11 @@ impl Gui {
                     drop(model);
 
                     let git = Arc::clone(&self.git);
-                    let tx = self.diff_tx.clone();
-                    let gen_counter = Arc::clone(&self.diff_generation);
 
                     self.diff_loading = true;
                     self.diff_loading_since = Some(Instant::now());
-                    std::thread::spawn(move || {
-                        if gen_counter.load(Ordering::Relaxed) != generation {
-                            return;
-                        }
-                        let payload = if let Ok(diff) = git.diff_commit_file(&hash, &name) {
+                    self.queue_diff_job(generation, diff_key, move || {
+                        if let Ok(diff) = git.diff_commit_file(&hash, &name) {
                             if diff.is_empty() {
                                 DiffPayload::Empty
                             } else {
@@ -1971,12 +2348,7 @@ impl Gui {
                             }
                         } else {
                             DiffPayload::Empty
-                        };
-                        let _ = tx.send(DiffResult {
-                            generation,
-                            diff_key,
-                            payload,
-                        });
+                        }
                     });
                 } else if self.show_commit_file_tree {
                     // Directory node in tree view: show combined diff of all child files
@@ -1993,19 +2365,15 @@ impl Gui {
                             drop(model);
 
                             let git = Arc::clone(&self.git);
-                            let tx = self.diff_tx.clone();
                             let gen_counter = Arc::clone(&self.diff_generation);
 
                             self.diff_loading = true;
                             self.diff_loading_since = Some(Instant::now());
-                            std::thread::spawn(move || {
-                                if gen_counter.load(Ordering::Relaxed) != generation {
-                                    return;
-                                }
+                            self.queue_diff_job(generation, diff_key, move || {
                                 let mut combined_diff = String::new();
                                 for name in &child_names {
                                     if gen_counter.load(Ordering::Relaxed) != generation {
-                                        return;
+                                        return DiffPayload::Empty;
                                     }
                                     if let Ok(diff) = git.diff_commit_file(&hash, name) {
                                         if !diff.is_empty() {
@@ -2026,11 +2394,7 @@ impl Gui {
                                         true,
                                     ))
                                 };
-                                let _ = tx.send(DiffResult {
-                                    generation,
-                                    diff_key,
-                                    payload,
-                                });
+                                payload
                             });
                         } else {
                             drop(model);
@@ -5196,6 +5560,17 @@ impl Gui {
                         let new_model = new_git.load_model()?;
                         gui.git = std::sync::Arc::new(new_git);
                         *gui.model.lock().unwrap() = new_model;
+                        gui.commit_list_cache = presentation::commits::CommitListCache::default();
+                        gui.commit_stats_cache.lock().unwrap().clear();
+                        gui.commit_messages_cache.lock().unwrap().clear();
+                        gui.clear_diff_preview_cache();
+                        gui.last_commit_details_key.clear();
+                        gui.commit_details_generation
+                            .fetch_add(1, Ordering::Relaxed);
+                        gui.last_diff_key.clear();
+                        gui.diff_generation.fetch_add(1, Ordering::Relaxed);
+                        gui.diff_loading = false;
+                        gui.diff_loading_since = None;
                         gui.needs_refresh = false;
                         gui.needs_diff_refresh = true;
                         gui.context_mgr = context::ContextManager::new();
@@ -6815,6 +7190,7 @@ impl Gui {
 
     fn refresh(&mut self) -> Result<()> {
         self.reset_commit_pagination();
+        self.clear_diff_preview_cache();
         let new_model = self.git.load_model()?;
         let mut model = self.model.lock().unwrap();
         model.replace_keeping_file_order(new_model);
@@ -6825,7 +7201,7 @@ impl Gui {
                 .git
                 .load_commits_for_branches(&self.commit_branch_filter, DEFAULT_COMMIT_LIMIT)
             {
-                model.commits = filtered;
+                model.set_commits(filtered);
             }
         }
         self.commit_history_complete = model.commits.len() < DEFAULT_COMMIT_LIMIT;
@@ -6848,7 +7224,7 @@ impl Gui {
                 .git
                 .load_commits_for_branch(&self.branch_commits_name, 300)
             {
-                model.sub_commits = commits;
+                model.set_sub_commits(commits);
             }
         }
 
@@ -6933,6 +7309,7 @@ impl Gui {
     /// Use this after staging/unstaging operations where branches, commits,
     /// tags, etc. haven't changed.
     fn refresh_files_only(&mut self) -> Result<()> {
+        self.clear_diff_preview_cache();
         let (files, shortstat) = std::thread::scope(|s| {
             let h_files = s.spawn(|| self.git.load_files());
             let h_stat = s.spawn(|| self.git.diff_shortstat());
@@ -7332,6 +7709,7 @@ impl Command for EnableMouseCaptureWithoutHover {
 #[cfg(test)]
 mod terminal_mouse_tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn keyboard_enhancement_preserves_terminal_text_input() {
@@ -7402,6 +7780,102 @@ mod terminal_mouse_tests {
         assert!(ansi.contains("\x1b[?1002h"));
         assert!(ansi.contains("\x1b[?1006h"));
         assert!(!ansi.contains("\x1b[?1003h"));
+    }
+
+    #[test]
+    fn latest_background_worker_coalesces_rapid_jobs() {
+        let (job_tx, job_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        spawn_latest_background_worker(job_rx);
+
+        for value in 1..=3 {
+            let done_tx = done_tx.clone();
+            job_tx
+                .send(Box::new(move || {
+                    done_tx.send(value).unwrap();
+                }))
+                .unwrap();
+        }
+
+        assert_eq!(done_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 3);
+        assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
+    }
+
+    #[test]
+    fn diff_scheduler_starts_immediately_and_keeps_latest_overflow_job() {
+        let (scheduler_tx, scheduler_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let generation = Arc::new(AtomicU64::new(1));
+        let executed = Arc::new(AtomicUsize::new(0));
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        spawn_diff_scheduler(
+            scheduler_rx,
+            scheduler_tx.clone(),
+            result_tx,
+            Arc::clone(&generation),
+        );
+
+        for value in 1..=3 {
+            let executed = Arc::clone(&executed);
+            let release_rx = Arc::clone(&release_rx);
+            scheduler_tx
+                .send(DiffSchedulerEvent::Job(DiffJob {
+                    generation: 1,
+                    diff_key: format!("commit:{value}"),
+                    load: Box::new(move || {
+                        executed.fetch_or(1 << value, Ordering::Relaxed);
+                        release_rx.lock().unwrap().recv().unwrap();
+                        DiffPayload::Empty
+                    }),
+                }))
+                .unwrap();
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while executed.load(Ordering::Relaxed).count_ones() < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(executed.load(Ordering::Relaxed).count_ones(), 2);
+
+        release_tx.send(()).unwrap();
+        let _ = result_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while executed.load(Ordering::Relaxed) & (1 << 3) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_ne!(executed.load(Ordering::Relaxed) & (1 << 3), 0);
+
+        release_tx.send(()).unwrap();
+        release_tx.send(()).unwrap();
+    }
+
+    #[test]
+    fn diff_preview_cache_moves_recent_views_and_enforces_entry_limit() {
+        let mut cache = DiffPreviewCache::default();
+        for index in 0..=DIFF_PREVIEW_CACHE_ENTRIES {
+            let mut view = DiffViewState::new();
+            view.filename = format!("file-{index}");
+            view.lines.push(crate::pager::DiffLine {
+                old_line: Some((1, "old".to_string())),
+                new_line: Some((1, "new".to_string())),
+                change_type: crate::pager::ChangeType::Modified,
+                old_segments: None,
+                new_segments: None,
+                file_header: None,
+                section_index: 0,
+            });
+            cache.insert(format!("key-{index}"), view);
+        }
+
+        assert_eq!(cache.entries.len(), DIFF_PREVIEW_CACHE_ENTRIES);
+        assert!(cache.take("key-0").is_none());
+        let restored = cache.take(&format!("key-{DIFF_PREVIEW_CACHE_ENTRIES}"));
+        assert_eq!(
+            restored.map(|view| view.filename),
+            Some(format!("file-{DIFF_PREVIEW_CACHE_ENTRIES}"))
+        );
     }
 }
 

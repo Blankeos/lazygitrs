@@ -84,6 +84,8 @@ impl GitCommands {
                 "stash",
                 "show",
                 "-p",
+                "--no-ext-diff",
+                "--no-textconv",
                 "--color=never",
                 &format!("stash@{{{}}}", index),
             ])

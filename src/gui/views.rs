@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::config::{AppConfig, Theme};
-use crate::git::GitCommands;
 use crate::model::Model;
 use crate::model::commit::{Commit, CommitStat};
 use crate::model::file_tree::{CommitFileTreeNode, FileTreeNode};
@@ -32,6 +31,7 @@ pub fn render(
     config: &AppConfig,
     theme: &Theme,
     diff_view: &mut DiffViewState,
+    commit_list_cache: &mut presentation::commits::CommitListCache,
     screen_mode: ScreenMode,
     show_file_tree: bool,
     file_tree_nodes: &[FileTreeNode],
@@ -58,10 +58,7 @@ pub fn render(
     diff_loading: bool,
     diff_loading_show: bool,
     commit_stats: &Arc<Mutex<HashMap<String, CommitStat>>>,
-    commit_stats_inflight: &Arc<Mutex<std::collections::HashSet<String>>>,
     commit_messages: &Arc<Mutex<HashMap<String, String>>>,
-    commit_messages_inflight: &Arc<Mutex<std::collections::HashSet<String>>>,
-    git: &Arc<GitCommands>,
     commit_details_scroll: &mut u16,
     commit_details_scroll_hash: &mut String,
     show_commit_details: bool,
@@ -273,23 +270,21 @@ pub fn render(
                     );
                 }
                 ContextId::Commits => {
-                    let items = presentation::commits::render_commit_list(
-                        model,
-                        theme,
-                        cherry_pick_clipboard,
-                    );
                     let range = range_select_anchor.map(|a| (a.min(selected), a.max(selected)));
-                    render_list_with_range_ctx(
+                    render_commit_list_ctx(
                         frame,
                         fl.main_panel,
                         block,
-                        items,
+                        model,
+                        theme,
+                        cherry_pick_clipboard,
                         selected,
                         true,
-                        theme,
                         range,
                         ctx_mgr,
                         ctx_id,
+                        commit_list_cache,
+                        false,
                     );
                 }
                 ContextId::Stash => {
@@ -307,17 +302,20 @@ pub fn render(
                     );
                 }
                 ContextId::BranchCommits => {
-                    let items = presentation::commits::render_sub_commit_list(model, theme);
-                    render_list_ctx(
+                    render_commit_list_ctx(
                         frame,
                         fl.main_panel,
                         block,
-                        items,
+                        model,
+                        theme,
+                        &[],
                         selected,
                         true,
-                        theme,
+                        None,
                         ctx_mgr,
                         ctx_id,
+                        commit_list_cache,
+                        true,
                     );
                 }
                 ContextId::CommitFiles | ContextId::StashFiles | ContextId::BranchCommitFiles => {
@@ -376,10 +374,7 @@ pub fn render(
                 details_rect,
                 commit,
                 commit_stats,
-                commit_stats_inflight,
                 commit_messages,
-                commit_messages_inflight,
-                git,
                 theme,
                 true,
                 commit_details_scroll,
@@ -571,17 +566,20 @@ pub fn render(
                         .title(bc_title)
                         .borders(Borders::ALL)
                         .border_style(border_style);
-                    let items = presentation::commits::render_sub_commit_list(model, theme);
-                    render_list_ctx(
+                    render_commit_list_ctx(
                         frame,
                         rect,
                         bc_block,
-                        items,
+                        model,
+                        theme,
+                        &[],
                         bc_selected,
                         is_active,
-                        theme,
+                        None,
                         ctx_mgr,
                         ContextId::BranchCommits,
+                        commit_list_cache,
+                        true,
                     );
                 } else {
                     let items = presentation::branches::render_branch_list(
@@ -657,17 +655,20 @@ pub fn render(
                         .title(bc_title)
                         .borders(Borders::ALL)
                         .border_style(border_style);
-                    let items = presentation::commits::render_sub_commit_list(model, theme);
-                    render_list_ctx(
+                    render_commit_list_ctx(
                         frame,
                         rect,
                         bc_block,
-                        items,
+                        model,
+                        theme,
+                        &[],
                         bc_selected,
                         is_active,
-                        theme,
+                        None,
                         ctx_mgr,
                         ContextId::BranchCommits,
+                        commit_list_cache,
+                        true,
                     );
                 } else if ctx_mgr.active() == ContextId::RemoteBranches {
                     let rb_selected = ctx_mgr.selected(ContextId::RemoteBranches);
@@ -757,17 +758,20 @@ pub fn render(
                         .title(bc_title)
                         .borders(Borders::ALL)
                         .border_style(border_style);
-                    let items = presentation::commits::render_sub_commit_list(model, theme);
-                    render_list_ctx(
+                    render_commit_list_ctx(
                         frame,
                         rect,
                         bc_block,
-                        items,
+                        model,
+                        theme,
+                        &[],
                         bc_selected,
                         is_active,
-                        theme,
+                        None,
                         ctx_mgr,
                         ContextId::BranchCommits,
+                        commit_list_cache,
+                        true,
                     );
                 } else {
                     let items = presentation::tags::render_tag_list(model, theme);
@@ -828,19 +832,25 @@ pub fn render(
                         );
                     }
                 } else {
-                    let items = presentation::commits::render_commit_list(
-                        model,
-                        theme,
-                        cherry_pick_clipboard,
-                    );
                     let range = if is_active {
                         range_select_anchor.map(|a| (a.min(selected), a.max(selected)))
                     } else {
                         None
                     };
-                    render_list_with_range_ctx(
-                        frame, rect, block, items, selected, is_active, theme, range, ctx_mgr,
+                    render_commit_list_ctx(
+                        frame,
+                        rect,
+                        block,
+                        model,
+                        theme,
+                        cherry_pick_clipboard,
+                        selected,
+                        is_active,
+                        range,
+                        ctx_mgr,
                         ctx_id,
+                        commit_list_cache,
+                        false,
                     );
                 }
             }
@@ -1026,10 +1036,7 @@ pub fn render(
             details_rect,
             commit,
             commit_stats,
-            commit_stats_inflight,
             commit_messages,
-            commit_messages_inflight,
-            git,
             theme,
             true,
             commit_details_scroll,
@@ -1733,6 +1740,81 @@ fn render_list_with_range_ctx(
         frame, rect, block, items, selected, is_active, theme, range, &mut so, follow,
     );
     ctx_mgr.set_scroll_offset(ctx, so);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_commit_list_ctx(
+    frame: &mut Frame,
+    rect: Rect,
+    block: Block<'_>,
+    model: &Model,
+    theme: &crate::config::Theme,
+    cherry_picked: &[String],
+    selected: usize,
+    is_active: bool,
+    range: Option<(usize, usize)>,
+    ctx_mgr: &mut ContextManager,
+    ctx: ContextId,
+    cache: &mut presentation::commits::CommitListCache,
+    sub_commits: bool,
+) {
+    let total_len = if sub_commits {
+        model.sub_commits.len()
+    } else {
+        model.commits.len()
+    };
+    if total_len == 0 {
+        frame.render_widget(block, rect);
+        return;
+    }
+
+    let visible_height = block.inner(rect).height as usize;
+    if visible_height == 0 {
+        frame.render_widget(block, rect);
+        return;
+    }
+
+    let mut offset = ctx_mgr.scroll_offset(ctx);
+    if !ctx_mgr.viewport_manually_scrolled {
+        super::scroll::ensure_visible(selected, &mut offset, visible_height);
+    }
+    offset = offset.min(total_len.saturating_sub(visible_height));
+    ctx_mgr.set_scroll_offset(ctx, offset);
+
+    let items = if sub_commits {
+        presentation::commits::render_sub_commit_list_window(
+            model,
+            theme,
+            offset,
+            visible_height,
+            cache,
+        )
+    } else {
+        presentation::commits::render_commit_list_window(
+            model,
+            theme,
+            cherry_picked,
+            offset,
+            visible_height,
+            cache,
+        )
+    };
+    let visible_items: Vec<ListItem> = items
+        .into_iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let idx = offset + i;
+            if is_active && idx == selected {
+                item.style(theme.selected_line)
+            } else if is_active && range.is_some_and(|(lo, hi)| idx >= lo && idx <= hi) {
+                item.style(Style::default().bg(theme.selected_bg))
+            } else {
+                item
+            }
+        })
+        .collect();
+
+    frame.render_widget(List::new(visible_items).block(block), rect);
 }
 
 fn render_list_with_range_raw(
@@ -3531,67 +3613,24 @@ fn find_commit_by_hash<'a>(model: &'a Model, hash: &str) -> Option<&'a Commit> {
         .or_else(|| model.reflog_commits.iter().find(|c| c.hash == hash))
 }
 
-/// Look up a cached shortstat, spawning a background worker to fetch it if
-/// missing.  Render never blocks on git — the first frame for a new commit
-/// shows no stat line; the next repaint after the worker finishes will pick
-/// it up from the shared cache.
-fn lookup_or_fetch_stat(
-    cache: &Arc<Mutex<HashMap<String, CommitStat>>>,
-    inflight: &Arc<Mutex<std::collections::HashSet<String>>>,
-    git: &Arc<GitCommands>,
-    hash: &str,
-) -> Option<CommitStat> {
-    if let Ok(map) = cache.lock() {
-        if let Some(s) = map.get(hash) {
-            return Some(*s);
-        }
-    }
-    // Not cached: schedule a background fetch (once) and return None for now.
-    let mut inflight_guard = match inflight.lock() {
-        Ok(g) => g,
-        Err(_) => return None,
-    };
-    if inflight_guard.contains(hash) {
-        return None;
-    }
-    inflight_guard.insert(hash.to_string());
-    drop(inflight_guard);
-
-    let cache = Arc::clone(cache);
-    let inflight = Arc::clone(inflight);
-    let git = Arc::clone(git);
-    let hash_owned = hash.to_string();
-    std::thread::spawn(move || {
-        // Only cache on success.  Errors leave the entry absent so a future
-        // visit can retry; in-flight guard still prevents same-frame spam.
-        if let Ok(stat) = git.commit_stat(&hash_owned) {
-            if let Ok(mut map) = cache.lock() {
-                map.insert(hash_owned.clone(), stat);
-            }
-        }
-        if let Ok(mut set) = inflight.lock() {
-            set.remove(&hash_owned);
-        }
-    });
-    None
-}
-
 fn render_commit_details_panel(
     frame: &mut Frame,
     rect: Rect,
     commit: &Commit,
     commit_stats: &Arc<Mutex<HashMap<String, CommitStat>>>,
-    commit_stats_inflight: &Arc<Mutex<std::collections::HashSet<String>>>,
     commit_messages: &Arc<Mutex<HashMap<String, String>>>,
-    commit_messages_inflight: &Arc<Mutex<std::collections::HashSet<String>>>,
-    git: &Arc<GitCommands>,
     theme: &Theme,
     compact: bool,
     scroll: &mut u16,
 ) {
-    let stat_owned = lookup_or_fetch_stat(commit_stats, commit_stats_inflight, git, &commit.hash);
-    let message_owned =
-        lookup_or_fetch_message(commit_messages, commit_messages_inflight, git, &commit.hash);
+    let stat_owned = commit_stats
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&commit.hash).copied());
+    let message_owned = commit_messages
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&commit.hash).cloned());
     presentation::commit_details::render_commit_details(
         frame,
         rect,
@@ -3602,42 +3641,4 @@ fn render_commit_details_panel(
         compact,
         scroll,
     );
-}
-
-fn lookup_or_fetch_message(
-    cache: &Arc<Mutex<HashMap<String, String>>>,
-    inflight: &Arc<Mutex<std::collections::HashSet<String>>>,
-    git: &Arc<GitCommands>,
-    hash: &str,
-) -> Option<String> {
-    if let Ok(map) = cache.lock() {
-        if let Some(m) = map.get(hash) {
-            return Some(m.clone());
-        }
-    }
-    let mut inflight_guard = match inflight.lock() {
-        Ok(g) => g,
-        Err(_) => return None,
-    };
-    if inflight_guard.contains(hash) {
-        return None;
-    }
-    inflight_guard.insert(hash.to_string());
-    drop(inflight_guard);
-
-    let cache = Arc::clone(cache);
-    let inflight = Arc::clone(inflight);
-    let git = Arc::clone(git);
-    let hash_owned = hash.to_string();
-    std::thread::spawn(move || {
-        if let Ok(msg) = git.commit_message_full(&hash_owned) {
-            if let Ok(mut map) = cache.lock() {
-                map.insert(hash_owned.clone(), msg);
-            }
-        }
-        if let Ok(mut set) = inflight.lock() {
-            set.remove(&hash_owned);
-        }
-    });
-    None
 }
