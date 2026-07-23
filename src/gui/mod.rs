@@ -67,6 +67,168 @@ fn list_picker_visible_height(terminal_height: usize) -> usize {
 
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
 const EVENT_DRAIN_LIMIT: usize = 256;
+const ESCAPE_CONTINUATION_TIMEOUT: Duration = Duration::from_millis(25);
+const MAX_ESCAPE_SEQUENCE_EVENTS: usize = 256;
+
+fn plain_char_key(key: KeyEvent, expected: char) -> bool {
+    let modifiers = if expected.is_uppercase() {
+        KeyModifiers::SHIFT
+    } else {
+        KeyModifiers::NONE
+    };
+    key.code == KeyCode::Char(expected) && key.modifiers == modifiers
+}
+
+fn parse_kitty_modifiers(value: &str) -> KeyModifiers {
+    let mask = value
+        .split(':')
+        .next()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let mut modifiers = KeyModifiers::NONE;
+    modifiers.set(KeyModifiers::SHIFT, mask & 1 != 0);
+    modifiers.set(KeyModifiers::ALT, mask & 2 != 0);
+    modifiers.set(KeyModifiers::CONTROL, mask & 4 != 0);
+    modifiers.set(KeyModifiers::SUPER, mask & 8 != 0);
+    modifiers.set(KeyModifiers::HYPER, mask & 16 != 0);
+    modifiers.set(KeyModifiers::META, mask & 32 != 0);
+    modifiers
+}
+
+fn parse_fragmented_escape_sequence(sequence: &str) -> Option<Event> {
+    if let Some(csi) = sequence.strip_prefix('[') {
+        let final_byte = csi.chars().last()?;
+        let body = &csi[..csi.len().saturating_sub(final_byte.len_utf8())];
+
+        if body.is_empty() {
+            match final_byte {
+                'I' => return Some(Event::FocusGained),
+                'O' => return Some(Event::FocusLost),
+                'Z' => {
+                    return Some(Event::Key(KeyEvent::new(
+                        KeyCode::BackTab,
+                        KeyModifiers::SHIFT,
+                    )));
+                }
+                _ => {}
+            }
+        }
+
+        let modifiers = body
+            .rsplit(';')
+            .next()
+            .filter(|_| body.contains(';'))
+            .map(parse_kitty_modifiers)
+            .unwrap_or(KeyModifiers::NONE);
+        let code = match final_byte {
+            'A' => KeyCode::Up,
+            'B' => KeyCode::Down,
+            'C' => KeyCode::Right,
+            'D' => KeyCode::Left,
+            'H' => KeyCode::Home,
+            'F' => KeyCode::End,
+            'u' => {
+                let codepoint = body.split(';').next()?.split(':').next()?.parse().ok()?;
+                match codepoint {
+                    9 => KeyCode::Tab,
+                    13 => KeyCode::Enter,
+                    27 => KeyCode::Esc,
+                    127 => KeyCode::Backspace,
+                    value => KeyCode::Char(char::from_u32(value)?),
+                }
+            }
+            '~' => match body.split(';').next()? {
+                "1" | "7" => KeyCode::Home,
+                "2" => KeyCode::Insert,
+                "3" => KeyCode::Delete,
+                "4" | "8" => KeyCode::End,
+                "5" => KeyCode::PageUp,
+                "6" => KeyCode::PageDown,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        return Some(Event::Key(KeyEvent::new(code, modifiers)));
+    }
+
+    let code = match sequence {
+        "OA" => KeyCode::Up,
+        "OB" => KeyCode::Down,
+        "OC" => KeyCode::Right,
+        "OD" => KeyCode::Left,
+        "OH" => KeyCode::Home,
+        "OF" => KeyCode::End,
+        "OP" => KeyCode::F(1),
+        "OQ" => KeyCode::F(2),
+        "OR" => KeyCode::F(3),
+        "OS" => KeyCode::F(4),
+        _ => return None,
+    };
+    Some(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+}
+
+/// Work around crossterm-rs/crossterm#993, where a PTY read ending after the
+/// initial ESC can split one terminal control sequence into ordinary key events.
+fn read_terminal_events() -> io::Result<Vec<Event>> {
+    let first = event::read()?;
+    let Event::Key(first_key) = first else {
+        return Ok(vec![first]);
+    };
+    if first_key.code != KeyCode::Esc || first_key.kind != crossterm::event::KeyEventKind::Press {
+        return Ok(vec![Event::Key(first_key)]);
+    }
+
+    if !event::poll(ESCAPE_CONTINUATION_TIMEOUT)? {
+        return Ok(vec![Event::Key(first_key)]);
+    }
+    let second = event::read()?;
+    let Event::Key(mut second_key) = second else {
+        return Ok(vec![Event::Key(first_key), second]);
+    };
+    let KeyCode::Char(introducer @ ('[' | 'O' | ']' | 'P' | '^' | '_')) = second_key.code else {
+        second_key.modifiers |= KeyModifiers::ALT;
+        return Ok(vec![Event::Key(second_key)]);
+    };
+
+    let deadline = Instant::now() + ESCAPE_CONTINUATION_TIMEOUT;
+    let mut sequence = String::from(introducer);
+    let control_string = matches!(introducer, ']' | 'P' | '^' | '_');
+    let mut control_string_esc = false;
+    for _ in 0..MAX_ESCAPE_SEQUENCE_EVENTS {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || !event::poll(remaining)? {
+            break;
+        }
+        let next = event::read()?;
+        let Event::Key(key) = next else {
+            return Ok(vec![next]);
+        };
+        if control_string {
+            if key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                return Ok(Vec::new());
+            }
+            if control_string_esc && key.code == KeyCode::Char('\\') {
+                return Ok(Vec::new());
+            }
+            control_string_esc = key.code == KeyCode::Esc;
+            continue;
+        }
+        let KeyCode::Char(ch) = key.code else {
+            return Ok(vec![Event::Key(key)]);
+        };
+        sequence.push(ch);
+        if ch.is_ascii() && ('@'..='~').contains(&ch) {
+            return Ok(parse_fragmented_escape_sequence(&sequence)
+                .into_iter()
+                .collect());
+        }
+    }
+
+    // A confirmed but malformed/incomplete terminal sequence must never leak
+    // its payload into shortcut handling or text inputs.
+    Ok(Vec::new())
+}
 
 fn has_command_modifier(modifiers: KeyModifiers) -> bool {
     modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::META)
@@ -84,6 +246,7 @@ pub(crate) fn textarea_input(
         KeyCode::Backspace if cmd => {
             textarea.delete_line_by_head();
         }
+        KeyCode::Char(_) if cmd => return false,
         KeyCode::Char('a') if ctrl => textarea.move_cursor(tui_textarea::CursorMove::Head),
         KeyCode::Char('e') if ctrl => textarea.move_cursor(tui_textarea::CursorMove::End),
         KeyCode::Char('u') if ctrl => {
@@ -778,68 +941,70 @@ impl Gui {
 
             // Handle events
             if event::poll(std::time::Duration::from_millis(16))? {
-                match event::read()? {
-                    Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
-                        if let Err(err) = self.handle_key(key) {
-                            self.show_error("Command failed", err);
+                for terminal_event in read_terminal_events()? {
+                    match terminal_event {
+                        Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
+                            if let Err(err) = self.handle_key(key) {
+                                self.show_error("Command failed", err);
+                            }
                         }
-                    }
-                    Event::Mouse(mouse) => self.handle_mouse(mouse),
-                    Event::Resize(w, h) => {
-                        self.layout.update_size(w, h);
-                        // Re-flow any active commit-message textarea to the new width so
-                        // wrapping stays consistent with what the user sees.
-                        let popup_width = (w * 60 / 100).min(60).max(30).min(w);
-                        let popup_inner = popup_width.saturating_sub(4) as usize;
-                        let config_width = self.config.user_config.git.commit.auto_wrap_width;
-                        let effective_width = if config_width > 0 {
-                            popup_inner.min(config_width)
-                        } else {
-                            popup_inner
-                        };
-                        match &mut self.popup {
-                            PopupState::Input {
-                                textarea,
-                                is_commit: true,
-                                ..
-                            } => {
-                                if effective_width > 0 {
-                                    auto_wrap_textarea(textarea, effective_width);
+                        Event::Mouse(mouse) => self.handle_mouse(mouse),
+                        Event::Resize(w, h) => {
+                            self.layout.update_size(w, h);
+                            // Re-flow any active commit-message textarea to the new width so
+                            // wrapping stays consistent with what the user sees.
+                            let popup_width = (w * 60 / 100).min(60).max(30).min(w);
+                            let popup_inner = popup_width.saturating_sub(4) as usize;
+                            let config_width = self.config.user_config.git.commit.auto_wrap_width;
+                            let effective_width = if config_width > 0 {
+                                popup_inner.min(config_width)
+                            } else {
+                                popup_inner
+                            };
+                            match &mut self.popup {
+                                PopupState::Input {
+                                    textarea,
+                                    is_commit: true,
+                                    ..
+                                } => {
+                                    if effective_width > 0 {
+                                        auto_wrap_textarea(textarea, effective_width);
+                                    }
                                 }
-                            }
-                            PopupState::Input {
-                                textarea,
-                                is_commit: false,
-                                ..
-                            } => {
-                                // Single-line input: re-flow the soft wrap to the new width.
-                                let raw: String = textarea.lines().join("");
-                                if popup_inner > 0 && !raw.is_empty() {
-                                    let mut new_ta = popup::make_textarea("");
-                                    new_ta.insert_str(&raw);
-                                    soft_wrap_textarea(&mut new_ta, popup_inner);
-                                    *textarea = new_ta;
+                                PopupState::Input {
+                                    textarea,
+                                    is_commit: false,
+                                    ..
+                                } => {
+                                    // Single-line input: re-flow the soft wrap to the new width.
+                                    let raw: String = textarea.lines().join("");
+                                    if popup_inner > 0 && !raw.is_empty() {
+                                        let mut new_ta = popup::make_textarea("");
+                                        new_ta.insert_str(&raw);
+                                        soft_wrap_textarea(&mut new_ta, popup_inner);
+                                        *textarea = new_ta;
+                                    }
                                 }
-                            }
-                            PopupState::CommitInput {
-                                body_textarea,
-                                body_state,
-                                ..
-                            } => {
-                                if effective_width > 0 {
-                                    body_state.render_into(body_textarea, effective_width);
+                                PopupState::CommitInput {
+                                    body_textarea,
+                                    body_state,
+                                    ..
+                                } => {
+                                    if effective_width > 0 {
+                                        body_state.render_into(body_textarea, effective_width);
+                                    }
                                 }
+                                _ => {}
                             }
-                            _ => {}
                         }
+                        Event::FocusGained if self.config.user_config.git.auto_refresh => {
+                            self.needs_refresh = true;
+                        }
+                        Event::Paste(data) => {
+                            self.handle_paste(data);
+                        }
+                        _ => {}
                     }
-                    Event::FocusGained if self.config.user_config.git.auto_refresh => {
-                        self.needs_refresh = true;
-                    }
-                    Event::Paste(data) => {
-                        self.handle_paste(data);
-                    }
-                    _ => {}
                 }
             }
 
@@ -1904,6 +2069,10 @@ impl Gui {
             return Ok(());
         }
 
+        if has_command_modifier(key.modifiers) && matches!(key.code, KeyCode::Char(_)) {
+            return Ok(());
+        }
+
         // Popup takes priority
         if self.popup != PopupState::None {
             return self.handle_popup_key(key);
@@ -1912,6 +2081,13 @@ impl Gui {
         // Search input mode takes priority
         if self.search_active {
             return self.handle_search_key(key);
+        }
+
+        // Terminal-level shortcuts such as Cmd+1/Cmd+2 must not fall through
+        // to character-only application shortcuts if the terminal forwards
+        // their enhanced-keyboard events.
+        if has_command_modifier(key.modifiers) {
+            return Ok(());
         }
 
         // Rebase mode takes priority over everything
@@ -1978,7 +2154,9 @@ impl Gui {
         }
 
         // Number keys 1-5 to jump to window (press again to cycle tabs)
-        if let KeyCode::Char(c @ '1'..='5') = key.code {
+        if key.modifiers == KeyModifiers::NONE
+            && let KeyCode::Char(c @ '1'..='5') = key.code
+        {
             let n = c.to_digit(10).unwrap();
             if let Some(window) = SideWindow::from_number(n) {
                 // If we're in a sub-context (CommitFiles), pressing the parent window's
@@ -2226,7 +2404,7 @@ impl Gui {
         }
 
         // Universal "I" key: interactive rebase picker
-        if key.code == KeyCode::Char('I') {
+        if plain_char_key(key, 'I') {
             self.show_interactive_rebase_picker();
             return Ok(());
         }
@@ -7169,6 +7347,48 @@ mod terminal_mouse_tests {
             )
         );
         assert!(!flags.contains(crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
+    }
+
+    #[test]
+    fn reconstructs_fragmented_arrow_sequence_without_leaking_amend_shortcut() {
+        assert_eq!(
+            parse_fragmented_escape_sequence("[A"),
+            Some(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)))
+        );
+    }
+
+    #[test]
+    fn reconstructs_fragmented_focus_sequence_without_leaking_rebase_shortcut() {
+        assert_eq!(
+            parse_fragmented_escape_sequence("[I"),
+            Some(Event::FocusGained)
+        );
+    }
+
+    #[test]
+    fn reconstructs_fragmented_kitty_command_key_with_its_modifier() {
+        assert_eq!(
+            parse_fragmented_escape_sequence("[49;9u"),
+            Some(Event::Key(KeyEvent::new(
+                KeyCode::Char('1'),
+                KeyModifiers::SUPER
+            )))
+        );
+    }
+
+    #[test]
+    fn plain_character_shortcuts_reject_extra_modifiers() {
+        assert!(plain_char_key(
+            KeyEvent::new(KeyCode::Char('I'), KeyModifiers::SHIFT),
+            'I'
+        ));
+        assert!(!plain_char_key(
+            KeyEvent::new(
+                KeyCode::Char('I'),
+                KeyModifiers::SHIFT | KeyModifiers::SUPER
+            ),
+            'I'
+        ));
     }
 
     #[test]
