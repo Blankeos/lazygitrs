@@ -196,13 +196,19 @@ fn confirm_remote_tag_delete(
         title,
         message,
         on_confirm: Box::new(move |gui| {
-            let message = if delete_local_after_remote {
-                format!("Deleting tag {} locally and from {}...", name, remote)
+            let (op_title, message) = if delete_local_after_remote {
+                (
+                    "Delete remote and local tag",
+                    format!("Deleting tag {} locally and from {}...", name, remote),
+                )
             } else {
-                format!("Deleting tag {} from {}...", name, remote)
+                (
+                    "Delete remote tag",
+                    format!("Deleting tag {} from {}...", name, remote),
+                )
             };
 
-            gui.start_remote_op("Delete", &message, move |git| {
+            gui.start_remote_op(op_title, &message, move |git| {
                 git.delete_remote_tag(&remote, &name)?;
                 if delete_local_after_remote {
                     git.delete_tag(&name)?;

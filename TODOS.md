@@ -295,3 +295,5 @@ Where I observed this behavior: I noticed this for the "Commit Message" and "Des
 - [x] in original lazygit, space in the '4 Commits' view actually isn't by default always entering the 'detached head' context. Most of the time (as long as you see the branch name in the list item, like if it's the item that's the head of that branch), it actually shows `l checkout branch '<branchname>'` as a second option and the first option is like `d checkout commit b838172 as detached head`
 
 - [x] the \` key to toggle the tree view or the list view isnt persisted inside the "W" Compare tool. Seems like it's always list to start.
+
+- [ ] When deleting a local tag that's on origin (it's a network request).. So show an async modal, instead of showing a "nothing changed" kinda UI. (add feedback)

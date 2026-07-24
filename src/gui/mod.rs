@@ -1786,6 +1786,10 @@ impl Gui {
             self.remote_op_label = None;
             match result {
                 Ok(()) => {
+                    // Clear the async Loading modal shown by start_remote_op.
+                    if matches!(self.popup, PopupState::Loading { .. }) {
+                        self.popup = PopupState::None;
+                    }
                     self.needs_refresh = true;
                     self.remote_op_success_at = Some(Instant::now());
                 }
@@ -1904,7 +1908,7 @@ impl Gui {
     }
 
     /// Run a remote operation (push/pull/fetch) on a background thread.
-    pub fn start_remote_op<F>(&mut self, title: &str, _message: &str, op: F)
+    pub fn start_remote_op<F>(&mut self, title: &str, message: &str, op: F)
     where
         F: FnOnce(&GitCommands) -> Result<()> + Send + 'static,
     {
@@ -1921,6 +1925,11 @@ impl Gui {
         };
         self.remote_op_label = Some(label.to_string());
         self.remote_op_success_at = None;
+        // Async modal so network ops (push/pull/fetch/remote tag delete) don't look idle.
+        self.popup = PopupState::Loading {
+            title: title.to_string(),
+            message: message.to_string(),
+        };
         let git = Arc::clone(&self.git);
         let tx = self.remote_op_tx.clone();
         std::thread::spawn(move || {
