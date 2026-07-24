@@ -117,6 +117,9 @@ impl GitCommands {
     }
 
     /// Reword a non-HEAD commit via interactive rebase.
+    ///
+    /// `--keep-empty` preserves empty commits through the replay so they can
+    /// be reworded the same way lazygit does.
     pub fn reword_commit_rebase(&self, commit_hash: &str, new_message: &str) -> Result<()> {
         let parent = self.commit_parent(commit_hash)?;
         let short_hash = &commit_hash[..7.min(commit_hash.len())];
@@ -131,7 +134,7 @@ impl GitCommands {
         let echo_cmd = format!("echo '{}' >", new_message.replace('\'', "'\\''"));
 
         self.git()
-            .args(&["rebase", "-i", &parent])
+            .args(&["rebase", "-i", "--keep-empty", &parent])
             .env("GIT_SEQUENCE_EDITOR", &sed_cmd)
             .env("GIT_EDITOR", &echo_cmd)
             .run_expecting_success()?;

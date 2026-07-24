@@ -272,8 +272,17 @@ impl GitCommands {
     pub fn reword_commit(&self, hash: &str, message: &str) -> Result<()> {
         let head = self.head_hash()?;
         if hash == head {
+            // --allow-empty: reword empty commits (lazygit allows this)
+            // --only: don't include staged changes in the amended commit
             self.git()
-                .args(&["commit", "--amend", "-m", message])
+                .args(&[
+                    "commit",
+                    "--allow-empty",
+                    "--only",
+                    "--amend",
+                    "-m",
+                    message,
+                ])
                 .run_expecting_success()?;
         } else {
             self.reword_commit_rebase(hash, message)?;
