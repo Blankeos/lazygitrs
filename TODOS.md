@@ -300,3 +300,6 @@ Where I observed this behavior: I noticed this for the "Commit Message" and "Des
 
 - [x] Allow reword on empty commit (original lazygit allows this seamlessly)
 - [x] When viewing a tag in the 'Tags' subtab in '3'. Add a `(main,origin)` label, or the other remotes as well like `(main,origin/main,someremote/main)` or something?
+
+- [x] Optimize the "after pressing enter" when in commiting or rewording.
+- [ ] Interactive rebase, when something is being 'drop'd show a strikethrough on the commit hahs and te author name as well

@@ -630,12 +630,15 @@ pub struct Gui {
     pub sub_commits_parent_context: context::ContextId,
     /// Parent context to return to when pressing Esc from CommitFiles.
     pub commit_files_parent_context: Option<context::ContextId>,
-    /// Receiver for streamed model parts during initial load. Each git data
-    /// type arrives independently so the UI can waterfall-display results.
-    /// Set to `None` once all parts have been received.
+    /// Receiver for streamed model parts during initial load or background
+    /// refresh. Each git data type arrives independently so the UI can
+    /// waterfall-display results. Set to `None` once all parts received.
     initial_load_rx: Option<mpsc::Receiver<ModelPart>>,
     /// How many model parts have arrived so far (out of MODEL_PART_COUNT).
     initial_load_received: usize,
+    /// True while a background `load_model_streaming` refresh is in flight.
+    /// Prevents stacking concurrent full refreshes on the UI thread.
+    refresh_in_progress: bool,
     /// Frame counter for the loading spinner animation.
     spinner_frame: usize,
     /// Label shown on the head branch during a remote operation (e.g. "Pushing", "Pulling").
@@ -778,6 +781,7 @@ impl Gui {
             model: Arc::new(Mutex::new(model)),
             initial_load_rx: Some(initial_load_rx),
             initial_load_received: 0,
+            refresh_in_progress: false,
             context_mgr: ContextManager::new(),
             layout: LayoutState::default(),
             popup: PopupState::None,
@@ -960,6 +964,18 @@ impl Gui {
                 // All parts received — done loading.
                 if self.initial_load_received >= MODEL_PART_COUNT {
                     self.initial_load_rx = None;
+                    if self.refresh_in_progress {
+                        self.refresh_in_progress = false;
+                        // Leave needs_refresh alone: if another mutation arrived
+                        // mid-refresh it will re-queue on the next frame.
+                        self.needs_files_refresh = false;
+                        self.needs_diff_refresh = true;
+                        self.last_refresh_at = Instant::now();
+                        // Re-apply selection-dependent views after stream completes.
+                        if let Err(err) = self.after_model_refresh() {
+                            self.show_error("Refresh failed", err);
+                        }
+                    }
                 }
             }
 
@@ -1230,21 +1246,11 @@ impl Gui {
                 self.needs_refresh = true;
             }
 
-            // Refresh data if needed
-            if self.needs_refresh {
-                match self.refresh() {
-                    Ok(()) => {
-                        self.needs_refresh = false;
-                        self.needs_files_refresh = false;
-                        self.needs_diff_refresh = true;
-                        self.last_refresh_at = Instant::now();
-                    }
-                    Err(err) => {
-                        self.needs_refresh = false;
-                        self.show_error("Refresh failed", err);
-                    }
-                }
-            } else if self.needs_files_refresh {
+            // Kick off a non-blocking full refresh (same streaming path as
+            // initial load). Avoids freezing the UI for ~1s on commit/reword.
+            if self.needs_refresh && !self.refresh_in_progress && self.initial_load_rx.is_none() {
+                self.start_background_refresh();
+            } else if self.needs_files_refresh && !self.refresh_in_progress {
                 match self.refresh_files_only() {
                     Ok(()) => {
                         self.needs_files_refresh = false;
@@ -1619,8 +1625,15 @@ impl Gui {
                             focus: popup::CommitInputFocus::Summary,
                             on_confirm: Box::new(|gui, msg| {
                                 if !msg.is_empty() {
-                                    gui.git.create_commit(msg, false)?;
-                                    gui.needs_refresh = true;
+                                    let message = msg.to_string();
+                                    gui.start_remote_op(
+                                        "Commit",
+                                        "Creating commit...",
+                                        move |git| {
+                                            git.create_commit(&message, false)?;
+                                            Ok(())
+                                        },
+                                    );
                                 }
                                 Ok(())
                             }),
@@ -7197,12 +7210,40 @@ impl Gui {
         true
     }
 
+    /// Kick off a full model reload on a background thread (same streaming
+    /// path as initial load). UI stays responsive; panels fill as parts arrive.
+    fn start_background_refresh(&mut self) {
+        if self.refresh_in_progress || self.initial_load_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.initial_load_rx = Some(rx);
+        self.initial_load_received = 0;
+        self.refresh_in_progress = true;
+        self.needs_refresh = false;
+        self.reset_commit_pagination();
+        self.clear_diff_preview_cache();
+        let git = Arc::clone(&self.git);
+        std::thread::spawn(move || {
+            git.load_model_streaming(&tx);
+        });
+    }
+
     fn refresh(&mut self) -> Result<()> {
         self.reset_commit_pagination();
         self.clear_diff_preview_cache();
         let new_model = self.git.load_model()?;
+        {
+            let mut model = self.model.lock().unwrap();
+            model.replace_keeping_file_order(new_model);
+        }
+        self.after_model_refresh()
+    }
+
+    /// Re-apply selection-dependent views after the model was reloaded
+    /// (blocking `refresh` or background streaming refresh).
+    fn after_model_refresh(&mut self) -> Result<()> {
         let mut model = self.model.lock().unwrap();
-        model.replace_keeping_file_order(new_model);
 
         // If branch filters are active, reload commits for those branches only.
         if !self.commit_branch_filter.is_empty() {

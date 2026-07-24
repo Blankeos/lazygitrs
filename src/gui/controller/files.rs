@@ -237,8 +237,15 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
                         focus: CommitInputFocus::Summary,
                         on_confirm: Box::new(|gui, message| {
                             if !message.is_empty() {
-                                gui.git.create_empty_commit(message)?;
-                                gui.needs_refresh = true;
+                                let message = message.to_string();
+                                gui.start_remote_op(
+                                    "Empty commit",
+                                    "Creating empty commit...",
+                                    move |git| {
+                                        git.create_empty_commit(&message)?;
+                                        Ok(())
+                                    },
+                                );
                             }
                             Ok(())
                         }),
@@ -267,8 +274,11 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
                         focus: CommitInputFocus::Summary,
                         on_confirm: Box::new(|gui, message| {
                             if !message.is_empty() {
-                                gui.git.create_commit(message, false)?;
-                                gui.needs_refresh = true;
+                                let message = message.to_string();
+                                gui.start_remote_op("Commit", "Creating commit...", move |git| {
+                                    git.create_commit(&message, false)?;
+                                    Ok(())
+                                });
                             }
                             Ok(())
                         }),
@@ -292,8 +302,11 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
         focus: CommitInputFocus::Summary,
         on_confirm: Box::new(|gui, message| {
             if !message.is_empty() {
-                gui.git.create_commit(message, false)?;
-                gui.needs_refresh = true;
+                let message = message.to_string();
+                gui.start_remote_op("Commit", "Creating commit...", move |git| {
+                    git.create_commit(&message, false)?;
+                    Ok(())
+                });
             }
             Ok(())
         }),
@@ -334,8 +347,11 @@ fn open_ai_commit_prompt(gui: &mut Gui) -> Result<()> {
                     focus: CommitInputFocus::Summary,
                     on_confirm: Box::new(|gui, message| {
                         if !message.is_empty() {
-                            gui.git.create_commit(message, false)?;
-                            gui.needs_refresh = true;
+                            let message = message.to_string();
+                            gui.start_remote_op("Commit", "Creating commit...", move |git| {
+                                git.create_commit(&message, false)?;
+                                Ok(())
+                            });
                         }
                         Ok(())
                     }),
@@ -354,8 +370,11 @@ fn open_ai_commit_prompt(gui: &mut Gui) -> Result<()> {
         focus: CommitInputFocus::Summary,
         on_confirm: Box::new(|gui, message| {
             if !message.is_empty() {
-                gui.git.create_commit(message, false)?;
-                gui.needs_refresh = true;
+                let message = message.to_string();
+                gui.start_remote_op("Commit", "Creating commit...", move |git| {
+                    git.create_commit(&message, false)?;
+                    Ok(())
+                });
             }
             Ok(())
         }),
@@ -840,8 +859,10 @@ fn amend_commit(gui: &mut Gui) -> Result<()> {
         title: "Amend".to_string(),
         message: "Amend last commit with staged changes?".to_string(),
         on_confirm: Box::new(|gui| {
-            gui.git.amend_commit()?;
-            gui.needs_refresh = true;
+            gui.start_remote_op("Amend", "Amending commit...", |git| {
+                git.amend_commit()?;
+                Ok(())
+            });
             Ok(())
         }),
     };
@@ -855,13 +876,13 @@ fn commit_with_editor(gui: &mut Gui) -> Result<()> {
         title: "Commit message (or leave empty to open editor)".to_string(),
         textarea: make_textarea("Enter commit message..."),
         on_confirm: Box::new(|gui, message| {
-            if message.is_empty() {
-                // For now, just create an empty commit message prompt
-                // Full editor integration requires Phase 4 (subprocess management)
-            } else {
-                gui.git.create_commit(message, false)?;
+            if !message.is_empty() {
+                let message = message.to_string();
+                gui.start_remote_op("Commit", "Creating commit...", move |git| {
+                    git.create_commit(&message, false)?;
+                    Ok(())
+                });
             }
-            gui.needs_refresh = true;
             Ok(())
         }),
         is_commit: false,

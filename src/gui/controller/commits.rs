@@ -182,12 +182,19 @@ fn reword_commit(gui: &mut Gui) -> Result<()> {
             textarea: ta,
             on_confirm: Box::new(move |gui, message| {
                 if !message.is_empty() {
+                    let message = message.to_string();
+                    let hash = hash.clone();
                     if is_head {
-                        gui.git.reword_commit(&hash, message)?;
+                        gui.start_remote_op("Reword", "Rewording commit...", move |git| {
+                            git.reword_commit(&hash, &message)?;
+                            Ok(())
+                        });
                     } else {
-                        gui.git.reword_commit_rebase(&hash, message)?;
+                        gui.start_remote_op("Reword", "Rewording commit...", move |git| {
+                            git.reword_commit_rebase(&hash, &message)?;
+                            Ok(())
+                        });
                     }
-                    gui.needs_refresh = true;
                 }
                 Ok(())
             }),
@@ -583,8 +590,10 @@ fn amend_to_commit(gui: &mut Gui) -> Result<()> {
                 title: "Amend".to_string(),
                 message: "Amend staged changes to HEAD commit?".to_string(),
                 on_confirm: Box::new(|gui| {
-                    gui.git.amend_commit()?;
-                    gui.needs_refresh = true;
+                    gui.start_remote_op("Amend", "Amending commit...", |git| {
+                        git.amend_commit()?;
+                        Ok(())
+                    });
                     Ok(())
                 }),
             };
@@ -598,9 +607,12 @@ fn amend_to_commit(gui: &mut Gui) -> Result<()> {
                 title: "Amend to commit".to_string(),
                 message: format!("Amend staged changes to commit {}?", short),
                 on_confirm: Box::new(move |gui| {
-                    gui.git.create_fixup_commit(&hash)?;
-                    gui.git.rebase_autosquash(&format!("{}^", hash))?;
-                    gui.needs_refresh = true;
+                    let hash = hash.clone();
+                    gui.start_remote_op("Amend", "Amending commit...", move |git| {
+                        git.create_fixup_commit(&hash)?;
+                        git.rebase_autosquash(&format!("{}^", hash))?;
+                        Ok(())
+                    });
                     Ok(())
                 }),
             };
