@@ -1196,7 +1196,13 @@ impl Gui {
 
         let result = self.main_loop(&mut terminal);
 
+        let restore_started = Instant::now();
         restore_terminal(&mut terminal)?;
+        crate::input_trace!(
+            "teardown",
+            "terminal restored in {}ms",
+            restore_started.elapsed().as_millis()
+        );
         result
     }
 
@@ -1306,6 +1312,7 @@ impl Gui {
 
             // Render
             let theme = self.active_theme();
+            let frame_started = Instant::now();
             terminal.draw(|frame| {
                 if self.rebase_mode.active {
                     presentation::rebase_mode::render(frame, &mut self.rebase_mode, &theme);
@@ -1463,6 +1470,10 @@ impl Gui {
                     }
                 }
             })?;
+            let frame_elapsed = frame_started.elapsed();
+            if frame_elapsed.as_millis() >= 40 {
+                crate::input_trace!("perf", "slow frame draw: {}ms", frame_elapsed.as_millis());
+            }
 
             // Handle events
             if event::poll(std::time::Duration::from_millis(16))? {
@@ -1482,9 +1493,28 @@ impl Gui {
                     match terminal_event {
                         Event::Key(key) => {
                             if should_dispatch_key(key.kind) {
-                                crate::input_trace!("dispatch", "key -> handle_key: {key:?}");
+                                crate::input_trace!(
+                                    "dispatch",
+                                    "key -> handle_key: {key:?} [ctx={} popup={} search={} diff_focused={} rebase={} diff_mode={}]",
+                                    self.context_mgr.active().title(),
+                                    self.popup != PopupState::None,
+                                    self.search_active,
+                                    self.diff_focused,
+                                    self.rebase_mode.active,
+                                    self.diff_mode.active
+                                );
+                                let key_started = Instant::now();
                                 if let Err(err) = self.handle_key(key) {
                                     self.show_error("Command failed", err);
+                                }
+                                let key_elapsed = key_started.elapsed();
+                                if key_elapsed.as_millis() >= 40 {
+                                    crate::input_trace!(
+                                        "perf",
+                                        "slow handle_key ({:?}): {}ms",
+                                        key.code,
+                                        key_elapsed.as_millis()
+                                    );
                                 }
                             } else {
                                 crate::input_trace!("dispatch", "key dropped (release): {key:?}");
@@ -1494,8 +1524,17 @@ impl Gui {
                             if repetitions > 1 {
                                 crate::input_trace!("dispatch", "mouse x{repetitions}: {mouse:?}");
                             }
+                            let mouse_started = Instant::now();
                             for _ in 0..repetitions {
                                 self.handle_mouse(mouse);
+                            }
+                            let mouse_elapsed = mouse_started.elapsed();
+                            if mouse_elapsed.as_millis() >= 40 {
+                                crate::input_trace!(
+                                    "perf",
+                                    "slow handle_mouse x{repetitions}: {}ms",
+                                    mouse_elapsed.as_millis()
+                                );
                             }
                         }
                         Event::Resize(w, h) => {
@@ -1575,6 +1614,7 @@ impl Gui {
 
             // Refresh data if needed
             if self.needs_refresh {
+                let refresh_started = Instant::now();
                 match self.refresh() {
                     Ok(()) => {
                         self.needs_refresh = false;
@@ -1587,7 +1627,12 @@ impl Gui {
                         self.show_error("Refresh failed", err);
                     }
                 }
+                let refresh_elapsed = refresh_started.elapsed();
+                if refresh_elapsed.as_millis() >= 40 {
+                    crate::input_trace!("perf", "slow refresh: {}ms", refresh_elapsed.as_millis());
+                }
             } else if self.needs_files_refresh {
+                let refresh_started = Instant::now();
                 match self.refresh_files_only() {
                     Ok(()) => {
                         self.needs_files_refresh = false;
@@ -1597,6 +1642,14 @@ impl Gui {
                         self.needs_files_refresh = false;
                         self.show_error("Refresh failed", err);
                     }
+                }
+                let refresh_elapsed = refresh_started.elapsed();
+                if refresh_elapsed.as_millis() >= 40 {
+                    crate::input_trace!(
+                        "perf",
+                        "slow files refresh: {}ms",
+                        refresh_elapsed.as_millis()
+                    );
                 }
             }
 
