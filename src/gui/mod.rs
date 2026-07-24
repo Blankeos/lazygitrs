@@ -68,9 +68,8 @@ fn list_picker_visible_height(terminal_height: usize) -> usize {
 
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
 const EVENT_DRAIN_LIMIT: usize = 256;
-const ESCAPE_CONTINUATION_TIMEOUT: Duration = Duration::from_millis(50);
+const ESCAPE_CONTINUATION_TIMEOUT: Duration = Duration::from_millis(25);
 const MAX_ESCAPE_SEQUENCE_EVENTS: usize = 256;
-const POPUP_KEY_TAIL_TIMEOUT: Duration = Duration::from_millis(50);
 const COMMIT_DETAILS_DEBOUNCE: Duration = Duration::from_millis(120);
 const MAX_CONCURRENT_DIFF_JOBS: usize = 2;
 const DIFF_PREVIEW_CACHE_ENTRIES: usize = 8;
@@ -324,7 +323,7 @@ fn read_terminal_events() -> io::Result<Vec<Event>> {
     Ok(Vec::new())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct QueuedTerminalEvent {
     event: Event,
     repetitions: usize,
@@ -392,7 +391,153 @@ fn read_terminal_event_batch() -> io::Result<VecDeque<QueuedTerminalEvent>> {
             break;
         }
     }
+    filter_csi_soup(&mut queue);
     Ok(queue)
+}
+
+fn is_csi_param_char(c: char) -> bool {
+    matches!(c, '0'..='9' | ';' | ':' | '<' | '=' | '>' | '?')
+}
+
+fn is_csi_final_char(c: char) -> bool {
+    c.is_ascii() && ('@'..='~').contains(&c)
+}
+
+fn queued_soup_char(queued: &QueuedTerminalEvent) -> Option<char> {
+    if queued.repetitions != 1 {
+        return None;
+    }
+    let Event::Key(key) = &queued.event else {
+        return None;
+    };
+    if key.kind != crossterm::event::KeyEventKind::Press {
+        return None;
+    }
+    let KeyCode::Char(c) = key.code else {
+        return None;
+    };
+    if !c.is_ascii() {
+        return None;
+    }
+    match key.modifiers {
+        KeyModifiers::NONE if is_csi_param_char(c) || c == '[' || is_csi_final_char(c) => Some(c),
+        KeyModifiers::SHIFT if is_csi_final_char(c) => Some(c),
+        _ => None,
+    }
+}
+
+/// Drop or reassemble runs of Char key events that look like mangled CSI bodies
+/// (crossterm-rs/crossterm#993). Humans cannot type 3+ CSI-grammar characters within
+/// one 16ms poll frame; bracketed paste is enabled so real pastes arrive as Paste events.
+fn filter_csi_soup(queue: &mut VecDeque<QueuedTerminalEvent>) {
+    let entries: Vec<QueuedTerminalEvent> = queue.drain(..).collect();
+    let mut out = Vec::with_capacity(entries.len());
+    let mut i = 0;
+
+    while i < entries.len() {
+        if queued_soup_char(&entries[i]) == Some('[') {
+            let start = i;
+            i += 1;
+            let mut params = String::new();
+            while i < entries.len() {
+                if let Some(c) = queued_soup_char(&entries[i]) {
+                    if is_csi_param_char(c) {
+                        let Event::Key(key) = &entries[i].event else {
+                            break;
+                        };
+                        if key.modifiers == KeyModifiers::NONE {
+                            params.push(c);
+                            i += 1;
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+
+            if i < entries.len() {
+                if let Some(final_c) = queued_soup_char(&entries[i]) {
+                    if is_csi_final_char(final_c) {
+                        let seq = format!("[{params}{final_c}");
+                        let run_len = i - start + 1;
+                        // Empty-param bodies matter too: a legacy arrow split
+                        // (`ESC` then `[A`) whose ESC was dispatched separately
+                        // must become Up, not a stray Shift+A (the amend key).
+                        if let Some(event) = parse_fragmented_escape_sequence(&seq) {
+                            crate::input_trace!("soup", "reassembled {seq:?} -> {event:?}");
+                            out.push(QueuedTerminalEvent {
+                                event,
+                                repetitions: 1,
+                            });
+                            i += 1;
+                            continue;
+                        }
+                        if run_len >= 3 {
+                            crate::input_trace!("soup", "dropped unparsed {seq:?}");
+                            i += 1;
+                            continue;
+                        }
+                        // 2-entry run with no parse match: leave untouched.
+                        out.push(entries[start].clone());
+                        i = start + 1;
+                        continue;
+                    }
+                }
+            }
+
+            if params.len() >= 2 {
+                let seq = format!("[{params}");
+                crate::input_trace!("soup", "dropped incomplete {seq:?}");
+                continue;
+            }
+
+            out.push(entries[start].clone());
+            i = start + 1;
+            continue;
+        }
+
+        if let Some(c) = queued_soup_char(&entries[i]) {
+            if is_csi_param_char(c) {
+                let start = i;
+                let mut params = String::new();
+                while i < entries.len() {
+                    if let Some(c) = queued_soup_char(&entries[i]) {
+                        if is_csi_param_char(c) {
+                            let Event::Key(key) = &entries[i].event else {
+                                break;
+                            };
+                            if key.modifiers == KeyModifiers::NONE {
+                                params.push(c);
+                                i += 1;
+                                continue;
+                            }
+                        }
+                    }
+                    break;
+                }
+
+                let run_len = i - start;
+                if run_len >= 3 && i < entries.len() {
+                    if let Some(final_c) = queued_soup_char(&entries[i]) {
+                        if is_csi_final_char(final_c) {
+                            let seq = format!("{params}{final_c}");
+                            crate::input_trace!("soup", "dropped headless {seq:?}");
+                            i += 1;
+                            continue;
+                        }
+                    }
+                }
+
+                out.extend(entries[start..i].iter().cloned());
+                continue;
+            }
+        }
+
+        out.push(entries[i].clone());
+        i += 1;
+    }
+
+    queue.extend(out);
 }
 
 fn should_dispatch_key(kind: crossterm::event::KeyEventKind) -> bool {
@@ -400,42 +545,6 @@ fn should_dispatch_key(kind: crossterm::event::KeyEventKind) -> bool {
         kind,
         crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
     )
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PopupKeyTail {
-    key: KeyEvent,
-    expires_at: Instant,
-}
-
-fn suppress_popup_key_tail(tail: &mut Option<PopupKeyTail>, key: KeyEvent, now: Instant) -> bool {
-    let Some(blocked) = *tail else {
-        return false;
-    };
-    if now > blocked.expires_at {
-        *tail = None;
-        return false;
-    }
-
-    let same_key = key.code == blocked.key.code && key.modifiers == blocked.key.modifiers;
-    if !same_key {
-        if key.kind != crossterm::event::KeyEventKind::Release {
-            *tail = None;
-        }
-        return false;
-    }
-
-    match key.kind {
-        crossterm::event::KeyEventKind::Repeat => true,
-        crossterm::event::KeyEventKind::Release => {
-            *tail = None;
-            true
-        }
-        crossterm::event::KeyEventKind::Press => {
-            *tail = None;
-            false
-        }
-    }
 }
 
 fn has_command_modifier(modifiers: KeyModifiers) -> bool {
@@ -1078,7 +1187,7 @@ impl Gui {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        let (mut terminal, keyboard_enhanced) = setup_terminal()?;
+        let mut terminal = setup_terminal()?;
 
         // Sync layout dimensions with actual terminal size so mouse handling
         // uses the correct geometry from the very first frame.
@@ -1087,14 +1196,11 @@ impl Gui {
 
         let result = self.main_loop(&mut terminal);
 
-        restore_terminal(&mut terminal, keyboard_enhanced)?;
+        restore_terminal(&mut terminal)?;
         result
     }
 
     fn main_loop(&mut self, terminal: &mut Term) -> Result<()> {
-        let mut terminal_focused = true;
-        let mut popup_key_tail = None;
-
         loop {
             // Drain any model parts that have arrived from the background load.
             if let Some(rx) = &self.initial_load_rx {
@@ -1368,77 +1474,28 @@ impl Gui {
                         terminal_events.len()
                     );
                 }
-                // Ghostty may enqueue the character component of a macOS tab
-                // shortcut immediately before its FocusLost report. Quarantine
-                // that transition batch, but resume normally after FocusGained.
-                let mut focus_transition_pending = terminal_events
-                    .iter()
-                    .find_map(|queued| match queued.event {
-                        Event::FocusGained => Some(false),
-                        Event::FocusLost => Some(true),
-                        _ => None,
-                    })
-                    .unwrap_or(false);
-                if focus_transition_pending {
-                    crate::input_trace!(
-                        "dispatch",
-                        "focus transition quarantine active for this batch"
-                    );
-                }
                 while let Some(QueuedTerminalEvent {
                     event: terminal_event,
                     repetitions,
                 }) = terminal_events.pop_front()
                 {
-                    let popup_was_open = self.popup != PopupState::None;
-                    let dispatched_key = match &terminal_event {
-                        Event::Key(key) => Some(*key),
-                        _ => None,
-                    };
                     match terminal_event {
                         Event::Key(key) => {
-                            if !terminal_focused || focus_transition_pending {
-                                crate::input_trace!(
-                                    "dispatch",
-                                    "key dropped (unfocused/transition): {key:?}"
-                                );
-                            } else {
-                                let suppressed = suppress_popup_key_tail(
-                                    &mut popup_key_tail,
-                                    key,
-                                    Instant::now(),
-                                );
-                                if suppressed {
-                                    crate::input_trace!(
-                                        "dispatch",
-                                        "key suppressed (popup tail): {key:?}"
-                                    );
-                                } else if !should_dispatch_key(key.kind) {
-                                    crate::input_trace!(
-                                        "dispatch",
-                                        "key dropped (release): {key:?}"
-                                    );
-                                } else {
-                                    crate::input_trace!("dispatch", "key -> handle_key: {key:?}");
-                                    if let Err(err) = self.handle_key(key) {
-                                        self.show_error("Command failed", err);
-                                    }
+                            if should_dispatch_key(key.kind) {
+                                crate::input_trace!("dispatch", "key -> handle_key: {key:?}");
+                                if let Err(err) = self.handle_key(key) {
+                                    self.show_error("Command failed", err);
                                 }
+                            } else {
+                                crate::input_trace!("dispatch", "key dropped (release): {key:?}");
                             }
                         }
                         Event::Mouse(mouse) => {
-                            if !terminal_focused || focus_transition_pending {
-                                crate::input_trace!("dispatch", "mouse dropped: {mouse:?}");
-                            } else {
-                                if repetitions > 1 {
-                                    crate::input_trace!(
-                                        "dispatch",
-                                        "mouse x{repetitions}: {mouse:?}"
-                                    );
-                                }
-                                for _ in 0..repetitions {
-                                    self.handle_mouse(mouse);
-                                }
+                            if repetitions > 1 {
+                                crate::input_trace!("dispatch", "mouse x{repetitions}: {mouse:?}");
+                            }
+                            for _ in 0..repetitions {
+                                self.handle_mouse(mouse);
                             }
                         }
                         Event::Resize(w, h) => {
@@ -1492,34 +1549,17 @@ impl Gui {
                         }
                         Event::FocusGained => {
                             crate::input_trace!("dispatch", "focus gained");
-                            terminal_focused = true;
-                            focus_transition_pending = false;
                             if self.config.user_config.git.auto_refresh {
                                 self.needs_refresh = true;
                             }
                         }
                         Event::FocusLost => {
                             crate::input_trace!("dispatch", "focus lost");
-                            terminal_focused = false;
-                            focus_transition_pending = false;
                         }
                         Event::Paste(data) => {
                             crate::input_trace!("dispatch", "paste ({} bytes)", data.len());
-                            if terminal_focused && !focus_transition_pending {
-                                self.handle_paste(data);
-                            }
+                            self.handle_paste(data);
                         }
-                    }
-
-                    let popup_is_open = self.popup != PopupState::None;
-                    if popup_was_open
-                        && !popup_is_open
-                        && let Some(key) = dispatched_key
-                    {
-                        popup_key_tail = Some(PopupKeyTail {
-                            key,
-                            expires_at: Instant::now() + POPUP_KEY_TAIL_TIMEOUT,
-                        });
                     }
                 }
             }
@@ -7974,19 +8014,6 @@ fn rect_contains(r: ratatui::layout::Rect, col: u16, row: u16) -> bool {
     col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
 }
 
-fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
-    // Keep printable input on the terminal's normal text path. In particular,
-    // REPORT_ALL_KEYS_AS_ESCAPE_CODES replaces produced text with a logical key
-    // identity. Crossterm does not expose the protocol's associated-text
-    // field, so keyboard layouts, IMEs, or remappers can otherwise turn a typed
-    // character into a different shortcut (for example, `q` into `u`).
-    //
-    // Event types let us explicitly accept Press and Repeat while rejecting
-    // Release, preventing a released key from acting on a newly opened view.
-    crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-        | crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-}
-
 /// Enables button, drag, and scroll events without passive pointer-motion events.
 ///
 /// Crossterm's `EnableMouseCapture` also enables DEC mode 1003 (all motion), which can
@@ -8014,21 +8041,6 @@ impl Command for EnableMouseCaptureWithoutHover {
 mod terminal_mouse_tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
-
-    #[test]
-    fn keyboard_enhancement_preserves_terminal_text_input() {
-        let flags = keyboard_enhancement_flags();
-
-        assert!(
-            flags.contains(crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-        );
-        assert!(flags.contains(crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
-        assert!(
-            !flags.contains(
-                crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-            )
-        );
-    }
 
     #[test]
     fn reconstructed_kitty_keys_preserve_repeat_and_release_kinds() {
@@ -8081,6 +8093,204 @@ mod terminal_mouse_tests {
         assert!(!should_dispatch_key(
             crossterm::event::KeyEventKind::Release
         ));
+    }
+
+    fn soup_key(c: char, modifiers: KeyModifiers) -> QueuedTerminalEvent {
+        QueuedTerminalEvent {
+            event: Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char(c),
+                modifiers,
+                crossterm::event::KeyEventKind::Press,
+            )),
+            repetitions: 1,
+        }
+    }
+
+    #[test]
+    fn filter_csi_soup_reassembles_up_release() {
+        let mut queue = VecDeque::from([
+            soup_key('[', KeyModifiers::NONE),
+            soup_key('1', KeyModifiers::NONE),
+            soup_key(';', KeyModifiers::NONE),
+            soup_key('1', KeyModifiers::NONE),
+            soup_key(':', KeyModifiers::NONE),
+            soup_key('3', KeyModifiers::NONE),
+            soup_key('A', KeyModifiers::SHIFT),
+        ]);
+        filter_csi_soup(&mut queue);
+        assert_eq!(queue.len(), 1);
+        let Event::Key(key) = &queue[0].event else {
+            panic!("expected key event");
+        };
+        assert_eq!(key.code, KeyCode::Up);
+        assert_eq!(key.kind, crossterm::event::KeyEventKind::Release);
+        assert!(!should_dispatch_key(key.kind));
+    }
+
+    #[test]
+    fn filter_csi_soup_reassembles_sgr_mouse_click() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let mut queue = VecDeque::from([
+            soup_key('[', KeyModifiers::NONE),
+            soup_key('<', KeyModifiers::NONE),
+            soup_key('0', KeyModifiers::NONE),
+            soup_key(';', KeyModifiers::NONE),
+            soup_key('5', KeyModifiers::NONE),
+            soup_key('4', KeyModifiers::NONE),
+            soup_key(';', KeyModifiers::NONE),
+            soup_key('2', KeyModifiers::NONE),
+            soup_key('1', KeyModifiers::NONE),
+            soup_key('M', KeyModifiers::SHIFT),
+        ]);
+        filter_csi_soup(&mut queue);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            queue[0].event,
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 53,
+                row: 20,
+                modifiers: KeyModifiers::NONE,
+            })
+        );
+    }
+
+    #[test]
+    fn filter_csi_soup_reassembles_kitty_super_digit() {
+        let mut queue = VecDeque::from([
+            soup_key('[', KeyModifiers::NONE),
+            soup_key('5', KeyModifiers::NONE),
+            soup_key('1', KeyModifiers::NONE),
+            soup_key(';', KeyModifiers::NONE),
+            soup_key('9', KeyModifiers::NONE),
+            soup_key('u', KeyModifiers::NONE),
+        ]);
+        filter_csi_soup(&mut queue);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            queue[0].event,
+            Event::Key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::SUPER))
+        );
+    }
+
+    #[test]
+    fn filter_csi_soup_reassembles_legacy_arrow_body() {
+        let mut queue = VecDeque::from([
+            soup_key('[', KeyModifiers::NONE),
+            soup_key('A', KeyModifiers::SHIFT),
+        ]);
+        filter_csi_soup(&mut queue);
+        assert_eq!(queue.len(), 1);
+        let Event::Key(key) = &queue[0].event else {
+            panic!("expected key event");
+        };
+        assert_eq!(key.code, KeyCode::Up);
+        assert_eq!(key.kind, crossterm::event::KeyEventKind::Press);
+        assert!(should_dispatch_key(key.kind));
+    }
+
+    #[test]
+    fn filter_csi_soup_reassembles_focus_gained() {
+        let mut queue = VecDeque::from([
+            soup_key('[', KeyModifiers::NONE),
+            soup_key('I', KeyModifiers::NONE),
+        ]);
+        filter_csi_soup(&mut queue);
+        assert_eq!(queue.len(), 1);
+        assert!(matches!(queue[0].event, Event::FocusGained));
+    }
+
+    #[test]
+    fn filter_csi_soup_drops_headless_param_run() {
+        let mut queue = VecDeque::from([
+            soup_key('0', KeyModifiers::NONE),
+            soup_key('7', KeyModifiers::NONE),
+            soup_key(';', KeyModifiers::NONE),
+            soup_key('1', KeyModifiers::NONE),
+            soup_key(':', KeyModifiers::NONE),
+            soup_key('3', KeyModifiers::NONE),
+            soup_key('u', KeyModifiers::NONE),
+        ]);
+        filter_csi_soup(&mut queue);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn filter_csi_soup_leaves_normal_typing_untouched() {
+        let mut queue = VecDeque::from([
+            soup_key('j', KeyModifiers::NONE),
+            soup_key('k', KeyModifiers::NONE),
+        ]);
+        filter_csi_soup(&mut queue);
+        assert_eq!(queue.len(), 2);
+        assert_eq!(
+            queue[0].event,
+            Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+        );
+        assert_eq!(
+            queue[1].event,
+            Event::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+        );
+    }
+
+    #[test]
+    fn filter_csi_soup_leaves_lone_bracket_untouched() {
+        let mut queue = VecDeque::from([soup_key('[', KeyModifiers::NONE)]);
+        filter_csi_soup(&mut queue);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            queue[0].event,
+            Event::Key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE))
+        );
+    }
+
+    #[test]
+    fn filter_csi_soup_drops_incomplete_bracketed_params() {
+        let mut queue = VecDeque::from([
+            soup_key('[', KeyModifiers::NONE),
+            soup_key('1', KeyModifiers::NONE),
+            soup_key(';', KeyModifiers::NONE),
+            soup_key('1', KeyModifiers::NONE),
+        ]);
+        filter_csi_soup(&mut queue);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn filter_csi_soup_does_not_merge_across_non_soup_entries() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let mouse = QueuedTerminalEvent {
+            event: Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: 1,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            }),
+            repetitions: 1,
+        };
+        let mut queue = VecDeque::from([
+            soup_key('[', KeyModifiers::NONE),
+            soup_key('1', KeyModifiers::NONE),
+            mouse.clone(),
+            soup_key('A', KeyModifiers::SHIFT),
+        ]);
+        filter_csi_soup(&mut queue);
+        assert_eq!(queue.len(), 4);
+        assert_eq!(
+            queue[0].event,
+            Event::Key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE))
+        );
+        assert_eq!(
+            queue[1].event,
+            Event::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE))
+        );
+        assert_eq!(queue[2].event, mouse.event);
+        assert_eq!(
+            queue[3].event,
+            Event::Key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT))
+        );
     }
 
     #[test]
@@ -8158,56 +8368,6 @@ mod terminal_mouse_tests {
         assert_eq!(queue[0].repetitions, 2);
         assert_eq!(queue[1].repetitions, 1);
         assert_eq!(queue[2].repetitions, 1);
-    }
-
-    #[test]
-    fn popup_close_suppresses_only_the_closing_keys_tail() {
-        let now = Instant::now();
-        let closing_key = KeyEvent::new_with_kind(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-            crossterm::event::KeyEventKind::Press,
-        );
-        let mut tail = Some(PopupKeyTail {
-            key: closing_key,
-            expires_at: now + POPUP_KEY_TAIL_TIMEOUT,
-        });
-
-        assert!(suppress_popup_key_tail(
-            &mut tail,
-            KeyEvent::new_with_kind(
-                KeyCode::Enter,
-                KeyModifiers::NONE,
-                crossterm::event::KeyEventKind::Repeat,
-            ),
-            now,
-        ));
-        assert!(!suppress_popup_key_tail(
-            &mut tail,
-            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
-            now,
-        ));
-        assert!(tail.is_none());
-    }
-
-    #[test]
-    fn popup_close_release_clears_the_tail() {
-        let now = Instant::now();
-        let mut tail = Some(PopupKeyTail {
-            key: KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-            expires_at: now + POPUP_KEY_TAIL_TIMEOUT,
-        });
-
-        assert!(suppress_popup_key_tail(
-            &mut tail,
-            KeyEvent::new_with_kind(
-                KeyCode::Esc,
-                KeyModifiers::NONE,
-                crossterm::event::KeyEventKind::Release,
-            ),
-            now,
-        ));
-        assert!(tail.is_none());
     }
 
     #[test]
@@ -8362,17 +8522,16 @@ mod terminal_mouse_tests {
     }
 }
 
-fn setup_terminal() -> Result<(Term, bool)> {
+fn setup_terminal() -> Result<Term> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    // The capability probe reads terminal responses. Run it before enabling
-    // focus and mouse reporting so their control sequences cannot interleave
-    // with the probe response.
-    let keyboard_enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
-    crate::input_trace!("setup", "keyboard_enhanced={keyboard_enhanced}");
-    if keyboard_enhanced {
-        crate::input_trace!("setup", "keyboard flags {:?}", keyboard_enhancement_flags());
-    }
+    // Do not push kitty keyboard-enhancement flags: terminals then emit
+    // release/repeat CSI sequences that crossterm#993 can split after ESC and
+    // leak as ordinary keystrokes; this app only acts on key presses.
+    crate::input_trace!(
+        "setup",
+        "kitty keyboard protocol disabled (legacy input mode)"
+    );
 
     execute!(
         stdout,
@@ -8380,12 +8539,6 @@ fn setup_terminal() -> Result<(Term, bool)> {
         crossterm::event::EnableBracketedPaste,
         cursor::Hide
     )?;
-    if keyboard_enhanced {
-        execute!(
-            stdout,
-            crossterm::event::PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
-        )?;
-    }
     execute!(
         stdout,
         EnableMouseCaptureWithoutHover,
@@ -8393,33 +8546,21 @@ fn setup_terminal() -> Result<(Term, bool)> {
     )?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
-    Ok((terminal, keyboard_enhanced))
+    Ok(terminal)
 }
 
-fn restore_terminal(terminal: &mut Term, keyboard_enhanced: bool) -> Result<()> {
+fn restore_terminal(terminal: &mut Term) -> Result<()> {
     crate::input_trace!("teardown", "restoring terminal");
     drain_pending_terminal_events(Duration::from_millis(0));
 
-    if keyboard_enhanced {
-        execute!(
-            terminal.backend_mut(),
-            crossterm::event::DisableMouseCapture,
-            crossterm::event::DisableFocusChange,
-            crossterm::event::PopKeyboardEnhancementFlags,
-            crossterm::event::DisableBracketedPaste,
-            cursor::Show,
-            LeaveAlternateScreen
-        )?;
-    } else {
-        execute!(
-            terminal.backend_mut(),
-            crossterm::event::DisableMouseCapture,
-            crossterm::event::DisableFocusChange,
-            crossterm::event::DisableBracketedPaste,
-            cursor::Show,
-            LeaveAlternateScreen
-        )?;
-    }
+    execute!(
+        terminal.backend_mut(),
+        crossterm::event::DisableMouseCapture,
+        crossterm::event::DisableFocusChange,
+        crossterm::event::DisableBracketedPaste,
+        cursor::Show,
+        LeaveAlternateScreen
+    )?;
     terminal.backend_mut().flush()?;
 
     drain_pending_terminal_events(Duration::from_millis(25));
