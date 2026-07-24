@@ -1,5 +1,6 @@
 pub mod context;
 pub mod controller;
+pub(crate) mod input_trace;
 pub mod layout;
 pub mod modes;
 pub mod popup;
@@ -243,6 +244,7 @@ fn parse_fragmented_escape_sequence(sequence: &str) -> Option<Event> {
 /// initial ESC can split one terminal control sequence into ordinary key events.
 fn read_terminal_events() -> io::Result<Vec<Event>> {
     let first = event::read()?;
+    crate::input_trace!("raw", "{first:?}");
     let Event::Key(first_key) = first else {
         return Ok(vec![first]);
     };
@@ -251,14 +253,18 @@ fn read_terminal_events() -> io::Result<Vec<Event>> {
     }
 
     if !event::poll(ESCAPE_CONTINUATION_TIMEOUT)? {
+        crate::input_trace!("reassembly", "lone Esc (timeout)");
         return Ok(vec![Event::Key(first_key)]);
     }
     let second = event::read()?;
+    crate::input_trace!("raw", "{second:?}");
     let Event::Key(mut second_key) = second else {
+        crate::input_trace!("reassembly", "aborted by non-key event");
         return Ok(vec![Event::Key(first_key), second]);
     };
     let KeyCode::Char(introducer @ ('[' | 'O' | ']' | 'P' | '^' | '_')) = second_key.code else {
         second_key.modifiers |= KeyModifiers::ALT;
+        crate::input_trace!("reassembly", "alt fallback -> {second_key:?}");
         return Ok(vec![Event::Key(second_key)]);
     };
 
@@ -272,32 +278,49 @@ fn read_terminal_events() -> io::Result<Vec<Event>> {
             break;
         }
         let next = event::read()?;
+        crate::input_trace!("raw", "{next:?}");
         let Event::Key(key) = next else {
+            crate::input_trace!(
+                "reassembly",
+                "interrupted by {next:?}, partial sequence {sequence:?} dropped"
+            );
             return Ok(vec![next]);
         };
         if control_string {
             if key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                crate::input_trace!("reassembly", "swallowed control string {sequence:?}");
                 return Ok(Vec::new());
             }
             if control_string_esc && key.code == KeyCode::Char('\\') {
+                crate::input_trace!("reassembly", "swallowed control string {sequence:?}");
                 return Ok(Vec::new());
             }
             control_string_esc = key.code == KeyCode::Esc;
             continue;
         }
         let KeyCode::Char(ch) = key.code else {
+            crate::input_trace!(
+                "reassembly",
+                "interrupted by key {key:?}, partial sequence {sequence:?} dropped"
+            );
             return Ok(vec![Event::Key(key)]);
         };
         sequence.push(ch);
         if ch.is_ascii() && ('@'..='~').contains(&ch) {
-            return Ok(parse_fragmented_escape_sequence(&sequence)
-                .into_iter()
-                .collect());
+            let parsed = parse_fragmented_escape_sequence(&sequence);
+            let events: Vec<Event> = parsed.into_iter().collect();
+            if events.is_empty() {
+                crate::input_trace!("reassembly", "{sequence:?} -> (swallowed)");
+            } else {
+                crate::input_trace!("reassembly", "{sequence:?} -> {events:?}");
+            }
+            return Ok(events);
         }
     }
 
     // A confirmed but malformed/incomplete terminal sequence must never leak
     // its payload into shortcut handling or text inputs.
+    crate::input_trace!("reassembly", "incomplete sequence {sequence:?} swallowed");
     Ok(Vec::new())
 }
 
@@ -1338,6 +1361,13 @@ impl Gui {
             // Handle events
             if event::poll(std::time::Duration::from_millis(16))? {
                 let mut terminal_events = read_terminal_event_batch()?;
+                if !terminal_events.is_empty() {
+                    crate::input_trace!(
+                        "dispatch",
+                        "batch: {} queued entries",
+                        terminal_events.len()
+                    );
+                }
                 // Ghostty may enqueue the character component of a macOS tab
                 // shortcut immediately before its FocusLost report. Quarantine
                 // that transition batch, but resume normally after FocusGained.
@@ -1349,6 +1379,12 @@ impl Gui {
                         _ => None,
                     })
                     .unwrap_or(false);
+                if focus_transition_pending {
+                    crate::input_trace!(
+                        "dispatch",
+                        "focus transition quarantine active for this batch"
+                    );
+                }
                 while let Some(QueuedTerminalEvent {
                     event: terminal_event,
                     repetitions,
@@ -1360,22 +1396,53 @@ impl Gui {
                         _ => None,
                     };
                     match terminal_event {
-                        Event::Key(key) if terminal_focused && !focus_transition_pending => {
-                            let suppressed =
-                                suppress_popup_key_tail(&mut popup_key_tail, key, Instant::now());
-                            if should_dispatch_key(key.kind)
-                                && !suppressed
-                                && let Err(err) = self.handle_key(key)
-                            {
-                                self.show_error("Command failed", err);
+                        Event::Key(key) => {
+                            if !terminal_focused || focus_transition_pending {
+                                crate::input_trace!(
+                                    "dispatch",
+                                    "key dropped (unfocused/transition): {key:?}"
+                                );
+                            } else {
+                                let suppressed = suppress_popup_key_tail(
+                                    &mut popup_key_tail,
+                                    key,
+                                    Instant::now(),
+                                );
+                                if suppressed {
+                                    crate::input_trace!(
+                                        "dispatch",
+                                        "key suppressed (popup tail): {key:?}"
+                                    );
+                                } else if !should_dispatch_key(key.kind) {
+                                    crate::input_trace!(
+                                        "dispatch",
+                                        "key dropped (release): {key:?}"
+                                    );
+                                } else {
+                                    crate::input_trace!("dispatch", "key -> handle_key: {key:?}");
+                                    if let Err(err) = self.handle_key(key) {
+                                        self.show_error("Command failed", err);
+                                    }
+                                }
                             }
                         }
-                        Event::Mouse(mouse) if terminal_focused && !focus_transition_pending => {
-                            for _ in 0..repetitions {
-                                self.handle_mouse(mouse);
+                        Event::Mouse(mouse) => {
+                            if !terminal_focused || focus_transition_pending {
+                                crate::input_trace!("dispatch", "mouse dropped: {mouse:?}");
+                            } else {
+                                if repetitions > 1 {
+                                    crate::input_trace!(
+                                        "dispatch",
+                                        "mouse x{repetitions}: {mouse:?}"
+                                    );
+                                }
+                                for _ in 0..repetitions {
+                                    self.handle_mouse(mouse);
+                                }
                             }
                         }
                         Event::Resize(w, h) => {
+                            crate::input_trace!("dispatch", "resize {w}x{h}");
                             self.layout.update_size(w, h);
                             // Re-flow any active commit-message textarea to the new width so
                             // wrapping stays consistent with what the user sees.
@@ -1424,6 +1491,7 @@ impl Gui {
                             }
                         }
                         Event::FocusGained => {
+                            crate::input_trace!("dispatch", "focus gained");
                             terminal_focused = true;
                             focus_transition_pending = false;
                             if self.config.user_config.git.auto_refresh {
@@ -1431,13 +1499,16 @@ impl Gui {
                             }
                         }
                         Event::FocusLost => {
+                            crate::input_trace!("dispatch", "focus lost");
                             terminal_focused = false;
                             focus_transition_pending = false;
                         }
-                        Event::Paste(data) if terminal_focused && !focus_transition_pending => {
-                            self.handle_paste(data);
+                        Event::Paste(data) => {
+                            crate::input_trace!("dispatch", "paste ({} bytes)", data.len());
+                            if terminal_focused && !focus_transition_pending {
+                                self.handle_paste(data);
+                            }
                         }
-                        _ => {}
                     }
 
                     let popup_is_open = self.popup != PopupState::None;
@@ -8298,6 +8369,10 @@ fn setup_terminal() -> Result<(Term, bool)> {
     // focus and mouse reporting so their control sequences cannot interleave
     // with the probe response.
     let keyboard_enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    crate::input_trace!("setup", "keyboard_enhanced={keyboard_enhanced}");
+    if keyboard_enhanced {
+        crate::input_trace!("setup", "keyboard flags {:?}", keyboard_enhancement_flags());
+    }
 
     execute!(
         stdout,
@@ -8322,6 +8397,7 @@ fn setup_terminal() -> Result<(Term, bool)> {
 }
 
 fn restore_terminal(terminal: &mut Term, keyboard_enhanced: bool) -> Result<()> {
+    crate::input_trace!("teardown", "restoring terminal");
     drain_pending_terminal_events(Duration::from_millis(0));
 
     if keyboard_enhanced {

@@ -73,6 +73,10 @@ fn main() {
             if let Err(e) = app.run() {
                 eprintln!("Error: {:#}", e);
                 std::process::exit(1);
+            } else if gui::input_trace::enabled() {
+                if let Some(path) = gui::input_trace::path() {
+                    eprintln!("input trace written to {}", path.display());
+                }
             }
         }
         Err(e) => {
