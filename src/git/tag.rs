@@ -5,7 +5,9 @@ use crate::model::Tag;
 
 impl GitCommands {
     pub fn load_tags(&self) -> Result<Vec<Tag>> {
-        let format = "%(refname:short)|%(objectname:short)|%(subject)";
+        // Peel annotated tags to the commit they point at so co-located
+        // branch/remote labels can match on commit hash.
+        let format = "%(refname:short)|%(if)%(*objectname)%(then)%(*objectname:short)%(else)%(objectname:short)%(end)|%(subject)";
         let result = self
             .git()
             .args(&[
