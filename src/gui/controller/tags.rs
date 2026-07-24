@@ -83,42 +83,45 @@ fn delete_tag(gui: &mut Gui) -> Result<()> {
     let model = gui.model.lock().unwrap();
     if let Some(tag) = model.tags.get(selected) {
         let name = tag.name.clone();
+        let on_remote = tag.on_remote;
         drop(model);
 
         let name_local = name.clone();
-        let name_remote = name.clone();
-        let name_both = name.clone();
+        let mut items = vec![MenuItem {
+            label: "Delete local tag".to_string(),
+            description: String::new(),
+            key: Some("c".to_string()),
+            action: Some(Box::new(move |gui| {
+                gui.git.delete_tag(&name_local)?;
+                gui.needs_refresh = true;
+                Ok(())
+            })),
+        }];
+
+        if on_remote {
+            let name_remote = name.clone();
+            let name_both = name.clone();
+            items.push(MenuItem {
+                label: "Delete remote tag".to_string(),
+                description: String::new(),
+                key: Some("r".to_string()),
+                action: Some(Box::new(move |gui| {
+                    prompt_remote_tag_delete(gui, name_remote.clone(), false)
+                })),
+            });
+            items.push(MenuItem {
+                label: "Delete local and remote tag".to_string(),
+                description: String::new(),
+                key: Some("b".to_string()),
+                action: Some(Box::new(move |gui| {
+                    prompt_remote_tag_delete(gui, name_both.clone(), true)
+                })),
+            });
+        }
 
         gui.popup = PopupState::Menu {
             title: format!("Delete tag '{}'?", name),
-            items: vec![
-                MenuItem {
-                    label: "Delete local tag".to_string(),
-                    description: String::new(),
-                    key: Some("c".to_string()),
-                    action: Some(Box::new(move |gui| {
-                        gui.git.delete_tag(&name_local)?;
-                        gui.needs_refresh = true;
-                        Ok(())
-                    })),
-                },
-                MenuItem {
-                    label: "Delete remote tag".to_string(),
-                    description: String::new(),
-                    key: Some("r".to_string()),
-                    action: Some(Box::new(move |gui| {
-                        prompt_remote_tag_delete(gui, name_remote.clone(), false)
-                    })),
-                },
-                MenuItem {
-                    label: "Delete local and remote tag".to_string(),
-                    description: String::new(),
-                    key: Some("b".to_string()),
-                    action: Some(Box::new(move |gui| {
-                        prompt_remote_tag_delete(gui, name_both.clone(), true)
-                    })),
-                },
-            ],
+            items,
             selected: 0,
             loading_index: None,
         };
