@@ -296,4 +296,7 @@ Where I observed this behavior: I noticed this for the "Commit Message" and "Des
 
 - [x] the \` key to toggle the tree view or the list view isnt persisted inside the "W" Compare tool. Seems like it's always list to start.
 
-- [ ] When deleting a local tag that's on origin (it's a network request).. So show an async modal, instead of showing a "nothing changed" kinda UI. (add feedback)
+- [x] When deleting a remote tag (using 'delete remote tag' OR 'delete remote and local tag') that's on origin (it's a network request).. So show an async modal, instead of showing a "nothing changed" kinda UI. (add feedback)
+
+- [x] Allow reword on empty commit (original lazygit allows this seamlessly)
+- [x] When viewing a tag in the 'Tags' subtab in '3'. Add a `(main,origin)` label, or the other remotes as well like `(main,origin/main,someremote/main)` or something?
