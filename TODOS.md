@@ -214,7 +214,7 @@
 
 - [x] We already have Commit details when focusing commit items in their respective lists. This new change is ONLY related to full view (shift-). I initially made it show on the side.. But isntead, I decided to always make it show above. So now it'll be a vertical layout. THe half view, default view is just fine, no changes on that.
 
-- [ ] Make 'Graph View' a bit more compact, like lazygit/zed. I like the right-padding that the graph adds so it pushes the table to the right. Except that currently, if there's A LOT of branches. It becomes a problematic problem. So now, let's just make it a scrollable piece of kind of column with a max width. Might be not worth doing because Zed's terminal doesn't have horizontal mouse scroll.
+- [x] Make 'Graph View' a bit more compact, like lazygit/zed. I like the right-padding that the graph adds so it pushes the table to the right. Except that currently, if there's A LOT of branches. It becomes a problematic problem. So now, let's just make it a scrollable piece of kind of column with a max width. Might be not worth doing because Zed's terminal doesn't have horizontal mouse scroll.
 
 - [x] Add a ✦ symbol as a button somewhere inside the 'Commit Message' dialog. This will be the special clickable button that will represent the 'Generate commit message' shortcut. Make it 'hoverable' with the mouse, show a tooltip when I hover on it 'c-g Generate w/ AI'.
 
@@ -243,7 +243,7 @@
 - [x] During interactive rebase UI, merge conflicts, I see a good UI for continuing and stuff. But I think when I press continue and the next commit on the list has a conflict. It just shows me the error dialog that there's a new conflict but does not update the new interactive rebase UI with the new progress on the next commit.
 
 - [x] Performance optimizations for large repos, noticed, the performance sucked for Zed. Diff viewer was not the issue, i think it's just loading a lot in one go. Maybe paginate it. Partially fixed now, less laggy.
-  - [ ] But The issue now is that the graph is rendering too much because too many branches. but still usable, we just need to compact the graph or something
+  - [x] But The issue now is that the graph is rendering too much because too many branches. but still usable, we just need to compact the graph or something
 
 - [x] Add a "unified diff" view and a "side-by-side (split) diff view". Currently we only have split diff view by default. Let's give it a hotkey
 

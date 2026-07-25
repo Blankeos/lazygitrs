@@ -19,7 +19,6 @@ struct GraphLayoutCache {
     revision: Option<u64>,
     commit_count: usize,
     rows: Vec<graph::GraphRow>,
-    max_width: usize,
 }
 
 impl GraphLayoutCache {
@@ -33,12 +32,6 @@ impl GraphLayoutCache {
             .map(|commit| (commit.hash.clone(), commit.parents.clone()))
             .collect();
         self.rows = graph::compute_graph(&graph_input);
-        self.max_width = self
-            .rows
-            .iter()
-            .map(|row| row.cells.len())
-            .max()
-            .unwrap_or(0);
         self.revision = Some(revision);
         self.commit_count = commits.len();
     }
@@ -103,11 +96,11 @@ fn render_commits_window(
             let graph_row = graph_layout.rows.get(i);
             let is_head = commit.hash == *head_hash;
 
-            // Start with graph spans.
+            // Start with graph spans (per-row width; no global pad).
             let mut spans: Vec<Span<'static>> = if let Some(row) = graph_row {
-                graph::render_graph_spans(row, graph_layout.max_width, is_head, theme)
+                graph::render_graph_spans(row, is_head, theme)
             } else {
-                vec![Span::raw(" ".repeat(graph_layout.max_width * 2))]
+                vec![Span::raw(" ")]
             };
 
             // Hash — color by push status, overridden to cyan+bold if cherry-picked

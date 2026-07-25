@@ -276,13 +276,12 @@ fn box_drawing(up: bool, down: bool, left: bool, right: bool) -> (&'static str, 
 /// Render a GraphRow into spans. Each cell occupies two terminal columns
 /// (first glyph + right extension).
 ///
+/// Width is per-row only (no padding to a global max), so commit text starts
+/// immediately after this row's graph. Ensures a single trailing space before
+/// the hash/message.
+///
 /// `is_head` swaps the commit glyph to a filled circle for HEAD.
-pub fn render_graph_spans(
-    row: &GraphRow,
-    max_width: usize,
-    is_head: bool,
-    theme: &Theme,
-) -> Vec<Span<'static>> {
+pub fn render_graph_spans(row: &GraphRow, is_head: bool, theme: &Theme) -> Vec<Span<'static>> {
     let mut spans = Vec::with_capacity(row.cells.len() * 2 + 1);
 
     for cell in &row.cells {
@@ -315,10 +314,13 @@ pub fn render_graph_spans(
         spans.push(Span::styled(second.to_string(), second_style));
     }
 
-    // Pad to max_width so commit info aligns across rows.
-    if row.cells.len() < max_width {
-        let pad = (max_width - row.cells.len()) * 2;
-        spans.push(Span::raw(" ".repeat(pad)));
+    // Exactly one space between graph and commit info.
+    if spans
+        .last()
+        .map(|s| s.content.as_ref() != " ")
+        .unwrap_or(true)
+    {
+        spans.push(Span::raw(" "));
     }
 
     spans
