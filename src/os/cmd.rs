@@ -4,6 +4,44 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 
+/// Detach a child from the controlling terminal and keep it non-interactive.
+///
+/// Every command run through [`CmdBuilder`] has its output captured, so it can
+/// never usefully prompt: whatever it printed would be invisible and whatever it
+/// read would be keystrokes meant for the TUI. That is not hypothetical. A
+/// background `git fetch`/`ls-remote` spawns `ssh`, and `ssh` opens `/dev/tty`
+/// directly — bypassing the null stdin below — to ask for a passphrase. While
+/// one is in flight it races the render loop for terminal input and silently
+/// swallows keypresses, which is what made number keys and `q` unreliable.
+///
+/// `setsid` puts the child in a fresh session with no controlling terminal, so
+/// opening `/dev/tty` fails outright. Note that merely moving it to a new
+/// process group would be worse than doing nothing: a background-group read on
+/// the terminal raises `SIGTTIN`, which would leave the child stopped and the
+/// capturing `wait` hanging forever.
+fn make_non_interactive(cmd: &mut Command) {
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("SSH_ASKPASS_REQUIRE", "never");
+    // Only fill in a batch-mode ssh when the user has not chosen their own
+    // command, so custom ssh setups keep working.
+    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+        cmd.env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes");
+    }
+
+    #[cfg(unix)]
+    // SAFETY: `setsid` is async-signal-safe and touches no allocator or lock
+    // state, which is all `pre_exec` requires of the child between fork and
+    // exec. A freshly forked child is never a process-group leader, so the call
+    // only fails in ways we are content to ignore.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+}
+
 /// Shared command log that CmdBuilder writes to when set.
 pub type CommandLog = Arc<Mutex<Vec<String>>>;
 
@@ -131,12 +169,19 @@ impl CmdBuilder {
             cmd.current_dir(cwd);
         }
 
+        // Defaults first, so anything set explicitly on the builder wins.
+        make_non_interactive(&mut cmd);
+
         for (key, value) in &self.env_vars {
             cmd.env(key, value);
         }
 
+        // Never let a child inherit the TUI's stdin: the terminal is in raw mode
+        // and shared with the render loop.
         if self.stdin_data.is_some() {
             cmd.stdin(Stdio::piped());
+        } else {
+            cmd.stdin(Stdio::null());
         }
 
         cmd.stdout(Stdio::piped());
