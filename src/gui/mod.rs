@@ -1,5 +1,6 @@
 pub mod context;
 pub mod controller;
+pub mod input;
 pub mod layout;
 pub mod modes;
 pub mod popup;
@@ -14,7 +15,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{Command, cursor, execute};
 use ratatui::Terminal;
@@ -31,6 +32,7 @@ use crate::pager::side_by_side::{
 };
 
 use self::context::{ContextId, ContextManager, SideWindow};
+use self::input::InputReader;
 use self::layout::LayoutState;
 use self::modes::diff_mode::DiffModeState;
 use self::modes::patch_building::PatchBuildingState;
@@ -66,10 +68,25 @@ fn list_picker_visible_height(terminal_height: usize) -> usize {
 }
 
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
-const EVENT_DRAIN_LIMIT: usize = 256;
-const ESCAPE_CONTINUATION_TIMEOUT: Duration = Duration::from_millis(25);
-const MAX_ESCAPE_SEQUENCE_EVENTS: usize = 256;
 const COMMIT_DETAILS_DEBOUNCE: Duration = Duration::from_millis(120);
+
+/// How long the loop may sleep when there is nothing animating. Input wakes it
+/// immediately, so this only bounds how quickly a background result becomes
+/// visible.
+const IDLE_TICK: Duration = Duration::from_millis(120);
+
+/// Frame budget while a spinner is running or a background result is still
+/// outstanding. Also bounds how long a completed result waits to be picked up,
+/// so keep it comfortably below the threshold of noticing.
+const ANIMATION_TICK: Duration = Duration::from_millis(33);
+
+/// Spinner advance rate, derived from elapsed time so the animation speed does
+/// not depend on how often the loop happens to run.
+const SPINNER_PERIOD: Duration = Duration::from_millis(80);
+
+/// Redraw at least this often even when nothing is known to have changed, so a
+/// missed invalidation can never leave the screen stale for long.
+const MAX_FRAME_INTERVAL: Duration = Duration::from_millis(500);
 const MAX_CONCURRENT_DIFF_JOBS: usize = 2;
 const DIFF_PREVIEW_CACHE_ENTRIES: usize = 8;
 const DIFF_PREVIEW_CACHE_BYTES: usize = 32 * 1024 * 1024;
@@ -82,157 +99,6 @@ fn plain_char_key(key: KeyEvent, expected: char) -> bool {
         KeyModifiers::NONE
     };
     key.code == KeyCode::Char(expected) && key.modifiers == modifiers
-}
-
-fn parse_kitty_modifiers(value: &str) -> KeyModifiers {
-    let mask = value
-        .split(':')
-        .next()
-        .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(1)
-        .saturating_sub(1);
-    let mut modifiers = KeyModifiers::NONE;
-    modifiers.set(KeyModifiers::SHIFT, mask & 1 != 0);
-    modifiers.set(KeyModifiers::ALT, mask & 2 != 0);
-    modifiers.set(KeyModifiers::CONTROL, mask & 4 != 0);
-    modifiers.set(KeyModifiers::SUPER, mask & 8 != 0);
-    modifiers.set(KeyModifiers::HYPER, mask & 16 != 0);
-    modifiers.set(KeyModifiers::META, mask & 32 != 0);
-    modifiers
-}
-
-fn parse_fragmented_escape_sequence(sequence: &str) -> Option<Event> {
-    if let Some(csi) = sequence.strip_prefix('[') {
-        let final_byte = csi.chars().last()?;
-        let body = &csi[..csi.len().saturating_sub(final_byte.len_utf8())];
-
-        if body.is_empty() {
-            match final_byte {
-                'I' => return Some(Event::FocusGained),
-                'O' => return Some(Event::FocusLost),
-                'Z' => {
-                    return Some(Event::Key(KeyEvent::new(
-                        KeyCode::BackTab,
-                        KeyModifiers::SHIFT,
-                    )));
-                }
-                _ => {}
-            }
-        }
-
-        let modifiers = body
-            .rsplit(';')
-            .next()
-            .filter(|_| body.contains(';'))
-            .map(parse_kitty_modifiers)
-            .unwrap_or(KeyModifiers::NONE);
-        let code = match final_byte {
-            'A' => KeyCode::Up,
-            'B' => KeyCode::Down,
-            'C' => KeyCode::Right,
-            'D' => KeyCode::Left,
-            'H' => KeyCode::Home,
-            'F' => KeyCode::End,
-            'u' => {
-                let codepoint = body.split(';').next()?.split(':').next()?.parse().ok()?;
-                match codepoint {
-                    9 => KeyCode::Tab,
-                    13 => KeyCode::Enter,
-                    27 => KeyCode::Esc,
-                    127 => KeyCode::Backspace,
-                    value => KeyCode::Char(char::from_u32(value)?),
-                }
-            }
-            '~' => match body.split(';').next()? {
-                "1" | "7" => KeyCode::Home,
-                "2" => KeyCode::Insert,
-                "3" => KeyCode::Delete,
-                "4" | "8" => KeyCode::End,
-                "5" => KeyCode::PageUp,
-                "6" => KeyCode::PageDown,
-                _ => return None,
-            },
-            _ => return None,
-        };
-        return Some(Event::Key(KeyEvent::new(code, modifiers)));
-    }
-
-    let code = match sequence {
-        "OA" => KeyCode::Up,
-        "OB" => KeyCode::Down,
-        "OC" => KeyCode::Right,
-        "OD" => KeyCode::Left,
-        "OH" => KeyCode::Home,
-        "OF" => KeyCode::End,
-        "OP" => KeyCode::F(1),
-        "OQ" => KeyCode::F(2),
-        "OR" => KeyCode::F(3),
-        "OS" => KeyCode::F(4),
-        _ => return None,
-    };
-    Some(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
-}
-
-/// Work around crossterm-rs/crossterm#993, where a PTY read ending after the
-/// initial ESC can split one terminal control sequence into ordinary key events.
-fn read_terminal_events() -> io::Result<Vec<Event>> {
-    let first = event::read()?;
-    let Event::Key(first_key) = first else {
-        return Ok(vec![first]);
-    };
-    if first_key.code != KeyCode::Esc || first_key.kind != crossterm::event::KeyEventKind::Press {
-        return Ok(vec![Event::Key(first_key)]);
-    }
-
-    if !event::poll(ESCAPE_CONTINUATION_TIMEOUT)? {
-        return Ok(vec![Event::Key(first_key)]);
-    }
-    let second = event::read()?;
-    let Event::Key(mut second_key) = second else {
-        return Ok(vec![Event::Key(first_key), second]);
-    };
-    let KeyCode::Char(introducer @ ('[' | 'O' | ']' | 'P' | '^' | '_')) = second_key.code else {
-        second_key.modifiers |= KeyModifiers::ALT;
-        return Ok(vec![Event::Key(second_key)]);
-    };
-
-    let deadline = Instant::now() + ESCAPE_CONTINUATION_TIMEOUT;
-    let mut sequence = String::from(introducer);
-    let control_string = matches!(introducer, ']' | 'P' | '^' | '_');
-    let mut control_string_esc = false;
-    for _ in 0..MAX_ESCAPE_SEQUENCE_EVENTS {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() || !event::poll(remaining)? {
-            break;
-        }
-        let next = event::read()?;
-        let Event::Key(key) = next else {
-            return Ok(vec![next]);
-        };
-        if control_string {
-            if key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                return Ok(Vec::new());
-            }
-            if control_string_esc && key.code == KeyCode::Char('\\') {
-                return Ok(Vec::new());
-            }
-            control_string_esc = key.code == KeyCode::Esc;
-            continue;
-        }
-        let KeyCode::Char(ch) = key.code else {
-            return Ok(vec![Event::Key(key)]);
-        };
-        sequence.push(ch);
-        if ch.is_ascii() && ('@'..='~').contains(&ch) {
-            return Ok(parse_fragmented_escape_sequence(&sequence)
-                .into_iter()
-                .collect());
-        }
-    }
-
-    // A confirmed but malformed/incomplete terminal sequence must never leak
-    // its payload into shortcut handling or text inputs.
-    Ok(Vec::new())
 }
 
 fn has_command_modifier(modifiers: KeyModifiers) -> bool {
@@ -260,19 +126,6 @@ pub(crate) fn textarea_input(
         _ => return textarea.input(key),
     };
     true
-}
-
-fn drain_pending_terminal_events(idle_timeout: Duration) {
-    for _ in 0..EVENT_DRAIN_LIMIT {
-        match event::poll(idle_timeout) {
-            Ok(true) => {
-                if event::read().is_err() {
-                    break;
-                }
-            }
-            Ok(false) | Err(_) => break,
-        }
-    }
 }
 
 /// A completed diff result from the background thread.
@@ -521,6 +374,11 @@ pub struct Gui {
     pub command_log: crate::os::cmd::CommandLog,
     pub show_command_log: bool,
     pub should_quit: bool,
+    /// Set whenever state that the screen reflects has changed. The loop paints
+    /// only when this is set (or something is animating), so an idle session
+    /// costs no CPU and a burst of held keys costs one frame instead of one per
+    /// key.
+    pub needs_redraw: bool,
     pub needs_refresh: bool,
     pub needs_files_refresh: bool,
     pub needs_diff_refresh: bool,
@@ -795,6 +653,7 @@ impl Gui {
             command_log,
             show_command_log: show_command_log_default,
             should_quit: false,
+            needs_redraw: true,
             needs_refresh: false,
             needs_files_refresh: false,
             needs_diff_refresh: true,
@@ -886,13 +745,36 @@ impl Gui {
         let size = terminal.size()?;
         self.layout.update_size(size.width, size.height);
 
-        let result = self.main_loop(&mut terminal);
+        // Start reading input before the first paint so nothing typed during
+        // startup is lost.
+        let input = InputReader::spawn();
+        let result = self.main_loop(&mut terminal, &input);
 
         restore_terminal(&mut terminal, keyboard_enhanced)?;
         result
     }
 
-    fn main_loop(&mut self, terminal: &mut Term) -> Result<()> {
+    /// True while a background operation is still expected to report back, which
+    /// is also exactly when a spinner or progress label is on screen.
+    fn async_work_pending(&self) -> bool {
+        self.initial_load_rx.is_some()
+            || self.refresh_in_progress
+            || self.diff_loading
+            || self.commit_page_loading
+            || self.auto_fetch_in_flight
+            || self.ai_commit_job.is_some()
+            || self.remote_op_label.is_some()
+            || self.needs_refresh
+            || self.needs_files_refresh
+            || self.needs_diff_refresh
+            || self
+                .remote_op_success_at
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(5))
+    }
+
+    fn main_loop(&mut self, terminal: &mut Term, input: &InputReader) -> Result<()> {
+        let loop_started = Instant::now();
+        let mut last_frame_at = Instant::now();
         loop {
             // Drain any model parts that have arrived from the background load.
             if let Some(rx) = &self.initial_load_rx {
@@ -1005,237 +887,188 @@ impl Gui {
             // Check for completed background menu item operations
             self.receive_menu_async_results();
 
-            // Advance spinner animation
-            self.spinner_frame = self.spinner_frame.wrapping_add(1);
+            // Advance spinner animation from wall-clock time, so its speed does
+            // not change with how often the loop runs.
+            self.spinner_frame =
+                (loop_started.elapsed().as_millis() / SPINNER_PERIOD.as_millis()) as usize;
 
-            // Render
+            // Paint only when the screen would actually differ. `MAX_FRAME_INTERVAL`
+            // is a backstop so a missed invalidation self-corrects instead of
+            // leaving stale pixels.
+            let animating = self.async_work_pending();
+            let should_draw =
+                self.needs_redraw || animating || last_frame_at.elapsed() >= MAX_FRAME_INTERVAL;
+
             let theme = self.active_theme();
-            terminal.draw(|frame| {
-                if self.rebase_mode.active {
-                    presentation::rebase_mode::render(frame, &mut self.rebase_mode, &theme);
-                    // Render popup overlay on top of rebase mode
-                    if self.popup != PopupState::None {
-                        views::render_popup(
-                            frame,
-                            &self.popup,
-                            frame.area(),
-                            self.spinner_frame,
-                            &theme,
-                            false,
-                            !self
-                                .config
-                                .user_config
-                                .git
-                                .commit
-                                .generate_command
-                                .trim()
-                                .is_empty(),
-                        );
-                    } else if self.ai_commit_generation_active() {
-                        views::render_loading_overlay(
-                            frame,
-                            frame.area(),
-                            self.spinner_frame,
-                            &theme,
-                            "AI Commit",
-                            "Generating commit message...",
-                            Some(("Esc esc", "cancel")),
-                        );
-                    }
-                } else if self.diff_mode.active {
-                    let diff_loading_show = self.diff_loading
-                        && self
-                            .diff_loading_since
-                            .map(|t| t.elapsed() >= std::time::Duration::from_millis(50))
-                            .unwrap_or(false);
-                    presentation::diff_mode::render(
-                        frame,
-                        &mut self.diff_mode,
-                        &mut self.diff_view,
-                        &theme,
-                        self.diff_loading,
-                        diff_loading_show,
-                    );
-                    // Render popup overlay on top of diff mode (for ? help, errors, etc.)
-                    if self.popup != PopupState::None {
-                        views::render_popup(
-                            frame,
-                            &self.popup,
-                            frame.area(),
-                            self.spinner_frame,
-                            &theme,
-                            false,
-                            !self
-                                .config
-                                .user_config
-                                .git
-                                .commit
-                                .generate_command
-                                .trim()
-                                .is_empty(),
-                        );
-                    } else if self.ai_commit_generation_active() {
-                        views::render_loading_overlay(
-                            frame,
-                            frame.area(),
-                            self.spinner_frame,
-                            &theme,
-                            "AI Commit",
-                            "Generating commit message...",
-                            Some(("Esc esc", "cancel")),
-                        );
-                    }
-                } else {
-                    let model = self.model.lock().unwrap();
-                    let search_state = if self.search_active || !self.search_query.is_empty() {
-                        Some((
-                            self.search_query.as_str(),
-                            self.search_matches.len(),
-                            self.search_match_idx,
-                        ))
-                    } else {
-                        None
-                    };
-                    let cmd_log = self.command_log.lock().unwrap();
-                    views::render(
-                        frame,
-                        &model,
-                        &mut self.context_mgr,
-                        &self.layout,
-                        &self.popup,
-                        &self.config,
-                        &theme,
-                        &mut self.diff_view,
-                        &mut self.commit_list_cache,
-                        self.screen_mode,
-                        self.show_file_tree,
-                        &self.file_tree_nodes,
-                        &self.collapsed_dirs,
-                        self.diff_focused,
-                        search_state,
-                        self.search_textarea.as_ref(),
-                        &cmd_log,
-                        self.show_command_log,
-                        &self.commit_branch_filter,
-                        self.show_commit_file_tree,
-                        &self.commit_file_tree_nodes,
-                        &self.commit_files_collapsed_dirs,
-                        &self.commit_files_hash,
-                        &self.commit_files_message,
-                        &self.branch_commits_name,
-                        &self.remote_branches_name,
-                        self.sub_commits_parent_context,
-                        self.spinner_frame,
-                        self.remote_op_label.as_deref(),
-                        self.remote_op_success_at
-                            .map(|t| t.elapsed() < std::time::Duration::from_secs(5))
-                            .unwrap_or(false),
-                        &self.cherry_pick_clipboard,
-                        self.range_select_anchor,
-                        self.diff_loading,
-                        // Only show "Loading diff..." text after a short delay to avoid jitter on fast loads
-                        self.diff_loading
+            if should_draw {
+                self.needs_redraw = false;
+                last_frame_at = Instant::now();
+                terminal.draw(|frame| {
+                    if self.rebase_mode.active {
+                        presentation::rebase_mode::render(frame, &mut self.rebase_mode, &theme);
+                        // Render popup overlay on top of rebase mode
+                        if self.popup != PopupState::None {
+                            views::render_popup(
+                                frame,
+                                &self.popup,
+                                frame.area(),
+                                self.spinner_frame,
+                                &theme,
+                                false,
+                                !self
+                                    .config
+                                    .user_config
+                                    .git
+                                    .commit
+                                    .generate_command
+                                    .trim()
+                                    .is_empty(),
+                            );
+                        } else if self.ai_commit_generation_active() {
+                            views::render_loading_overlay(
+                                frame,
+                                frame.area(),
+                                self.spinner_frame,
+                                &theme,
+                                "AI Commit",
+                                "Generating commit message...",
+                                Some(("Esc esc", "cancel")),
+                            );
+                        }
+                    } else if self.diff_mode.active {
+                        let diff_loading_show = self.diff_loading
                             && self
                                 .diff_loading_since
                                 .map(|t| t.elapsed() >= std::time::Duration::from_millis(50))
-                                .unwrap_or(false),
-                        &self.commit_stats_cache,
-                        &self.commit_messages_cache,
-                        &mut self.commit_details_scroll,
-                        &mut self.commit_details_scroll_hash,
-                        self.show_commit_details,
-                        false,
-                        !self
-                            .config
-                            .user_config
-                            .git
-                            .commit
-                            .generate_command
-                            .trim()
-                            .is_empty(),
-                    );
-                    if self.popup == PopupState::None && self.ai_commit_generation_active() {
-                        views::render_loading_overlay(
+                                .unwrap_or(false);
+                        presentation::diff_mode::render(
                             frame,
-                            frame.area(),
-                            self.spinner_frame,
+                            &mut self.diff_mode,
+                            &mut self.diff_view,
                             &theme,
-                            "AI Commit",
-                            "Generating commit message...",
-                            Some(("Esc esc", "cancel")),
+                            self.diff_loading,
+                            diff_loading_show,
                         );
+                        // Render popup overlay on top of diff mode (for ? help, errors, etc.)
+                        if self.popup != PopupState::None {
+                            views::render_popup(
+                                frame,
+                                &self.popup,
+                                frame.area(),
+                                self.spinner_frame,
+                                &theme,
+                                false,
+                                !self
+                                    .config
+                                    .user_config
+                                    .git
+                                    .commit
+                                    .generate_command
+                                    .trim()
+                                    .is_empty(),
+                            );
+                        } else if self.ai_commit_generation_active() {
+                            views::render_loading_overlay(
+                                frame,
+                                frame.area(),
+                                self.spinner_frame,
+                                &theme,
+                                "AI Commit",
+                                "Generating commit message...",
+                                Some(("Esc esc", "cancel")),
+                            );
+                        }
+                    } else {
+                        let model = self.model.lock().unwrap();
+                        let search_state = if self.search_active || !self.search_query.is_empty() {
+                            Some((
+                                self.search_query.as_str(),
+                                self.search_matches.len(),
+                                self.search_match_idx,
+                            ))
+                        } else {
+                            None
+                        };
+                        let cmd_log = self.command_log.lock().unwrap();
+                        views::render(
+                            frame,
+                            &model,
+                            &mut self.context_mgr,
+                            &self.layout,
+                            &self.popup,
+                            &self.config,
+                            &theme,
+                            &mut self.diff_view,
+                            &mut self.commit_list_cache,
+                            self.screen_mode,
+                            self.show_file_tree,
+                            &self.file_tree_nodes,
+                            &self.collapsed_dirs,
+                            self.diff_focused,
+                            search_state,
+                            self.search_textarea.as_ref(),
+                            &cmd_log,
+                            self.show_command_log,
+                            &self.commit_branch_filter,
+                            self.show_commit_file_tree,
+                            &self.commit_file_tree_nodes,
+                            &self.commit_files_collapsed_dirs,
+                            &self.commit_files_hash,
+                            &self.commit_files_message,
+                            &self.branch_commits_name,
+                            &self.remote_branches_name,
+                            self.sub_commits_parent_context,
+                            self.spinner_frame,
+                            self.remote_op_label.as_deref(),
+                            self.remote_op_success_at
+                                .map(|t| t.elapsed() < std::time::Duration::from_secs(5))
+                                .unwrap_or(false),
+                            &self.cherry_pick_clipboard,
+                            self.range_select_anchor,
+                            self.diff_loading,
+                            // Only show "Loading diff..." text after a short delay to avoid jitter on fast loads
+                            self.diff_loading
+                                && self
+                                    .diff_loading_since
+                                    .map(|t| t.elapsed() >= std::time::Duration::from_millis(50))
+                                    .unwrap_or(false),
+                            &self.commit_stats_cache,
+                            &self.commit_messages_cache,
+                            &mut self.commit_details_scroll,
+                            &mut self.commit_details_scroll_hash,
+                            self.show_commit_details,
+                            false,
+                            !self
+                                .config
+                                .user_config
+                                .git
+                                .commit
+                                .generate_command
+                                .trim()
+                                .is_empty(),
+                        );
+                        if self.popup == PopupState::None && self.ai_commit_generation_active() {
+                            views::render_loading_overlay(
+                                frame,
+                                frame.area(),
+                                self.spinner_frame,
+                                &theme,
+                                "AI Commit",
+                                "Generating commit message...",
+                                Some(("Esc esc", "cancel")),
+                            );
+                        }
                     }
-                }
-            })?;
-
-            // Handle events
-            if event::poll(std::time::Duration::from_millis(16))? {
-                for terminal_event in read_terminal_events()? {
-                    match terminal_event {
-                        Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
-                            if let Err(err) = self.handle_key(key) {
-                                self.show_error("Command failed", err);
-                            }
-                        }
-                        Event::Mouse(mouse) => self.handle_mouse(mouse),
-                        Event::Resize(w, h) => {
-                            self.layout.update_size(w, h);
-                            // Re-flow any active commit-message textarea to the new width so
-                            // wrapping stays consistent with what the user sees.
-                            let popup_width = (w * 60 / 100).min(60).max(30).min(w);
-                            let popup_inner = popup_width.saturating_sub(4) as usize;
-                            let config_width = self.config.user_config.git.commit.auto_wrap_width;
-                            let effective_width = if config_width > 0 {
-                                popup_inner.min(config_width)
-                            } else {
-                                popup_inner
-                            };
-                            match &mut self.popup {
-                                PopupState::Input {
-                                    textarea,
-                                    is_commit: true,
-                                    ..
-                                } => {
-                                    if effective_width > 0 {
-                                        auto_wrap_textarea(textarea, effective_width);
-                                    }
-                                }
-                                PopupState::Input {
-                                    textarea,
-                                    is_commit: false,
-                                    ..
-                                } => {
-                                    // Single-line input: re-flow the soft wrap to the new width.
-                                    let raw: String = textarea.lines().join("");
-                                    if popup_inner > 0 && !raw.is_empty() {
-                                        let mut new_ta = popup::make_textarea("");
-                                        new_ta.insert_str(&raw);
-                                        soft_wrap_textarea(&mut new_ta, popup_inner);
-                                        *textarea = new_ta;
-                                    }
-                                }
-                                PopupState::CommitInput {
-                                    body_textarea,
-                                    body_state,
-                                    ..
-                                } => {
-                                    if effective_width > 0 {
-                                        body_state.render_into(body_textarea, effective_width);
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        Event::FocusGained if self.config.user_config.git.auto_refresh => {
-                            self.needs_refresh = true;
-                        }
-                        Event::Paste(data) => {
-                            self.handle_paste(data);
-                        }
-                        _ => {}
-                    }
-                }
+                })?;
             }
+
+            // Take everything the reader thread has queued and process it before
+            // the next paint. Holding a navigation key therefore costs one frame
+            // for the whole burst rather than one frame per repeat, which is what
+            // made held keys lag behind and overshoot.
+            let timeout = if animating { ANIMATION_TICK } else { IDLE_TICK };
+            let events = input.wait_batch(timeout);
+            self.handle_event_batch(events);
 
             // Background auto-refresh on refresher.refreshInterval (0 = disabled).
             let refresh_interval = self.config.user_config.refresher.refresh_interval;
@@ -1269,6 +1102,85 @@ impl Gui {
         }
 
         Ok(())
+    }
+
+    /// Apply one batch of terminal events. Any event at all invalidates the
+    /// screen, so the caller repaints once for the whole batch.
+    fn handle_event_batch(&mut self, events: Vec<Event>) {
+        if events.is_empty() {
+            return;
+        }
+        self.needs_redraw = true;
+        for event in events {
+            match event {
+                Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
+                    if let Err(err) = self.handle_key(key) {
+                        self.show_error("Command failed", err);
+                    }
+                }
+                Event::Mouse(mouse) => self.handle_mouse(mouse),
+                Event::Resize(w, h) => self.handle_resize(w, h),
+                Event::FocusGained if self.config.user_config.git.auto_refresh => {
+                    self.needs_refresh = true;
+                }
+                Event::Paste(data) => self.handle_paste(data),
+                _ => {}
+            }
+            if self.should_quit {
+                // Don't keep acting on a queued burst after a quit: the rest of
+                // the batch was typed before the user knew the app was closing.
+                break;
+            }
+        }
+    }
+
+    fn handle_resize(&mut self, w: u16, h: u16) {
+        self.layout.update_size(w, h);
+        // Re-flow any active commit-message textarea to the new width so
+        // wrapping stays consistent with what the user sees.
+        let popup_width = (w * 60 / 100).clamp(30, 60).min(w);
+        let popup_inner = popup_width.saturating_sub(4) as usize;
+        let config_width = self.config.user_config.git.commit.auto_wrap_width;
+        let effective_width = if config_width > 0 {
+            popup_inner.min(config_width)
+        } else {
+            popup_inner
+        };
+        match &mut self.popup {
+            PopupState::Input {
+                textarea,
+                is_commit: true,
+                ..
+            } => {
+                if effective_width > 0 {
+                    auto_wrap_textarea(textarea, effective_width);
+                }
+            }
+            PopupState::Input {
+                textarea,
+                is_commit: false,
+                ..
+            } => {
+                // Single-line input: re-flow the soft wrap to the new width.
+                let raw: String = textarea.lines().join("");
+                if popup_inner > 0 && !raw.is_empty() {
+                    let mut new_ta = popup::make_textarea("");
+                    new_ta.insert_str(&raw);
+                    soft_wrap_textarea(&mut new_ta, popup_inner);
+                    *textarea = new_ta;
+                }
+            }
+            PopupState::CommitInput {
+                body_textarea,
+                body_state,
+                ..
+            } => {
+                if effective_width > 0 {
+                    body_state.render_into(body_textarea, effective_width);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Receive completed diff results from the background thread (non-blocking).
@@ -2534,6 +2446,7 @@ impl Gui {
         // Global keybindings
         if matches_key(key, &keybindings.universal.quit)
             || matches_key(key, &keybindings.universal.quit_alt1)
+            || matches_key(key, &keybindings.universal.quit_without_changing_directory)
         {
             self.should_quit = true;
             return Ok(());
@@ -4467,6 +4380,10 @@ impl Gui {
                 HelpEntry {
                     key: kb.universal.quit_alt1.clone(),
                     description: "Quit (alt)".into(),
+                },
+                HelpEntry {
+                    key: kb.universal.quit_without_changing_directory.clone(),
+                    description: "Quit".into(),
                 },
                 HelpEntry {
                     key: kb.universal.return_key.clone(),
@@ -7778,33 +7695,6 @@ mod terminal_mouse_tests {
     }
 
     #[test]
-    fn reconstructs_fragmented_arrow_sequence_without_leaking_amend_shortcut() {
-        assert_eq!(
-            parse_fragmented_escape_sequence("[A"),
-            Some(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)))
-        );
-    }
-
-    #[test]
-    fn reconstructs_fragmented_focus_sequence_without_leaking_rebase_shortcut() {
-        assert_eq!(
-            parse_fragmented_escape_sequence("[I"),
-            Some(Event::FocusGained)
-        );
-    }
-
-    #[test]
-    fn reconstructs_fragmented_kitty_command_key_with_its_modifier() {
-        assert_eq!(
-            parse_fragmented_escape_sequence("[49;9u"),
-            Some(Event::Key(KeyEvent::new(
-                KeyCode::Char('1'),
-                KeyModifiers::SUPER
-            )))
-        );
-    }
-
-    #[test]
     fn plain_character_shortcuts_reject_extra_modifiers() {
         assert!(plain_char_key(
             KeyEvent::new(KeyCode::Char('I'), KeyModifiers::SHIFT),
@@ -7952,9 +7842,14 @@ fn setup_terminal() -> Result<(Term, bool)> {
     Ok((terminal, keyboard_enhanced))
 }
 
+/// Put the terminal back the way we found it.
+///
+/// Nothing drains leftover input here: crossterm guards its reader with a
+/// process-wide mutex that the input thread holds for the duration of its
+/// blocking read, so any drain from this thread would silently no-op. The input
+/// thread keeps consuming whatever is queued until the process exits, which is
+/// what the drain was for.
 fn restore_terminal(terminal: &mut Term, keyboard_enhanced: bool) -> Result<()> {
-    drain_pending_terminal_events(Duration::from_millis(0));
-
     if keyboard_enhanced {
         execute!(
             terminal.backend_mut(),
@@ -7977,7 +7872,6 @@ fn restore_terminal(terminal: &mut Term, keyboard_enhanced: bool) -> Result<()> 
     }
     terminal.backend_mut().flush()?;
 
-    drain_pending_terminal_events(Duration::from_millis(25));
     terminal::disable_raw_mode()?;
 
     Ok(())
