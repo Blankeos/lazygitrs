@@ -6131,6 +6131,63 @@ impl Gui {
             return;
         }
 
+        // Action menus: first click selects, second click on same item confirms.
+        if matches!(self.popup, PopupState::Menu { .. }) {
+            let MouseEventKind::Down(MouseButton::Left) = mouse.kind else {
+                return;
+            };
+            let area = ratatui::layout::Rect::new(0, 0, self.layout.width, self.layout.height);
+            if let Some(idx) = views::menu_item_at(&self.popup, area, mouse.column, mouse.row) {
+                let already_selected = matches!(
+                    &self.popup,
+                    PopupState::Menu { selected, .. } if *selected == idx
+                );
+                if already_selected {
+                    self.execute_menu_action(Some(idx));
+                } else if let PopupState::Menu { selected, .. } = &mut self.popup {
+                    *selected = idx;
+                }
+            }
+            return;
+        }
+
+        // Checklists: first click selects, second click on same item toggles.
+        if matches!(self.popup, PopupState::Checklist { .. }) {
+            let MouseEventKind::Down(MouseButton::Left) = mouse.kind else {
+                return;
+            };
+            let area = ratatui::layout::Rect::new(0, 0, self.layout.width, self.layout.height);
+            if let Some(visible_idx) =
+                views::checklist_item_at(&self.popup, area, mouse.column, mouse.row)
+            {
+                if let PopupState::Checklist {
+                    items,
+                    selected,
+                    search,
+                    ..
+                } = &mut self.popup
+                {
+                    if *selected == visible_idx {
+                        let visible_indices: Vec<usize> = items
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, it)| {
+                                search.is_empty()
+                                    || it.label.to_lowercase().contains(&search.to_lowercase())
+                            })
+                            .map(|(i, _)| i)
+                            .collect();
+                        if let Some(&real_idx) = visible_indices.get(visible_idx) {
+                            items[real_idx].checked = !items[real_idx].checked;
+                        }
+                    } else {
+                        *selected = visible_idx;
+                    }
+                }
+            }
+            return;
+        }
+
         let main_panel = self.compute_main_panel_rect();
         let pl = DiffPanelLayout::compute(main_panel, &self.diff_view);
 

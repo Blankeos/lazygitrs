@@ -2123,12 +2123,11 @@ fn render_file_header(buf: &mut Buffer, x: u16, y: u16, width: u16, filename: &s
         .bg(theme.diff_selection_bg)
         .add_modifier(Modifier::BOLD);
 
-    // Build header text: "── filename ──────..."
-    let prefix = "── ";
-    let suffix_char = '─';
-    let label = format!("{}{} ", prefix, filename);
-    let remaining = (width as usize).saturating_sub(label.len());
-    let full_line = format!("{}{}", label, suffix_char.to_string().repeat(remaining));
+    // Build header text: "── filename ──────..." (fill to full display width)
+    let label = format!("── {} ", filename);
+    let label_width: usize = label.chars().map(unicode_display_width).sum();
+    let remaining = (width as usize).saturating_sub(label_width);
+    let full_line = format!("{}{}", label, "─".repeat(remaining));
 
     buf_write_str(buf, x, y, &full_line, header_style, width);
 }

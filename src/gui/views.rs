@@ -1267,11 +1267,87 @@ fn clamped_popup_height(line_count: usize, fixed_rows: u16, area_height: u16) ->
     line_rows.saturating_add(fixed_rows).min(area_height)
 }
 
+fn centered_popup_x_width(area: Rect) -> (u16, u16) {
+    let popup_width = (area.width * 60 / 100).min(60).max(30).min(area.width);
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    (x, popup_width)
+}
+
+/// Returns the menu option index under `(col, row)`, matching `render_popup` layout.
+pub fn menu_item_at(popup: &PopupState, area: Rect, col: u16, row: u16) -> Option<usize> {
+    let PopupState::Menu { items, .. } = popup else {
+        return None;
+    };
+    if items.is_empty() || area.width < 4 || area.height < 4 {
+        return None;
+    }
+    let (x, popup_width) = centered_popup_x_width(area);
+    // Matches `PopupState::Menu` in `render_popup`.
+    let height = (items.len() as u16 + 2).min(area.height.saturating_sub(4));
+    if height < 3 {
+        return None;
+    }
+    let y = (area.height.saturating_sub(height)) / 2;
+    if col < x || col >= x + popup_width {
+        return None;
+    }
+    let list_start = y + 1; // below top border
+    let list_rows = (height - 2) as usize; // exclude borders
+    if row < list_start || row >= list_start + list_rows as u16 {
+        return None;
+    }
+    let idx = (row - list_start) as usize;
+    if idx < items.len() && idx < list_rows {
+        Some(idx)
+    } else {
+        None
+    }
+}
+
+/// Returns the visible checklist option index under `(col, row)`.
+pub fn checklist_item_at(popup: &PopupState, area: Rect, col: u16, row: u16) -> Option<usize> {
+    let PopupState::Checklist { items, search, .. } = popup else {
+        return None;
+    };
+    if area.width < 4 || area.height < 4 {
+        return None;
+    }
+    let (x, popup_width) = centered_popup_x_width(area);
+    let visible_count = items
+        .iter()
+        .filter(|it| search.is_empty() || it.label.to_lowercase().contains(&search.to_lowercase()))
+        .count();
+    // Matches `PopupState::Checklist` in `render_popup`.
+    let content_lines = visible_count.max(1);
+    let height = (content_lines as u16 + 6)
+        .min(area.height.saturating_sub(4))
+        .max(8.min(area.height));
+    if height < 3 {
+        return None;
+    }
+    let y = (area.height.saturating_sub(height)) / 2;
+    if col < x || col >= x + popup_width {
+        return None;
+    }
+    // inner.y = y+1; list starts at inner.y+2 (after search + separator)
+    let list_start = y + 1 + 2;
+    let inner_height = height.saturating_sub(2);
+    let list_height = inner_height.saturating_sub(3); // search + sep + hint
+    if list_height == 0 {
+        return None;
+    }
+    if row < list_start || row >= list_start + list_height {
+        return None;
+    }
+    let idx = (row - list_start) as usize;
+    if idx < visible_count { Some(idx) } else { None }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{command_log_geometry, render_popup};
+    use super::{checklist_item_at, command_log_geometry, menu_item_at, render_popup};
     use crate::config::Theme;
-    use crate::gui::popup::{MessageKind, PopupState};
+    use crate::gui::popup::{ChecklistItem, MenuItem, MessageKind, PopupState};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
@@ -1321,6 +1397,82 @@ mod tests {
                 );
             })
             .expect("long popup message should render without panicking");
+    }
+
+    fn sample_menu() -> PopupState {
+        PopupState::Menu {
+            title: "Copy".to_string(),
+            items: vec![
+                MenuItem {
+                    label: "commit hash".to_string(),
+                    description: String::new(),
+                    key: Some("c".to_string()),
+                    action: None,
+                },
+                MenuItem {
+                    label: "commit message".to_string(),
+                    description: String::new(),
+                    key: Some("m".to_string()),
+                    action: None,
+                },
+                MenuItem {
+                    label: "author name".to_string(),
+                    description: String::new(),
+                    key: Some("a".to_string()),
+                    action: None,
+                },
+            ],
+            selected: 0,
+            loading_index: None,
+        }
+    }
+
+    #[test]
+    fn menu_item_at_hits_first_and_second_options() {
+        let area = Rect::new(0, 0, 80, 24);
+        let popup = sample_menu();
+        // height = 3 items + 2 borders = 5; y = (24-5)/2 = 9; list starts at y+1 = 10
+        let x = (area
+            .width
+            .saturating_sub((area.width * 60 / 100).min(60).max(30)))
+            / 2
+            + 2;
+        assert_eq!(menu_item_at(&popup, area, x, 10), Some(0));
+        assert_eq!(menu_item_at(&popup, area, x, 11), Some(1));
+        assert_eq!(menu_item_at(&popup, area, x, 12), Some(2));
+        assert_eq!(menu_item_at(&popup, area, x, 9), None); // border
+        assert_eq!(menu_item_at(&popup, area, x, 13), None); // below
+    }
+
+    #[test]
+    fn checklist_item_at_skips_search_and_separator() {
+        let area = Rect::new(0, 0, 80, 30);
+        let popup = PopupState::Checklist {
+            title: "Pick".to_string(),
+            items: vec![
+                ChecklistItem {
+                    label: "one".to_string(),
+                    checked: false,
+                },
+                ChecklistItem {
+                    label: "two".to_string(),
+                    checked: true,
+                },
+            ],
+            selected: 0,
+            search: String::new(),
+            on_confirm: Box::new(|_gui, _ids| Ok(())),
+        };
+        // height = max(8, 2+6)=8; y=(30-8)/2=11; list_start=y+1+2=14
+        let x = (area
+            .width
+            .saturating_sub((area.width * 60 / 100).min(60).max(30)))
+            / 2
+            + 2;
+        assert_eq!(checklist_item_at(&popup, area, x, 14), Some(0));
+        assert_eq!(checklist_item_at(&popup, area, x, 15), Some(1));
+        assert_eq!(checklist_item_at(&popup, area, x, 12), None); // search row
+        assert_eq!(checklist_item_at(&popup, area, x, 13), None); // separator
     }
 }
 
