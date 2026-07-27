@@ -745,8 +745,12 @@ impl Gui {
                         }
                         ModelPart::Branches(v) => model.branches = v,
                         ModelPart::Commits(v) => {
-                            self.commit_history_complete = v.len() < DEFAULT_COMMIT_LIMIT;
-                            model.set_commits(v);
+                            // Keep filtered commits visible during streaming refresh;
+                            // after_model_refresh reloads the filtered set when done.
+                            if self.commit_branch_filter.is_empty() {
+                                self.commit_history_complete = v.len() < DEFAULT_COMMIT_LIMIT;
+                                model.set_commits(v);
+                            }
                         }
                         ModelPart::Stash(v) => model.stash_entries = v,
                         ModelPart::Remotes(v) => model.remotes = v,
