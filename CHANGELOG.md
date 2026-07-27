@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.28] - 2026-07-27
+
+### Bug Fixes
+
+- Avoid overwriting commits while branch filter is active by @Blankeos
+- Harden terminal input handling and isolate background commands (#23) by @Blankeos in [#23](https://github.com/Blankeos/lazygitrs/pull/23)
+- Render commit graph with per-row width and single separator space by @Blankeos
+
+### Chores
+
+- Added automated npm/cratesio publishing by @Blankeos
+
+### Features
+
+- Add draggable sidebar divider interaction by @Blankeos
+- Add popup mouse selection + click-to-activate behavior by @Blankeos
+- Replace remote operation modal with lightweight loading toast by @Blankeos
+- Display remote tag presence and gate remote deletion by @Blankeos
+- Show co-located branch labels on tags by @Blankeos
+- Allow rewording empty commits by @Blankeos
+- Show async Loading modal during remote operations by @Blankeos
+
+### Performance
+
+- Run commit actions through async ops and streaming refresh by @Blankeos
+
 ## [0.0.27] - 2026-07-23
 
 ### Bug Fixes
