@@ -76,14 +76,3 @@ git tag "v${NEW}"
 echo "🦋 Pushing..."
 git push --tags
 git push
-
-# ============================================
-# PUBLISHING: I put it here as documentation, but this is manual for now!
-# ============================================
-
-# crates.io
-# cargo publish
-
-# npm
-# cd npm
-# npm publish
