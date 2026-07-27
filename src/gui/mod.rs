@@ -883,6 +883,16 @@ impl Gui {
                             "Generating commit message...",
                             Some(("Esc esc", "cancel")),
                         );
+                    } else if let Some(label) = self.remote_op_label.as_deref() {
+                        views::render_loading_overlay(
+                            frame,
+                            frame.area(),
+                            self.spinner_frame,
+                            &theme,
+                            label,
+                            "",
+                            None,
+                        );
                     }
                 } else if self.diff_mode.active {
                     let diff_loading_show = self.diff_loading
@@ -925,6 +935,16 @@ impl Gui {
                             "AI Commit",
                             "Generating commit message...",
                             Some(("Esc esc", "cancel")),
+                        );
+                    } else if let Some(label) = self.remote_op_label.as_deref() {
+                        views::render_loading_overlay(
+                            frame,
+                            frame.area(),
+                            self.spinner_frame,
+                            &theme,
+                            label,
+                            "",
+                            None,
                         );
                     }
                 } else {
@@ -996,16 +1016,28 @@ impl Gui {
                             .trim()
                             .is_empty(),
                     );
-                    if self.popup == PopupState::None && self.ai_commit_generation_active() {
-                        views::render_loading_overlay(
-                            frame,
-                            frame.area(),
-                            self.spinner_frame,
-                            &theme,
-                            "AI Commit",
-                            "Generating commit message...",
-                            Some(("Esc esc", "cancel")),
-                        );
+                    if self.popup == PopupState::None {
+                        if self.ai_commit_generation_active() {
+                            views::render_loading_overlay(
+                                frame,
+                                frame.area(),
+                                self.spinner_frame,
+                                &theme,
+                                "AI Commit",
+                                "Generating commit message...",
+                                Some(("Esc esc", "cancel")),
+                            );
+                        } else if let Some(label) = self.remote_op_label.as_deref() {
+                            views::render_loading_overlay(
+                                frame,
+                                frame.area(),
+                                self.spinner_frame,
+                                &theme,
+                                label,
+                                "",
+                                None,
+                            );
+                        }
                     }
                 }
             })?;
@@ -1014,6 +1046,7 @@ impl Gui {
             // split ESC [ A cannot leak as Char('A') → amend between frames.
             // Keep the frame budget tight while anything animated/async is up.
             let timeout = if self.ai_commit_generation_active()
+                || self.remote_op_label.is_some()
                 || self.diff_loading
                 || self.initial_load_rx.is_some()
                 || self.refresh_in_progress
@@ -1664,10 +1697,6 @@ impl Gui {
             self.remote_op_label = None;
             match result {
                 Ok(()) => {
-                    // Clear the async Loading modal shown by start_remote_op.
-                    if matches!(self.popup, PopupState::Loading { .. }) {
-                        self.popup = PopupState::None;
-                    }
                     self.needs_refresh = true;
                     self.remote_op_success_at = Some(Instant::now());
                 }
@@ -1786,7 +1815,8 @@ impl Gui {
     }
 
     /// Run a remote operation (push/pull/fetch) on a background thread.
-    pub fn start_remote_op<F>(&mut self, title: &str, message: &str, op: F)
+    /// Non-blocking: corner toast + branch-side label; input stays free (like AI commit).
+    pub fn start_remote_op<F>(&mut self, title: &str, _message: &str, op: F)
     where
         F: FnOnce(&GitCommands) -> Result<()> + Send + 'static,
     {
@@ -1803,11 +1833,6 @@ impl Gui {
         };
         self.remote_op_label = Some(label.to_string());
         self.remote_op_success_at = None;
-        // Async modal so network ops (push/pull/fetch/remote tag delete) don't look idle.
-        self.popup = PopupState::Loading {
-            title: title.to_string(),
-            message: message.to_string(),
-        };
         let git = Arc::clone(&self.git);
         let tx = self.remote_op_tx.clone();
         std::thread::spawn(move || {

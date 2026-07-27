@@ -2502,52 +2502,53 @@ pub fn render_loading_overlay(
     message: &str,
     hint: Option<(&str, &str)>,
 ) {
-    if area.width < 4 || area.height < 4 {
+    if area.width < 4 || area.height < 3 {
         return;
     }
 
-    let popup_width = (area.width * 60 / 100).min(60).max(30).min(area.width);
-    let x = (area.width.saturating_sub(popup_width)) / 2;
+    // Compact bottom-right toast: spinner + short label, no large modal.
     let spinner = SPINNER_CHARS[(spinner_frame / 8) % SPINNER_CHARS.len()];
-    let height = 8u16;
-    let ly = (area.height.saturating_sub(height)) / 2;
-    let popup_rect = Rect::new(x, ly, popup_width, height);
+    let label = if message.is_empty() {
+        title.to_string()
+    } else if message.len() <= 40 {
+        message.to_string()
+    } else {
+        // Prefer title when message is long (e.g. "Pushing branch to remote...").
+        title.to_string()
+    };
+    let content = format!(" {spinner} {label} ");
+    let mut width = (content.chars().count() as u16)
+        .saturating_add(2)
+        .min(area.width);
+    width = width.max(12).min(area.width.saturating_sub(2).max(1));
+    let height = if hint.is_some() { 4u16 } else { 3u16 };
+    let height = height.min(area.height);
+    let x = area.width.saturating_sub(width).saturating_sub(1);
+    let y = area.height.saturating_sub(height).saturating_sub(1);
+    let popup_rect = Rect::new(x, y, width, height);
     frame.render_widget(Clear, popup_rect);
 
     let block = Block::default()
-        .title(format!(" {} ", title))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.accent_secondary));
+        .border_style(Style::default().fg(theme.accent));
 
-    let mut text = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                format!(" {} ", spinner),
-                Style::default().fg(theme.accent_secondary),
-            ),
-            Span::styled(
-                message.to_string(),
-                Style::default()
-                    .fg(theme.accent_secondary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(""),
-    ];
+    let mut text = vec![Line::from(vec![
+        Span::styled(format!(" {spinner} "), Style::default().fg(theme.accent)),
+        Span::styled(
+            label,
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
     if let Some((key, desc)) = hint {
         text.push(Line::from(vec![
             Span::styled(
-                format!(" {}", key),
+                format!(" {key}"),
                 Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!(" {}", desc), Style::default().fg(theme.text_dimmed)),
+            Span::styled(format!(" {desc}"), Style::default().fg(theme.text_dimmed)),
         ]));
-    } else {
-        text.push(Line::from(Span::styled(
-            format!(" {} Please wait...", spinner),
-            Style::default().fg(theme.text_dimmed),
-        )));
     }
 
     let widget = Paragraph::new(text).block(block);
