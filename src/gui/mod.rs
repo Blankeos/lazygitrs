@@ -367,6 +367,8 @@ pub struct Gui {
     /// Current position within search_matches.
     pub search_match_idx: usize,
     pub screen_mode: ScreenMode,
+    /// True while the user is dragging the sidebar divider with the mouse.
+    sidebar_resizing: bool,
     pub show_file_tree: bool,
     /// Cached file tree nodes — rebuilt on refresh when tree view is active.
     pub file_tree_nodes: Vec<FileTreeNode>,
@@ -638,6 +640,7 @@ impl Gui {
             search_matches: Vec::new(),
             search_match_idx: 0,
             screen_mode: ScreenMode::Normal,
+            sidebar_resizing: false,
             show_file_tree,
             file_tree_nodes: Vec::new(),
             collapsed_dirs: HashSet::new(),
@@ -5774,6 +5777,37 @@ impl Gui {
             return;
         }
 
+        // Sidebar divider drag (Normal mode only). Must run before text-select /
+        // focus paths so the hit strip wins the gesture.
+        if self.sidebar_resizing {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.apply_sidebar_ratio_from_mouse(mouse.column, mouse.row);
+                    return;
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.sidebar_resizing = false;
+                    return;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.apply_sidebar_ratio_from_mouse(mouse.column, mouse.row);
+                    return;
+                }
+                _ => {
+                    self.sidebar_resizing = false;
+                }
+            }
+        } else if self.popup == PopupState::None
+            && self.screen_mode == ScreenMode::Normal
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.sidebar_divider_hit(mouse.column, mouse.row)
+        {
+            self.sidebar_resizing = true;
+            self.diff_view.selection = None;
+            self.apply_sidebar_ratio_from_mouse(mouse.column, mouse.row);
+            return;
+        }
+
         // ✦ AI-generate button on commit-message popups: handle clicks.
         if matches!(self.popup, PopupState::CommitInput { .. }) {
             let area = ratatui::layout::Rect::new(0, 0, self.layout.width, self.layout.height);
@@ -6866,6 +6900,101 @@ impl Gui {
             show_details,
             !self.diff_focused,
         )
+    }
+
+    /// Content area above the status bar (side + main live here).
+    fn content_area_rect(&self) -> ratatui::layout::Rect {
+        ratatui::layout::Rect::new(
+            0,
+            0,
+            self.layout.width,
+            self.layout.height.saturating_sub(1),
+        )
+    }
+
+    /// ~3-cell strip on the side↔main split; 1-cell edge when fully collapsed/expanded.
+    fn sidebar_divider_hit(&self, col: u16, row: u16) -> bool {
+        if self.screen_mode != ScreenMode::Normal {
+            return false;
+        }
+        let content = self.content_area_rect();
+        if content.width == 0 || content.height == 0 || !rect_contains(content, col, row) {
+            return false;
+        }
+
+        let fl = self.compute_current_frame_layout();
+
+        if fl.portrait {
+            // Grab the bottom border of the expanded side panel (focused tab),
+            // not the top of the main/diff area — that matches the box users see.
+            if fl.side_panels.is_empty() {
+                return row == content.y;
+            }
+            if fl.main_panel.height == 0 {
+                let y = content.y + content.height.saturating_sub(1);
+                return row == y;
+            }
+            let active_window = self.context_mgr.active_window();
+            let active_idx = SideWindow::ALL
+                .iter()
+                .position(|w| *w == active_window)
+                .unwrap_or(1);
+            // Match layout.rs: Status stays compact; Files expands instead.
+            let expand_idx = if active_idx == 0 { 1 } else { active_idx };
+            let Some(panel) = fl.side_panels.get(expand_idx) else {
+                return false;
+            };
+            if panel.height == 0 {
+                return false;
+            }
+            let bottom = panel.y + panel.height.saturating_sub(1);
+            // ~3 rows on the panel side only (never into the diff below).
+            let lo = bottom.saturating_sub(2);
+            row >= lo && row <= bottom
+        } else if fl.side_panels.is_empty() {
+            col == content.x
+        } else if fl.main_panel.width == 0 {
+            col == content.x + content.width.saturating_sub(1)
+        } else {
+            let divider_x = fl.main_panel.x;
+            let lo = divider_x.saturating_sub(1);
+            let hi = divider_x.saturating_add(1);
+            col >= lo && col <= hi
+        }
+    }
+
+    fn apply_sidebar_ratio_from_mouse(&mut self, col: u16, row: u16) {
+        let content = self.content_area_rect();
+        if content.width == 0 || content.height == 0 {
+            return;
+        }
+        let fl = self.compute_current_frame_layout();
+        let ratio = if fl.portrait {
+            // Mouse tracks the expanded panel's bottom border. Panels below it
+            // stay collapsed (1 row each in portrait), so grow the side area by
+            // that trailing height — otherwise Files/Branches/Commits feel glued
+            // to the top of the diff while only Stash (last) tracks correctly.
+            let panel_count = SideWindow::ALL.len();
+            let active_window = self.context_mgr.active_window();
+            let active_idx = SideWindow::ALL
+                .iter()
+                .position(|w| *w == active_window)
+                .unwrap_or(1);
+            let expand_idx = if active_idx == 0 { 1 } else { active_idx };
+            let collapsed: u16 = 1; // matches portrait layout in layout.rs
+            let trailing =
+                (panel_count.saturating_sub(expand_idx.saturating_add(1)) as u16) * collapsed;
+            let side_end = row
+                .saturating_sub(content.y)
+                .saturating_add(1)
+                .saturating_add(trailing)
+                .min(content.height);
+            side_end as f64 / content.height as f64
+        } else {
+            let pos = col.saturating_sub(content.x).min(content.width);
+            pos as f64 / content.width as f64
+        };
+        self.layout.side_panel_ratio = ratio.clamp(0.0, 1.0);
     }
 
     /// True when the active context is one where commit-details makes sense
