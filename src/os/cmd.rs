@@ -4,6 +4,33 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 
+/// Detach a child from the controlling terminal and keep it non-interactive.
+///
+/// Background `git fetch`/`ls-remote` can spawn `ssh`, which opens `/dev/tty`
+/// and races the TUI for keystrokes — swallowing `q` and navigation. `setsid`
+/// gives the child no controlling terminal so `/dev/tty` fails; null stdin
+/// stops anything that reads the pipe we inherit.
+fn make_non_interactive(cmd: &mut Command) {
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("SSH_ASKPASS_REQUIRE", "never");
+    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+        cmd.env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes");
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+}
+
 /// Shared command log that CmdBuilder writes to when set.
 pub type CommandLog = Arc<Mutex<Vec<String>>>;
 
@@ -135,8 +162,14 @@ impl CmdBuilder {
             cmd.env(key, value);
         }
 
+        make_non_interactive(&mut cmd);
+
         if self.stdin_data.is_some() {
             cmd.stdin(Stdio::piped());
+        } else {
+            // Don't inherit the TUI's stdin — a child that reads it races us
+            // for keystrokes (notably `q` while background fetch/ssh runs).
+            cmd.stdin(Stdio::null());
         }
 
         cmd.stdout(Stdio::piped());

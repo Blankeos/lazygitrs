@@ -435,6 +435,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "include_dir",
+ "libc",
  "once_cell",
  "ratatui",
  "serde",
