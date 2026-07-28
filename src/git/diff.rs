@@ -160,6 +160,8 @@ impl GitCommands {
     /// Falls back to single-arg diff-tree for root commits (no parent).
     pub fn commit_files(&self, hash: &str) -> Result<Vec<crate::model::CommitFile>> {
         // Try diffing against first parent; fall back for root commits.
+        // Root commits need `--root` so git compares against the empty tree;
+        // plain `diff-tree <hash>` succeeds but prints nothing for roots.
         let result = self
             .git()
             .args(&[
@@ -178,7 +180,14 @@ impl GitCommands {
             ),
             _ => (
                 self.git()
-                    .args(&["diff-tree", "--no-commit-id", "--name-status", "-r", hash])
+                    .args(&[
+                        "diff-tree",
+                        "--no-commit-id",
+                        "--name-status",
+                        "-r",
+                        "--root",
+                        hash,
+                    ])
                     .run_expecting_success()?,
                 vec![
                     "show".to_string(),
