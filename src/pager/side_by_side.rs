@@ -630,14 +630,12 @@ impl DiffViewState {
                     hunk_line_offsets.push((section_start + idx, old_off, new_off));
                 }
 
-                // A commit preview can span dozens of files. Eagerly running
-                // tree-sitter over every section delays the first visible
-                // frame even though most sections are off-screen. Keep the
-                // structural diff ready immediately; change coloring still
-                // applies and single-file previews retain syntax highlighting.
+                // Parse already runs on a background worker, so build
+                // highlighters here the same way single-file does.
+                let (old, new) = parse_unified_diff(file_diff);
                 sections.push(FileSection {
-                    old_highlighter: FileHighlighter::default(),
-                    new_highlighter: FileHighlighter::default(),
+                    old_highlighter: FileHighlighter::new(&old, file_name),
+                    new_highlighter: FileHighlighter::new(&new, file_name),
                 });
             }
 
