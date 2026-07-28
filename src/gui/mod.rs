@@ -369,6 +369,10 @@ pub struct Gui {
     pub screen_mode: ScreenMode,
     /// True while the user is dragging the sidebar divider with the mouse.
     sidebar_resizing: bool,
+    /// Portrait-only: add this to the mouse row when mapping to side height so
+    /// grabs on the expanded panel bottom (above trailing collapsed rows) and
+    /// the main/diff top border share one continuous drag.
+    sidebar_resize_row_offset: u16,
     pub show_file_tree: bool,
     /// Cached file tree nodes — rebuilt on refresh when tree view is active.
     pub file_tree_nodes: Vec<FileTreeNode>,
@@ -641,6 +645,7 @@ impl Gui {
             search_match_idx: 0,
             screen_mode: ScreenMode::Normal,
             sidebar_resizing: false,
+            sidebar_resize_row_offset: 0,
             show_file_tree,
             file_tree_nodes: Vec::new(),
             collapsed_dirs: HashSet::new(),
@@ -5787,6 +5792,7 @@ impl Gui {
                 }
                 MouseEventKind::Up(MouseButton::Left) => {
                     self.sidebar_resizing = false;
+                    self.sidebar_resize_row_offset = 0;
                     return;
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -5795,6 +5801,7 @@ impl Gui {
                 }
                 _ => {
                     self.sidebar_resizing = false;
+                    self.sidebar_resize_row_offset = 0;
                 }
             }
         } else if self.popup == PopupState::None
@@ -5803,6 +5810,7 @@ impl Gui {
             && self.sidebar_divider_hit(mouse.column, mouse.row)
         {
             self.sidebar_resizing = true;
+            self.sidebar_resize_row_offset = self.portrait_sidebar_resize_offset(mouse.row);
             self.diff_view.selection = None;
             self.apply_sidebar_ratio_from_mouse(mouse.column, mouse.row);
             return;
@@ -6912,7 +6920,9 @@ impl Gui {
         )
     }
 
-    /// ~3-cell strip on the side↔main split; 1-cell edge when fully collapsed/expanded.
+    /// Hit-test the side↔main split for drag-resize.
+    /// Portrait: expanded panel bottom border and/or main (diff) top border.
+    /// Landscape: ~3-col strip around the vertical split.
     fn sidebar_divider_hit(&self, col: u16, row: u16) -> bool {
         if self.screen_mode != ScreenMode::Normal {
             return false;
@@ -6925,14 +6935,18 @@ impl Gui {
         let fl = self.compute_current_frame_layout();
 
         if fl.portrait {
-            // Grab the bottom border of the expanded side panel (focused tab),
-            // not the top of the main/diff area — that matches the box users see.
+            // Either the expanded side panel's bottom border or the main/diff
+            // panel's top border (collapsed panels may sit between them).
             if fl.side_panels.is_empty() {
                 return row == content.y;
             }
             if fl.main_panel.height == 0 {
                 let y = content.y + content.height.saturating_sub(1);
                 return row == y;
+            }
+            // Top border of the diff box — single row only (content is y+1).
+            if fl.main_panel.height > 0 && row == fl.main_panel.y {
+                return true;
             }
             let active_window = self.context_mgr.active_window();
             let active_idx = SideWindow::ALL
@@ -6947,10 +6961,10 @@ impl Gui {
             if panel.height == 0 {
                 return false;
             }
+            // Only the bottom border row — a taller strip steals clicks from the
+            // last list items (content sits on bottom-1 with Borders::ALL).
             let bottom = panel.y + panel.height.saturating_sub(1);
-            // ~3 rows on the panel side only (never into the diff below).
-            let lo = bottom.saturating_sub(2);
-            row >= lo && row <= bottom
+            row == bottom
         } else if fl.side_panels.is_empty() {
             col == content.x
         } else if fl.main_panel.width == 0 {
@@ -6963,6 +6977,30 @@ impl Gui {
         }
     }
 
+    /// Rows to add when mapping a portrait grab to the side/main split.
+    /// Main/diff top border: 0 (row is already the split). Expanded panel bottom:
+    /// 1 + trailing collapsed panels so both grabs drive the same ratio.
+    fn portrait_sidebar_resize_offset(&self, row: u16) -> u16 {
+        let fl = self.compute_current_frame_layout();
+        if !fl.portrait {
+            return 0;
+        }
+        if fl.main_panel.height > 0 && row == fl.main_panel.y {
+            return 0;
+        }
+        let panel_count = SideWindow::ALL.len();
+        let active_window = self.context_mgr.active_window();
+        let active_idx = SideWindow::ALL
+            .iter()
+            .position(|w| *w == active_window)
+            .unwrap_or(1);
+        let expand_idx = if active_idx == 0 { 1 } else { active_idx };
+        let collapsed: u16 = 1;
+        let trailing =
+            (panel_count.saturating_sub(expand_idx.saturating_add(1)) as u16) * collapsed;
+        1 + trailing
+    }
+
     fn apply_sidebar_ratio_from_mouse(&mut self, col: u16, row: u16) {
         let content = self.content_area_rect();
         if content.width == 0 || content.height == 0 {
@@ -6970,24 +7008,9 @@ impl Gui {
         }
         let fl = self.compute_current_frame_layout();
         let ratio = if fl.portrait {
-            // Mouse tracks the expanded panel's bottom border. Panels below it
-            // stay collapsed (1 row each in portrait), so grow the side area by
-            // that trailing height — otherwise Files/Branches/Commits feel glued
-            // to the top of the diff while only Stash (last) tracks correctly.
-            let panel_count = SideWindow::ALL.len();
-            let active_window = self.context_mgr.active_window();
-            let active_idx = SideWindow::ALL
-                .iter()
-                .position(|w| *w == active_window)
-                .unwrap_or(1);
-            let expand_idx = if active_idx == 0 { 1 } else { active_idx };
-            let collapsed: u16 = 1; // matches portrait layout in layout.rs
-            let trailing =
-                (panel_count.saturating_sub(expand_idx.saturating_add(1)) as u16) * collapsed;
             let side_end = row
                 .saturating_sub(content.y)
-                .saturating_add(1)
-                .saturating_add(trailing)
+                .saturating_add(self.sidebar_resize_row_offset)
                 .min(content.height);
             side_end as f64 / content.height as f64
         } else {
