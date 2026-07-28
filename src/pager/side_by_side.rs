@@ -599,11 +599,14 @@ impl DiffViewState {
                 file_exists_on_disk,
             }
         } else {
+            // Multi-file: keep syntax highlighting, but build highlighters in
+            // parallel — sequential tree-sitter on hundreds of files was the
+            // main cost for large commits / directory hovers.
             let file_count = file_diffs.len();
             let new_filename = format!("{} ({} files)", filename, file_count);
-            let mut lines = Vec::new();
-            let mut sections = Vec::new();
+            let mut lines = Vec::with_capacity(diff_output.len() / 32 + file_count);
             let mut hunk_line_offsets = Vec::new();
+            let mut section_meta: Vec<(&str, &str)> = Vec::with_capacity(file_count);
 
             for (section_idx, (file_name, file_diff)) in file_diffs.iter().enumerate() {
                 lines.push(DiffLine {
@@ -612,7 +615,7 @@ impl DiffViewState {
                     change_type: ChangeType::Equal,
                     old_segments: None,
                     new_segments: None,
-                    file_header: Some(file_name.clone()),
+                    file_header: Some((*file_name).clone()),
                     section_index: section_idx,
                 });
 
@@ -629,16 +632,10 @@ impl DiffViewState {
                 for (idx, old_off, new_off) in section_offsets {
                     hunk_line_offsets.push((section_start + idx, old_off, new_off));
                 }
-
-                // Parse already runs on a background worker, so build
-                // highlighters here the same way single-file does.
-                let (old, new) = parse_unified_diff(file_diff);
-                sections.push(FileSection {
-                    old_highlighter: FileHighlighter::new(&old, file_name),
-                    new_highlighter: FileHighlighter::new(&new, file_name),
-                });
+                section_meta.push((file_name.as_str(), file_diff));
             }
 
+            let sections = build_file_sections_parallel(&section_meta);
             let hunk_starts = super::diff_algo::find_hunk_starts(&lines);
 
             ParsedDiff {
@@ -765,7 +762,7 @@ impl DiffViewState {
                 self.clear_search();
             }
         } else {
-            // Multi-file diff — build per-section lines with highlighters
+            // Multi-file: parallel highlighters (same as parse_diff_output).
             let file_count = file_diffs.len();
             let new_filename = format!("{} ({} files)", filename, file_count);
             let same_file = self.filename == new_filename;
@@ -774,8 +771,7 @@ impl DiffViewState {
             self.filename = new_filename;
             self.old_content = String::new();
             self.new_content = String::new();
-            self.lines = Vec::new();
-            self.sections = Vec::new();
+            self.lines = Vec::with_capacity(diff_output.len() / 32 + file_count);
             if !same_file {
                 self.scroll_offset = 0;
                 self.horizontal_scroll = 0;
@@ -794,23 +790,19 @@ impl DiffViewState {
             };
 
             self.hunk_line_offsets = Vec::new();
+            let mut section_meta: Vec<(&str, &str)> = Vec::with_capacity(file_count);
 
             for (section_idx, (file_name, file_diff)) in file_diffs.iter().enumerate() {
-                let (old, new) = parse_unified_diff(file_diff);
-
-                // Add file header separator line
-                let _header_idx = self.lines.len();
                 self.lines.push(DiffLine {
                     old_line: None,
                     new_line: None,
                     change_type: ChangeType::Equal,
                     old_segments: None,
                     new_segments: None,
-                    file_header: Some(file_name.clone()),
+                    file_header: Some((*file_name).clone()),
                     section_index: section_idx,
                 });
 
-                // Compute diff lines for this file section
                 let section_start = self.lines.len();
                 let mut section_lines =
                     diff_lines_from_unified_or_rename_only(file_diff, self.tab_width);
@@ -819,23 +811,17 @@ impl DiffViewState {
                 }
                 self.lines.append(&mut section_lines);
 
-                // Compute hunk line offsets for this section
                 let hunks = parse_hunk_headers(file_diff);
                 let section_offsets =
                     build_hunk_line_offsets(&hunks, &self.lines[section_start..], 0);
-                // Adjust indices to be global (relative to self.lines)
                 for (idx, old_off, new_off) in section_offsets {
                     self.hunk_line_offsets
                         .push((section_start + idx, old_off, new_off));
                 }
-
-                // Create highlighters for this section
-                self.sections.push(FileSection {
-                    old_highlighter: FileHighlighter::new(&old, file_name),
-                    new_highlighter: FileHighlighter::new(&new, file_name),
-                });
+                section_meta.push((file_name.as_str(), file_diff));
             }
 
+            self.sections = build_file_sections_parallel(&section_meta);
             self.hunk_starts = super::diff_algo::find_hunk_starts(&self.lines);
             self.selected_revert_hunk = if same_file {
                 self.selected_revert_hunk
@@ -851,7 +837,6 @@ impl DiffViewState {
             };
 
             if same_file {
-                // Clamp scroll in case the diff got shorter
                 let max = self.lines.len().saturating_sub(1);
                 self.scroll_offset = self.scroll_offset.min(max);
             }
@@ -2710,35 +2695,110 @@ pub fn render_diff_search_bar(frame: &mut Frame, area: Rect, state: &DiffViewSta
 }
 
 /// Parse a multi-file unified diff into per-file sections.
-/// Returns Vec of (filename, raw_diff_for_that_file).
-fn parse_multi_file_diff(diff: &str) -> Vec<(String, String)> {
-    let mut sections: Vec<(String, Vec<&str>)> = Vec::new();
+/// Returns Vec of (filename, raw_diff_slice) without re-joining bodies.
+fn parse_multi_file_diff(diff: &str) -> Vec<(String, &str)> {
+    let bytes = diff.as_bytes();
+    let mut sections: Vec<(String, &str)> = Vec::new();
     let mut current_filename = String::new();
-    let mut current_lines: Vec<&str> = Vec::new();
+    let mut section_start: Option<usize> = None;
+    let mut line_start = 0usize;
 
-    for line in diff.lines() {
+    while line_start <= bytes.len() {
+        let line_end = bytes[line_start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|i| line_start + i)
+            .unwrap_or(bytes.len());
+        let line = &diff[line_start..line_end];
+
         if line.starts_with("diff --git ") {
-            // Save previous section
-            if !current_filename.is_empty() {
-                sections.push((current_filename, current_lines));
-                current_lines = Vec::new();
+            if let Some(start) = section_start {
+                let end = line_start.saturating_sub(1).max(start);
+                sections.push((
+                    std::mem::take(&mut current_filename),
+                    &diff[start..end.min(diff.len()).max(start)],
+                ));
             }
-            // Extract filename from "diff --git a/path b/path"
             current_filename = extract_filename_from_diff_header(line);
-        } else {
-            current_lines.push(line);
+            let after = if line_end < bytes.len() {
+                line_end + 1
+            } else {
+                line_end
+            };
+            section_start = Some(after);
+        }
+
+        if line_end >= bytes.len() {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+
+    if let Some(start) = section_start {
+        if !current_filename.is_empty() {
+            sections.push((current_filename, &diff[start..]));
         }
     }
 
-    // Save last section
-    if !current_filename.is_empty() {
-        sections.push((current_filename, current_lines));
+    sections
+}
+
+/// Build tree-sitter highlighters for many file sections in parallel.
+fn build_file_sections_parallel(section_meta: &[(&str, &str)]) -> Vec<FileSection> {
+    let n = section_meta.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        let (name, body) = section_meta[0];
+        let (old, new) = parse_unified_diff(body);
+        return vec![FileSection {
+            old_highlighter: FileHighlighter::new(&old, name),
+            new_highlighter: FileHighlighter::new(&new, name),
+        }];
     }
 
+    let workers = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4)
+        .min(n)
+        .max(1);
+    let chunk = (n + workers - 1) / workers;
+    let mut handles = Vec::with_capacity(workers);
+
+    for w in 0..workers {
+        let start = w * chunk;
+        if start >= n {
+            break;
+        }
+        let end = (start + chunk).min(n);
+        // Copy the string data the worker needs (bodies may be large but this
+        // avoids lifetime issues across threads and runs once per load).
+        let owned: Vec<(String, String)> = section_meta[start..end]
+            .iter()
+            .map(|(name, body)| ((*name).to_string(), (*body).to_string()))
+            .collect();
+        handles.push(std::thread::spawn(move || {
+            owned
+                .into_iter()
+                .map(|(name, body)| {
+                    let (old, new) = parse_unified_diff(&body);
+                    FileSection {
+                        old_highlighter: FileHighlighter::new(&old, &name),
+                        new_highlighter: FileHighlighter::new(&new, &name),
+                    }
+                })
+                .collect::<Vec<_>>()
+        }));
+    }
+
+    let mut sections = Vec::with_capacity(n);
+    for handle in handles {
+        if let Ok(part) = handle.join() {
+            sections.extend(part);
+        }
+    }
     sections
-        .into_iter()
-        .map(|(name, lines)| (name, lines.join("\n")))
-        .collect()
 }
 
 /// Extract the filename from a "diff --git a/path b/path" header line.

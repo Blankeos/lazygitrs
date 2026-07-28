@@ -58,26 +58,85 @@ impl GitCommands {
 
     /// Get the full staged diff (for AI commit generation).
     pub fn diff_staged(&self) -> Result<String> {
-        let result = self
-            .git()
-            .args(&["diff", "--cached", "--color=never"])
-            .run_expecting_success()?;
+        self.diff_staged_paths(&[])
+    }
+
+    /// Staged diff limited to pathspecs (empty = all staged).
+    pub fn diff_staged_paths(&self, paths: &[&str]) -> Result<String> {
+        let mut args = vec![
+            "diff",
+            "--cached",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--color=never",
+        ];
+        if !paths.is_empty() {
+            args.push("--");
+            args.extend(paths.iter().copied());
+        }
+        let result = self.git().args(&args).run_expecting_success()?;
         Ok(result.stdout)
     }
 
     /// Get diff for a specific commit.
     pub fn diff_commit(&self, hash: &str) -> Result<String> {
-        let result = self
-            .git()
-            .args(&[
-                "show",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--color=never",
-                "--format=",
-                hash,
-            ])
-            .run_expecting_success()?;
+        self.diff_commit_paths(hash, &[])
+    }
+
+    /// Get a commit's diff, optionally limited to pathspecs (dirs/files).
+    /// Empty `paths` = whole commit. One git process — used for directory
+    /// hover in Commit Files instead of N× per-file spawns.
+    pub fn diff_commit_paths(&self, hash: &str, paths: &[&str]) -> Result<String> {
+        let parent = format!("{}^1", hash);
+        let mut args = vec![
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--color=never",
+            parent.as_str(),
+            hash,
+        ];
+        if !paths.is_empty() {
+            args.push("--");
+            args.extend(paths.iter().copied());
+        }
+        let result = self.git().args(&args).run();
+        match result {
+            Ok(r) if r.success => Ok(r.stdout),
+            _ => {
+                // Root commits have no parent — fall back to `git show`.
+                let mut args = vec![
+                    "show",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--color=never",
+                    "--format=",
+                    hash,
+                ];
+                if !paths.is_empty() {
+                    args.push("--");
+                    args.extend(paths.iter().copied());
+                }
+                let result = self.git().args(&args).run_expecting_success()?;
+                Ok(result.stdout)
+            }
+        }
+    }
+
+    /// Working-tree + index vs HEAD for pathspecs (directory hover in Files).
+    pub fn diff_paths_vs_head(&self, paths: &[&str]) -> Result<String> {
+        let mut args = vec![
+            "diff",
+            "HEAD",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--color=never",
+        ];
+        if !paths.is_empty() {
+            args.push("--");
+            args.extend(paths.iter().copied());
+        }
+        let result = self.git().args(&args).run_expecting_success()?;
         Ok(result.stdout)
     }
 
@@ -370,9 +429,8 @@ impl GitCommands {
         }
     }
 
-    /// Get the diff of a single file between two refs (for diff/compare mode).
-    pub fn diff_refs_file(&self, ref_a: &str, ref_b: &str, path: &str) -> Result<String> {
-        let paths = diff_paths_for_label(path);
+    /// Diff between two refs, optionally limited to pathspecs.
+    pub fn diff_refs_paths(&self, ref_a: &str, ref_b: &str, paths: &[&str]) -> Result<String> {
         let mut args = vec![
             "diff",
             "--no-ext-diff",
@@ -380,11 +438,19 @@ impl GitCommands {
             "--color=never",
             ref_a,
             ref_b,
-            "--",
         ];
-        args.extend(paths.iter().copied());
+        if !paths.is_empty() {
+            args.push("--");
+            args.extend(paths.iter().copied());
+        }
         let result = self.git().args(&args).run_expecting_success()?;
         Ok(result.stdout)
+    }
+
+    /// Get the diff of a single file between two refs (for diff/compare mode).
+    pub fn diff_refs_file(&self, ref_a: &str, ref_b: &str, path: &str) -> Result<String> {
+        let paths = diff_paths_for_label(path);
+        self.diff_refs_paths(ref_a, ref_b, &paths)
     }
 
     /// Get the staged content of a file.

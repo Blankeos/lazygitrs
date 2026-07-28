@@ -531,6 +531,20 @@ pub enum ScreenMode {
 
 /// Synthesize a unified diff for a new (untracked) file from its raw content.
 /// This allows untracked files to be included in combined multi-file diffs.
+
+/// Pathspec for a tree-node path: root (".") => empty (whole tree), dirs get a
+/// trailing slash so git matches the directory contents.
+fn pathspec_for_tree_path(path: &str) -> Option<String> {
+    if path.is_empty() || path == "." {
+        return None; // whole tree / no path filter
+    }
+    if path.ends_with('/') {
+        Some(path.to_string())
+    } else {
+        Some(format!("{}/", path))
+    }
+}
+
 fn synthesize_new_file_diff(filename: &str, content: &str) -> String {
     let lines: Vec<&str> = content.lines().collect();
     let count = lines.len();
@@ -2057,20 +2071,16 @@ impl Gui {
                     // Directory node: show combined diff of all child files (async)
                     if let Some(node) = self.file_tree_nodes.get(selected) {
                         if node.is_dir && !node.child_file_indices.is_empty() {
-                            let child_names: Vec<(String, Vec<String>, bool, bool, bool)> = node
+                            // One `git diff HEAD -- dir/` for tracked files under the
+                            // directory; only untracked children still need synthesize.
+                            let untracked: Vec<String> = node
                                 .child_file_indices
                                 .iter()
                                 .filter_map(|&i| model.files.get(i))
-                                .map(|f| {
-                                    (
-                                        f.current_path().to_string(),
-                                        f.diff_paths().into_iter().map(str::to_string).collect(),
-                                        f.has_unstaged_changes,
-                                        f.has_staged_changes,
-                                        f.tracked,
-                                    )
-                                })
+                                .filter(|f| !f.tracked)
+                                .map(|f| f.current_path().to_string())
                                 .collect();
+                            let pathspec = pathspec_for_tree_path(&node.path);
                             let dir_name = node.name.clone();
                             drop(model);
 
@@ -2080,42 +2090,31 @@ impl Gui {
                             self.diff_loading = true;
                             self.diff_loading_since = Some(Instant::now());
                             self.queue_diff_job(generation, diff_key, move || {
-                                let mut combined_diff = String::new();
-                                for (current_path, diff_paths, has_unstaged, has_staged, tracked) in
-                                    &child_names
-                                {
+                                if gen_counter.load(Ordering::Relaxed) != generation {
+                                    return DiffPayload::Empty;
+                                }
+                                let paths: Vec<&str> = match pathspec.as_deref() {
+                                    Some(p) => vec![p],
+                                    None => Vec::new(),
+                                };
+                                let mut combined_diff =
+                                    git.diff_paths_vs_head(&paths).unwrap_or_default();
+                                for path in &untracked {
                                     if gen_counter.load(Ordering::Relaxed) != generation {
                                         return DiffPayload::Empty;
                                     }
-                                    let diff = if !tracked {
-                                        // Untracked file: synthesize a unified diff from raw content
-                                        let content =
-                                            git.file_content(current_path).unwrap_or_default();
-                                        if content.is_empty() {
-                                            String::new()
-                                        } else {
-                                            synthesize_new_file_diff(current_path, &content)
-                                        }
-                                    } else if *has_unstaged {
-                                        let path_refs: Vec<&str> =
-                                            diff_paths.iter().map(String::as_str).collect();
-                                        git.diff_file_paths(&path_refs).unwrap_or_default()
-                                    } else if *has_staged {
-                                        let path_refs: Vec<&str> =
-                                            diff_paths.iter().map(String::as_str).collect();
-                                        git.diff_file_staged_paths(&path_refs).unwrap_or_default()
-                                    } else {
-                                        String::new()
-                                    };
-                                    if !diff.is_empty() {
-                                        if !combined_diff.is_empty() {
-                                            combined_diff.push('\n');
-                                        }
-                                        combined_diff.push_str(&diff);
+                                    let content = git.file_content(path).unwrap_or_default();
+                                    if content.is_empty() {
+                                        continue;
                                     }
+                                    let synth = synthesize_new_file_diff(path, &content);
+                                    if !combined_diff.is_empty() {
+                                        combined_diff.push('\n');
+                                    }
+                                    combined_diff.push_str(&synth);
                                 }
 
-                                let payload = if combined_diff.is_empty() {
+                                if combined_diff.is_empty() {
                                     DiffPayload::Empty
                                 } else {
                                     DiffPayload::Parsed(DiffViewState::parse_diff_output(
@@ -2124,8 +2123,7 @@ impl Gui {
                                         4,
                                         true,
                                     ))
-                                };
-                                payload
+                                }
                             });
                         } else {
                             drop(model);
@@ -2274,12 +2272,8 @@ impl Gui {
                     // Directory node in tree view: show combined diff of all child files
                     if let Some(node) = self.commit_file_tree_nodes.get(selected) {
                         if node.is_dir && !node.child_file_indices.is_empty() {
-                            let child_names: Vec<String> = node
-                                .child_file_indices
-                                .iter()
-                                .filter_map(|&i| model.commit_files.get(i))
-                                .map(|f| f.name.clone())
-                                .collect();
+                            // Single pathspec-filtered `git show`/`git diff` — not N× per file.
+                            let pathspec = pathspec_for_tree_path(&node.path);
                             let dir_name = node.name.clone();
                             let hash = self.commit_files_hash.clone();
                             drop(model);
@@ -2290,21 +2284,16 @@ impl Gui {
                             self.diff_loading = true;
                             self.diff_loading_since = Some(Instant::now());
                             self.queue_diff_job(generation, diff_key, move || {
-                                let mut combined_diff = String::new();
-                                for name in &child_names {
-                                    if gen_counter.load(Ordering::Relaxed) != generation {
-                                        return DiffPayload::Empty;
-                                    }
-                                    if let Ok(diff) = git.diff_commit_file(&hash, name) {
-                                        if !diff.is_empty() {
-                                            if !combined_diff.is_empty() {
-                                                combined_diff.push('\n');
-                                            }
-                                            combined_diff.push_str(&diff);
-                                        }
-                                    }
+                                if gen_counter.load(Ordering::Relaxed) != generation {
+                                    return DiffPayload::Empty;
                                 }
-                                let payload = if combined_diff.is_empty() {
+                                let paths: Vec<&str> = match pathspec.as_deref() {
+                                    Some(p) => vec![p],
+                                    None => Vec::new(),
+                                };
+                                let combined_diff =
+                                    git.diff_commit_paths(&hash, &paths).unwrap_or_default();
+                                if combined_diff.is_empty() {
                                     DiffPayload::Empty
                                 } else {
                                     DiffPayload::Parsed(DiffViewState::parse_diff_output(
@@ -2313,8 +2302,7 @@ impl Gui {
                                         4,
                                         true,
                                     ))
-                                };
-                                payload
+                                }
                             });
                         } else {
                             drop(model);

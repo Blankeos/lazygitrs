@@ -740,29 +740,28 @@ pub fn maybe_request_diff(gui: &mut Gui, generation: u64, diff_key: String) {
         // Directory node: combined diff of all child files
         if let Some(node) = gui.diff_mode.tree_nodes.get(selected) {
             if node.is_dir && !node.child_file_indices.is_empty() {
-                let child_names: Vec<String> = node
-                    .child_file_indices
-                    .iter()
-                    .filter_map(|&i| gui.diff_mode.diff_files.get(i))
-                    .map(|f| f.name.clone())
-                    .collect();
+                // One pathspec-filtered `git diff A B -- dir/` instead of N× files.
+                let pathspec = if node.path.is_empty() || node.path == "." {
+                    None
+                } else if node.path.ends_with('/') {
+                    Some(node.path.clone())
+                } else {
+                    Some(format!("{}/", node.path))
+                };
                 let dir_name = node.name.clone();
 
                 gui.queue_diff_job(generation, diff_key, move || {
-                    let mut combined_diff = String::new();
-                    for name in &child_names {
-                        if gen_counter.load(Ordering::Relaxed) != generation {
-                            return DiffPayload::Empty;
-                        }
-                        let diff = git.diff_refs_file(&ref_a, &ref_b, name).unwrap_or_default();
-                        if !diff.is_empty() {
-                            if !combined_diff.is_empty() {
-                                combined_diff.push('\n');
-                            }
-                            combined_diff.push_str(&diff);
-                        }
+                    if gen_counter.load(Ordering::Relaxed) != generation {
+                        return DiffPayload::Empty;
                     }
-                    let payload = if combined_diff.is_empty() {
+                    let paths: Vec<&str> = match pathspec.as_deref() {
+                        Some(p) => vec![p],
+                        None => Vec::new(),
+                    };
+                    let combined_diff = git
+                        .diff_refs_paths(&ref_a, &ref_b, &paths)
+                        .unwrap_or_default();
+                    if combined_diff.is_empty() {
                         DiffPayload::Empty
                     } else {
                         DiffPayload::Parsed(DiffViewState::parse_diff_output(
@@ -771,8 +770,7 @@ pub fn maybe_request_diff(gui: &mut Gui, generation: u64, diff_key: String) {
                             4,
                             true,
                         ))
-                    };
-                    payload
+                    }
                 });
             } else {
                 gui.diff_loading = false;
