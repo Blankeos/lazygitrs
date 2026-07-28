@@ -154,9 +154,28 @@ impl GitCommands {
     }
 
     /// Get the current working tree content of a file.
+    /// Returns empty for missing/unreadable files. Binary files are not
+    /// returned as text — use [`Self::is_binary_path`] and synthesize a
+    /// binary placeholder instead.
     pub fn file_content(&self, path: &str) -> Result<String> {
         let full_path = self.repo_path().join(path);
-        Ok(std::fs::read_to_string(full_path).unwrap_or_default())
+        let bytes = match std::fs::read(&full_path) {
+            Ok(b) => b,
+            Err(_) => return Ok(String::new()),
+        };
+        if bytes_look_binary(&bytes) {
+            return Ok(String::new());
+        }
+        Ok(String::from_utf8(bytes).unwrap_or_default())
+    }
+
+    /// True if the worktree path exists and looks binary (NUL / invalid UTF-8).
+    pub fn is_binary_path(&self, path: &str) -> bool {
+        let full_path = self.repo_path().join(path);
+        match std::fs::read(full_path) {
+            Ok(bytes) => bytes_look_binary(&bytes),
+            Err(_) => false,
+        }
     }
 
     /// Get total insertions/deletions across all working tree changes,
@@ -469,6 +488,14 @@ fn diff_paths_for_label(path: &str) -> Vec<&str> {
         Some((old, new)) => vec![old, new],
         None => vec![path],
     }
+}
+
+/// Heuristic: NUL byte, or invalid UTF-8 → treat as binary.
+fn bytes_look_binary(bytes: &[u8]) -> bool {
+    if bytes.contains(&0) {
+        return true;
+    }
+    std::str::from_utf8(bytes).is_err()
 }
 
 fn current_path_for_label(path: &str) -> &str {

@@ -562,6 +562,17 @@ fn synthesize_new_file_diff(filename: &str, content: &str) -> String {
     diff
 }
 
+/// Placeholder so the pager shows "Binary file (not viewable)".
+fn synthesize_binary_file_diff(filename: &str) -> String {
+    format!(
+        "diff --git a/{f} b/{f}\n\
+         new file mode 100644\n\
+         index 0000000..1111111\n\
+         Binary files /dev/null and b/{f} differ\n",
+        f = filename
+    )
+}
+
 impl Gui {
     fn show_error(&mut self, title: &str, err: anyhow::Error) {
         self.popup = PopupState::Message {
@@ -2047,17 +2058,26 @@ impl Gui {
                         let exists = git.repo_path().join(&current_path).exists();
                         match diff_result {
                             Ok(diff) if diff.is_empty() && !tracked => {
-                                match git.file_content(&current_path) {
-                                    Ok(content) if !content.is_empty() => {
-                                        DiffPayload::Parsed(DiffViewState::parse_content(
-                                            &current_path,
-                                            "",
-                                            &content,
-                                            4,
-                                            exists,
-                                        ))
+                                if git.is_binary_path(&current_path) {
+                                    DiffPayload::Parsed(DiffViewState::parse_diff_output(
+                                        &current_path,
+                                        &synthesize_binary_file_diff(&current_path),
+                                        4,
+                                        exists,
+                                    ))
+                                } else {
+                                    match git.file_content(&current_path) {
+                                        Ok(content) if !content.is_empty() => {
+                                            DiffPayload::Parsed(DiffViewState::parse_content(
+                                                &current_path,
+                                                "",
+                                                &content,
+                                                4,
+                                                exists,
+                                            ))
+                                        }
+                                        _ => DiffPayload::Empty,
                                     }
-                                    _ => DiffPayload::Empty,
                                 }
                             }
                             Ok(diff) if diff.is_empty() => DiffPayload::Empty,
@@ -2103,11 +2123,15 @@ impl Gui {
                                     if gen_counter.load(Ordering::Relaxed) != generation {
                                         return DiffPayload::Empty;
                                     }
-                                    let content = git.file_content(path).unwrap_or_default();
-                                    if content.is_empty() {
-                                        continue;
-                                    }
-                                    let synth = synthesize_new_file_diff(path, &content);
+                                    let synth = if git.is_binary_path(path) {
+                                        synthesize_binary_file_diff(path)
+                                    } else {
+                                        let content = git.file_content(path).unwrap_or_default();
+                                        if content.is_empty() {
+                                            continue;
+                                        }
+                                        synthesize_new_file_diff(path, &content)
+                                    };
                                     if !combined_diff.is_empty() {
                                         combined_diff.push('\n');
                                     }

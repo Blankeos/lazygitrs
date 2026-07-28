@@ -2861,11 +2861,37 @@ fn parse_unified_diff(diff: &str) -> (String, String) {
 }
 
 fn diff_lines_from_unified_or_rename_only(diff: &str, tab_width: usize) -> Vec<DiffLine> {
+    if is_binary_diff(diff) {
+        return binary_file_placeholder_lines(tab_width);
+    }
     if let Some((old_path, new_path)) = rename_only_paths(diff) {
         return rename_only_lines(&old_path, &new_path, tab_width);
     }
 
     super::diff_algo::compute_side_by_side_from_unified_diff(diff, tab_width)
+}
+
+/// Git emits `Binary files A and B differ` (and similar) instead of hunks.
+fn is_binary_diff(diff: &str) -> bool {
+    diff.lines().any(|line| {
+        let t = line.trim_start();
+        t.starts_with("Binary files ")
+            || t.starts_with("Binary file ")
+            || t.starts_with("GIT binary patch")
+    })
+}
+
+fn binary_file_placeholder_lines(tab_width: usize) -> Vec<DiffLine> {
+    let msg = super::expand_tabs("Binary file (not viewable)", tab_width);
+    vec![DiffLine {
+        old_line: Some((1, msg.clone())),
+        new_line: Some((1, msg)),
+        change_type: ChangeType::Equal,
+        old_segments: None,
+        new_segments: None,
+        file_header: None,
+        section_index: 0,
+    }]
 }
 
 fn rename_only_paths(diff: &str) -> Option<(String, String)> {
@@ -3231,6 +3257,25 @@ mod tests {
         assert_eq!(
             parsed.lines[0].new_line,
             Some((1, "src/views/provider_oauth_flow.rs".to_string()))
+        );
+    }
+
+    #[test]
+    fn binary_diff_shows_not_viewable_placeholder() {
+        let diff = "diff --git a/foo.png b/foo.png\n\
+                    new file mode 100644\n\
+                    index 0000000..e8ef7b2\n\
+                    Binary files /dev/null and b/foo.png differ\n";
+        let parsed = DiffViewState::parse_diff_output("foo.png", diff, 4, true);
+        assert!(!parsed.lines.is_empty());
+        let text = parsed.lines[0]
+            .new_line
+            .as_ref()
+            .map(|(_, s)| s.as_str())
+            .unwrap_or("");
+        assert!(
+            text.contains("not viewable") || text.contains("Binary file"),
+            "got {text:?}"
         );
     }
 }
