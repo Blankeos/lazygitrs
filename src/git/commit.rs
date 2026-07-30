@@ -324,7 +324,14 @@ impl GitCommands {
     pub fn commit_diff(&self, hash: &str) -> Result<String> {
         let result = self
             .git()
-            .args(&["diff", &format!("{}^..{}", hash, hash)])
+            .args(&[
+                "show",
+                "--format=",
+                "--find-renames",
+                "--find-copies",
+                "--binary",
+                hash,
+            ])
             .run_expecting_success()?;
         Ok(result.stdout)
     }

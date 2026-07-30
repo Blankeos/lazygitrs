@@ -7,7 +7,9 @@ use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
 use crate::git::rebase::RebaseAction;
 use crate::gui::Gui;
-use crate::gui::popup::{MenuItem, PopupState, make_textarea};
+use crate::gui::popup::{
+    BodySoftWrap, CommitInputFocus, CommitInputKind, MenuItem, PopupState, make_textarea,
+};
 use crate::model::Branch;
 use crate::os::platform::Platform;
 
@@ -171,15 +173,23 @@ fn reword_commit(gui: &mut Gui) -> Result<()> {
     let model = gui.model.lock().unwrap();
     if let Some(commit) = model.commits.get(selected) {
         let hash = commit.hash.clone();
-        let current_msg = commit.name.clone();
+        let old_message = gui.git.commit_message_full(&hash)?;
+        let (summary, body) = super::super::split_commit_message(&old_message);
         let is_head = selected == 0;
         drop(model);
 
-        let mut ta = make_textarea("");
-        ta.insert_str(&current_msg);
-        gui.popup = PopupState::Input {
-            title: "Reword commit".to_string(),
-            textarea: ta,
+        let mut summary_textarea = crate::gui::popup::make_commit_summary_textarea();
+        summary_textarea.insert_str(&summary);
+        let mut body_textarea = crate::gui::popup::make_commit_body_textarea();
+        let body_state = BodySoftWrap::from_text(body);
+        body_state.render_into(&mut body_textarea, gui.commit_body_wrap_width());
+
+        gui.popup = PopupState::CommitInput {
+            kind: CommitInputKind::Reword,
+            summary_textarea,
+            body_textarea,
+            body_state,
+            focus: CommitInputFocus::Summary,
             on_confirm: Box::new(move |gui, message| {
                 if !message.is_empty() {
                     let message = message.to_string();
@@ -198,8 +208,6 @@ fn reword_commit(gui: &mut Gui) -> Result<()> {
                 }
                 Ok(())
             }),
-            is_commit: false,
-            confirm_focused: false,
         };
     }
     Ok(())

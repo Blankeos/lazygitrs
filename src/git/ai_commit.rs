@@ -45,8 +45,22 @@ pub fn generate_commit_message_cancellable(
     }
 
     let diff = String::from_utf8_lossy(&diff_output.stdout);
+    generate_commit_message_from_diff_cancellable(repo_path, &diff, generate_command, cancel)
+}
+
+/// Generate a commit message from a provided diff, returning `Ok(None)` when cancelled.
+pub fn generate_commit_message_from_diff_cancellable(
+    repo_path: &Path,
+    diff: &str,
+    generate_command: &str,
+    cancel: Arc<AtomicBool>,
+) -> Result<Option<String>> {
+    if generate_command.is_empty() {
+        bail!("No generateCommand configured. Set git.commit.generateCommand in your config.");
+    }
+
     if diff.trim().is_empty() {
-        bail!("No staged changes to generate a commit message for");
+        bail!("No changes to generate a commit message for");
     }
     if cancel.load(Ordering::Relaxed) {
         return Ok(None);
@@ -376,5 +390,34 @@ mod tests {
             GenerateInputMode::for_command("modelcli 'Generate a commit message'"),
             GenerateInputMode::StdinDiff
         );
+    }
+
+    #[test]
+    fn test_generate_from_diff_rejects_empty_diff() {
+        let err = generate_commit_message_from_diff_cancellable(
+            Path::new("."),
+            " \n\t ",
+            "modelcli",
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "No changes to generate a commit message for"
+        );
+    }
+
+    #[test]
+    fn test_generate_from_diff_honors_cancellation_before_spawning() {
+        let result = generate_commit_message_from_diff_cancellable(
+            Path::new("."),
+            "diff --git a/file b/file",
+            "command-that-must-not-run",
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap();
+
+        assert_eq!(result, None);
     }
 }

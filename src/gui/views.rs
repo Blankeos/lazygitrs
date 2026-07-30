@@ -2895,6 +2895,7 @@ pub fn render_popup(
             }
         }
         PopupState::CommitInput {
+            kind,
             summary_textarea,
             body_textarea,
             focus,
@@ -2912,7 +2913,7 @@ pub fn render_popup(
                 CommitInputFocus::Body => theme.popup_border,
             };
             let outer = Block::default()
-                .title(" Commit message ")
+                .title(format!(" {} ", kind.title()))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(border_color));
             frame.render_widget(outer, ta_rect);

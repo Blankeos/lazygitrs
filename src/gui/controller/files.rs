@@ -5,7 +5,7 @@ use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
 use crate::gui::Gui;
 use crate::gui::popup::{
-    CommitInputFocus, MenuItem, PopupState, make_commit_body_textarea,
+    CommitInputFocus, CommitInputKind, MenuItem, PopupState, make_commit_body_textarea,
     make_commit_summary_textarea, make_textarea,
 };
 use crate::os::platform::Platform;
@@ -231,6 +231,7 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
                     gui.popup = saved;
                 } else {
                     gui.popup = PopupState::CommitInput {
+                        kind: CommitInputKind::Commit,
                         summary_textarea: make_commit_summary_textarea(),
                         body_textarea: make_commit_body_textarea(),
                         body_state: crate::gui::popup::BodySoftWrap::new(),
@@ -268,6 +269,7 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
                     gui.popup = saved;
                 } else {
                     gui.popup = PopupState::CommitInput {
+                        kind: CommitInputKind::Commit,
                         summary_textarea: make_commit_summary_textarea(),
                         body_textarea: make_commit_body_textarea(),
                         body_state: crate::gui::popup::BodySoftWrap::new(),
@@ -296,6 +298,7 @@ fn open_commit_prompt_after_detached_head_warning(gui: &mut Gui) -> Result<()> {
     }
 
     gui.popup = PopupState::CommitInput {
+        kind: CommitInputKind::Commit,
         summary_textarea: make_commit_summary_textarea(),
         body_textarea: make_commit_body_textarea(),
         body_state: crate::gui::popup::BodySoftWrap::new(),
@@ -341,6 +344,7 @@ fn open_ai_commit_prompt(gui: &mut Gui) -> Result<()> {
             on_confirm: Box::new(|gui| {
                 gui.git.stage_all()?;
                 gui.popup = PopupState::CommitInput {
+                    kind: CommitInputKind::Commit,
                     summary_textarea: make_commit_summary_textarea(),
                     body_textarea: make_commit_body_textarea(),
                     body_state: crate::gui::popup::BodySoftWrap::new(),
@@ -364,6 +368,7 @@ fn open_ai_commit_prompt(gui: &mut Gui) -> Result<()> {
     }
 
     gui.popup = PopupState::CommitInput {
+        kind: CommitInputKind::Commit,
         summary_textarea: make_commit_summary_textarea(),
         body_textarea: make_commit_body_textarea(),
         body_state: crate::gui::popup::BodySoftWrap::new(),

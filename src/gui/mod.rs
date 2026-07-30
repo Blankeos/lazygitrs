@@ -336,6 +336,12 @@ struct AiCommitResult {
     result: Result<Option<String>>,
 }
 
+#[derive(Debug, Clone)]
+enum AiCommitSource {
+    Staged,
+    Commit(String),
+}
+
 struct CommitPageResult {
     generation: u64,
     result: Result<Vec<crate::model::Commit>>,
@@ -413,6 +419,8 @@ pub struct Gui {
     ai_commit_job: Option<AiCommitJob>,
     /// Generation counter used to discard stale AI results after cancellation.
     ai_commit_generation: u64,
+    /// Diff source for the next AI commit message generation.
+    ai_commit_source: AiCommitSource,
     /// Receiver for background remote operations (push, pull, fetch).
     remote_op_rx: mpsc::Receiver<Result<()>>,
     /// Sender cloned into background threads for remote operations.
@@ -691,6 +699,7 @@ impl Gui {
             commit_page_generation: 0,
             ai_commit_job: None,
             ai_commit_generation: 0,
+            ai_commit_source: AiCommitSource::Staged,
             remote_op_rx,
             remote_op_tx,
             auto_fetch_rx,
@@ -1550,6 +1559,7 @@ impl Gui {
                             body_state.render_into(&mut body_ta, wrap);
                         }
                         self.popup = PopupState::CommitInput {
+                            kind: popup::CommitInputKind::Commit,
                             summary_textarea: summary_ta,
                             body_textarea: body_ta,
                             body_state,
@@ -1570,16 +1580,19 @@ impl Gui {
                             }),
                         };
                     }
+                    self.ai_commit_source = AiCommitSource::Staged;
                 }
                 Ok(None) => {
                     if let Some(stashed) = self.pending_commit_popup.take() {
                         self.saved_commit_popup = Some(stashed);
                     }
+                    self.ai_commit_source = AiCommitSource::Staged;
                 }
                 Err(e) => {
                     if let Some(stashed) = self.pending_commit_popup.take() {
                         self.saved_commit_popup = Some(stashed);
                     }
+                    self.ai_commit_source = AiCommitSource::Staged;
                     self.popup = PopupState::Message {
                         title: "AI generation failed".to_string(),
                         message: format!(
@@ -1918,6 +1931,7 @@ impl Gui {
         let git = Arc::clone(&self.git);
         let tx = self.ai_commit_tx.clone();
         let cmd = self.config.user_config.git.commit.generate_command.clone();
+        let source = self.ai_commit_source.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
         self.ai_commit_generation = self.ai_commit_generation.wrapping_add(1);
@@ -1929,11 +1943,23 @@ impl Gui {
         });
 
         std::thread::spawn(move || {
-            let result = crate::git::ai_commit::generate_commit_message_cancellable(
-                git.repo_path(),
-                &cmd,
-                worker_cancel,
-            );
+            let result = match source {
+                AiCommitSource::Staged => {
+                    crate::git::ai_commit::generate_commit_message_cancellable(
+                        git.repo_path(),
+                        &cmd,
+                        worker_cancel,
+                    )
+                }
+                AiCommitSource::Commit(hash) => git.commit_diff(&hash).and_then(|diff| {
+                    crate::git::ai_commit::generate_commit_message_from_diff_cancellable(
+                        git.repo_path(),
+                        &diff,
+                        &cmd,
+                        worker_cancel,
+                    )
+                }),
+            };
             let _ = tx.send(AiCommitResult { generation, result });
         });
     }
@@ -1959,6 +1985,22 @@ impl Gui {
             return;
         }
 
+        self.ai_commit_source = match &self.popup {
+            PopupState::CommitInput {
+                kind: popup::CommitInputKind::Reword,
+                ..
+            } => {
+                let selected = self.context_mgr.selected_active();
+                self.model
+                    .lock()
+                    .unwrap()
+                    .commits
+                    .get(selected)
+                    .map(|commit| AiCommitSource::Commit(commit.hash.clone()))
+                    .unwrap_or(AiCommitSource::Staged)
+            }
+            _ => AiCommitSource::Staged,
+        };
         let stashed = std::mem::replace(&mut self.popup, PopupState::None);
         self.pending_commit_popup = Some(stashed);
         self.begin_ai_commit_generation_ui();
@@ -7871,6 +7913,25 @@ impl Command for EnableMouseCaptureWithoutHover {
 mod terminal_mouse_tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn split_commit_message_keeps_summary_and_body_separate() {
+        assert_eq!(
+            split_commit_message("feat: add editor\n\nExplain the change.\nKeep this line."),
+            (
+                "feat: add editor".to_string(),
+                "Explain the change.\nKeep this line.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn split_commit_message_handles_subject_only() {
+        assert_eq!(
+            split_commit_message("fix: subject only"),
+            ("fix: subject only".to_string(), String::new())
+        );
+    }
 
     #[test]
     fn keyboard_enhancement_preserves_terminal_text_input() {

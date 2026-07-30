@@ -455,6 +455,21 @@ pub enum CommitInputFocus {
     Body,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitInputKind {
+    Commit,
+    Reword,
+}
+
+impl CommitInputKind {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Commit => "Commit message",
+            Self::Reword => "Reword commit",
+        }
+    }
+}
+
 pub enum PopupState {
     None,
     Confirm {
@@ -474,6 +489,7 @@ pub enum PopupState {
     },
     /// Two-field commit message editor (summary + body), like lazygit.
     CommitInput {
+        kind: CommitInputKind,
         summary_textarea: TextArea<'static>,
         body_textarea: TextArea<'static>,
         /// Source-of-truth for body content. `body_textarea` is a soft-wrapped
