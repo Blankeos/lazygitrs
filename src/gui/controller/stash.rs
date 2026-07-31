@@ -43,8 +43,9 @@ fn enter_stash_files(gui: &mut Gui) -> Result<()> {
         let message = entry.name.clone();
         drop(model);
 
-        // Load stash files (stashes are merge commits internally)
-        let commit_files = gui.git.commit_files(&hash)?;
+        // Keep entering large stashes responsive. The selected file's diff is
+        // loaded separately, so whole-stash line and hunk counts are unnecessary.
+        let commit_files = gui.git.commit_files_without_stats(&hash)?;
         {
             let mut model = gui.model.lock().unwrap();
             model.commit_files = commit_files;

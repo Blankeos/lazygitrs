@@ -237,6 +237,20 @@ impl GitCommands {
     /// Uses `hash^1..hash` to correctly handle merge commits (including stashes).
     /// Falls back to single-arg diff-tree for root commits (no parent).
     pub fn commit_files(&self, hash: &str) -> Result<Vec<crate::model::CommitFile>> {
+        self.commit_files_inner(hash, true)
+    }
+
+    /// Get the list of files changed in a commit without computing diff stats.
+    /// Useful on latency-sensitive paths where the file diff is loaded separately.
+    pub fn commit_files_without_stats(&self, hash: &str) -> Result<Vec<crate::model::CommitFile>> {
+        self.commit_files_inner(hash, false)
+    }
+
+    fn commit_files_inner(
+        &self,
+        hash: &str,
+        include_stats: bool,
+    ) -> Result<Vec<crate::model::CommitFile>> {
         // Try diffing against first parent; fall back for root commits.
         // Root commits need `--root` so git compares against the empty tree;
         // plain `diff-tree <hash>` succeeds but prints nothing for roots.
@@ -314,7 +328,9 @@ impl GitCommands {
                 deletions: 0,
             });
         }
-        self.populate_commit_file_stats(&mut files, &stats_base);
+        if include_stats {
+            self.populate_commit_file_stats(&mut files, &stats_base);
+        }
         Ok(files)
     }
 
