@@ -119,48 +119,7 @@ fn show_reset_menu(gui: &mut Gui) -> Result<()> {
     if let Some(commit) = model.reflog_commits.get(selected) {
         let hash = commit.hash.clone();
         drop(model);
-
-        let h1 = hash.clone();
-        let h2 = hash.clone();
-        let h3 = hash.clone();
-
-        gui.popup = PopupState::Menu {
-            title: "Reset to this commit".to_string(),
-            items: vec![
-                MenuItem {
-                    label: "Soft reset".to_string(),
-                    description: "Keep changes staged".to_string(),
-                    key: Some("s".to_string()),
-                    action: Some(Box::new(move |gui| {
-                        gui.git.reset_to_commit(&h1, "--soft")?;
-                        gui.needs_refresh = true;
-                        Ok(())
-                    })),
-                },
-                MenuItem {
-                    label: "Mixed reset".to_string(),
-                    description: "Keep changes unstaged".to_string(),
-                    key: Some("m".to_string()),
-                    action: Some(Box::new(move |gui| {
-                        gui.git.reset_to_commit(&h2, "--mixed")?;
-                        gui.needs_refresh = true;
-                        Ok(())
-                    })),
-                },
-                MenuItem {
-                    label: "Hard reset".to_string(),
-                    description: "Discard all changes".to_string(),
-                    key: Some("h".to_string()),
-                    action: Some(Box::new(move |gui| {
-                        gui.git.reset_to_commit(&h3, "--hard")?;
-                        gui.needs_refresh = true;
-                        Ok(())
-                    })),
-                },
-            ],
-            selected: 0,
-            loading_index: None,
-        };
+        return super::commits::show_reset_menu_for_ref(gui, &hash);
     }
     Ok(())
 }

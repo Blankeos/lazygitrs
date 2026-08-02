@@ -219,50 +219,71 @@ fn show_reset_menu(gui: &mut Gui) -> Result<()> {
     if let Some(commit) = model.commits.get(selected) {
         let hash = commit.hash.clone();
         drop(model);
-
-        let h1 = hash.clone();
-        let h2 = hash.clone();
-        let h3 = hash.clone();
-
-        gui.popup = PopupState::Menu {
-            title: "Reset to this commit".to_string(),
-            items: vec![
-                MenuItem {
-                    label: "Soft reset".to_string(),
-                    description: "Keep changes staged".to_string(),
-                    key: Some("s".to_string()),
-                    action: Some(Box::new(move |gui| {
-                        gui.git.reset_to_commit(&h1, "--soft")?;
-                        gui.needs_refresh = true;
-                        Ok(())
-                    })),
-                },
-                MenuItem {
-                    label: "Mixed reset".to_string(),
-                    description: "Keep changes unstaged".to_string(),
-                    key: Some("m".to_string()),
-                    action: Some(Box::new(move |gui| {
-                        gui.git.reset_to_commit(&h2, "--mixed")?;
-                        gui.needs_refresh = true;
-                        Ok(())
-                    })),
-                },
-                MenuItem {
-                    label: "Hard reset".to_string(),
-                    description: "Discard all changes".to_string(),
-                    key: Some("h".to_string()),
-                    action: Some(Box::new(move |gui| {
-                        gui.git.reset_to_commit(&h3, "--hard")?;
-                        gui.needs_refresh = true;
-                        Ok(())
-                    })),
-                },
-            ],
-            selected: 0,
-            loading_index: None,
-        };
+        return show_reset_menu_for_ref(gui, &hash);
     }
     Ok(())
+}
+
+/// Shared soft/mixed/hard reset options for a branch, tag, or commit ref.
+/// Used by contextual `g` handlers and the global `G` reset picker.
+pub fn show_reset_menu_for_ref(gui: &mut Gui, ref_name: &str) -> Result<()> {
+    let ref_name = ref_name.trim();
+    if ref_name.is_empty() {
+        return Ok(());
+    }
+
+    let display = reset_ref_display(ref_name);
+    let r1 = ref_name.to_string();
+    let r2 = ref_name.to_string();
+    let r3 = ref_name.to_string();
+
+    gui.popup = PopupState::Menu {
+        title: format!("Reset current branch to {}", display),
+        items: vec![
+            MenuItem {
+                label: "Soft reset".to_string(),
+                description: "Keep changes staged".to_string(),
+                key: Some("s".to_string()),
+                action: Some(Box::new(move |gui| {
+                    gui.git.reset_to_commit(&r1, "--soft")?;
+                    gui.needs_refresh = true;
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Mixed reset".to_string(),
+                description: "Keep changes unstaged".to_string(),
+                key: Some("m".to_string()),
+                action: Some(Box::new(move |gui| {
+                    gui.git.reset_to_commit(&r2, "--mixed")?;
+                    gui.needs_refresh = true;
+                    Ok(())
+                })),
+            },
+            MenuItem {
+                label: "Hard reset".to_string(),
+                description: "Discard all changes".to_string(),
+                key: Some("h".to_string()),
+                action: Some(Box::new(move |gui| {
+                    gui.git.reset_to_commit(&r3, "--hard")?;
+                    gui.needs_refresh = true;
+                    Ok(())
+                })),
+            },
+        ],
+        selected: 0,
+        loading_index: None,
+    };
+    Ok(())
+}
+
+fn reset_ref_display(ref_name: &str) -> String {
+    // Shorten bare commit hashes for the menu title; keep branch/tag names intact.
+    if ref_name.len() >= 12 && ref_name.chars().all(|c| c.is_ascii_hexdigit()) {
+        ref_name.chars().take(7).collect()
+    } else {
+        ref_name.to_string()
+    }
 }
 
 fn cherry_pick_copy(gui: &mut Gui) -> Result<()> {
@@ -1032,7 +1053,7 @@ fn matches_key(key: KeyEvent, binding: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{branches_at_commit, checkout_branch_key};
+    use super::{branches_at_commit, checkout_branch_key, reset_ref_display};
     use crate::model::Branch;
 
     fn branch(name: &str, hash: &str) -> Branch {
@@ -1080,5 +1101,15 @@ mod tests {
         assert_eq!(checkout_branch_key(0).as_deref(), Some("1"));
         assert_eq!(checkout_branch_key(8).as_deref(), Some("9"));
         assert_eq!(checkout_branch_key(9), None);
+    }
+
+    #[test]
+    fn reset_ref_display_shortens_full_hashes_but_keeps_names() {
+        assert_eq!(reset_ref_display("b838172aabbccdd1122334455"), "b838172");
+        assert_eq!(reset_ref_display("main"), "main");
+        assert_eq!(reset_ref_display("v1.2.3"), "v1.2.3");
+        // Short hashes and non-hex strings are left as-is.
+        assert_eq!(reset_ref_display("b838172"), "b838172");
+        assert_eq!(reset_ref_display("feature/foo"), "feature/foo");
     }
 }

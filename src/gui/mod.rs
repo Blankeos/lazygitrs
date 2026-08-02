@@ -2742,8 +2742,20 @@ impl Gui {
         }
 
         // Universal "I" key: interactive rebase picker
+        // SHIFT alone is accepted because terminals report uppercase letters that way.
+        // Modes that already claim keys (rebase/diff/search/popups) return earlier, so
+        // these only fire in normal views.
         if plain_char_key(key, 'I') {
             self.show_interactive_rebase_picker();
+            return Ok(());
+        }
+
+        // Universal "G" key: global reset picker (lazygit `universal.viewResetOptions`).
+        // Opens a searchable branch/commit picker, then soft/mixed/hard options.
+        // Lowercase `g` remains contextual (commits.viewResetOptions) and is handled
+        // by per-context controllers — plain_char_key only matches uppercase G.
+        if plain_char_key(key, 'G') {
+            self.show_reset_picker();
             return Ok(());
         }
 
@@ -4345,13 +4357,66 @@ impl Gui {
     }
 
     pub fn show_interactive_rebase_picker(&mut self) {
-        use crate::gui::popup::{ListPickerCore, ListPickerItem, make_help_search_textarea};
+        use crate::gui::popup::{ListPickerCore, make_help_search_textarea};
+
+        // Skip HEAD branch / HEAD commit — rebasing onto current tip is a no-op.
+        let items = self.collect_reset_rebase_picker_items(/*skip_head=*/ true);
+
+        self.popup = PopupState::RefPicker {
+            title: "Interactive rebase current branch onto".to_string(),
+            core: ListPickerCore {
+                items,
+                selected: 0,
+                search_textarea: make_help_search_textarea(),
+                scroll_offset: 0,
+            },
+            on_confirm: Box::new(|gui, ref_name| {
+                controller::branches::enter_interactive_rebase_onto(gui, ref_name)
+            }),
+        };
+    }
+
+    /// Global reset picker (uppercase `G`): choose a branch/commit/tag, then
+    /// soft/mixed/hard reset options (lazygit `universal.viewResetOptions` /
+    /// `CreateGitResetMenu`). Reuses the same searchable ref list as the
+    /// interactive rebase picker, then the shared reset-options menu used by
+    /// contextual lowercase `g`.
+    pub fn show_reset_picker(&mut self) {
+        use crate::gui::popup::{ListPickerCore, make_help_search_textarea};
+
+        // Include the current branch name so users can pick it by name; skip
+        // HEAD itself in the commit list (resetting to HEAD is a no-op).
+        let items = self.collect_reset_rebase_picker_items(/*skip_head=*/ false);
+
+        self.popup = PopupState::RefPicker {
+            title: "Reset to:".to_string(),
+            core: ListPickerCore {
+                items,
+                selected: 0,
+                search_textarea: make_help_search_textarea(),
+                scroll_offset: 0,
+            },
+            on_confirm: Box::new(|gui, ref_name| {
+                controller::commits::show_reset_menu_for_ref(gui, ref_name)
+            }),
+        };
+    }
+
+    /// Shared branch/remote/tag/commit items for the global I and G pickers.
+    /// When `skip_head` is true, the current HEAD branch is omitted (rebase);
+    /// when false it is included (reset). HEAD itself is always omitted from
+    /// the commits section because operating on the tip is a no-op.
+    fn collect_reset_rebase_picker_items(
+        &self,
+        skip_head: bool,
+    ) -> Vec<crate::gui::popup::ListPickerItem> {
+        use crate::gui::popup::ListPickerItem;
 
         let model = self.model.lock().unwrap();
         let mut items = Vec::new();
 
         for branch in &model.branches {
-            if branch.head {
+            if skip_head && branch.head {
                 continue;
             }
             items.push(ListPickerItem {
@@ -4388,20 +4453,7 @@ impl Gui {
             });
         }
 
-        drop(model);
-
-        self.popup = PopupState::RefPicker {
-            title: "Interactive rebase current branch onto".to_string(),
-            core: ListPickerCore {
-                items,
-                selected: 0,
-                search_textarea: make_help_search_textarea(),
-                scroll_offset: 0,
-            },
-            on_confirm: Box::new(|gui, ref_name| {
-                controller::branches::enter_interactive_rebase_onto(gui, ref_name)
-            }),
-        };
+        items
     }
 
     fn show_help(&mut self) {
@@ -4543,6 +4595,10 @@ impl Gui {
                 HelpEntry {
                     key: "I".into(),
                     description: "Interactive rebase onto...".into(),
+                },
+                HelpEntry {
+                    key: "G".into(),
+                    description: "Reset to...".into(),
                 },
                 HelpEntry {
                     key: "1-5".into(),
@@ -7961,6 +8017,23 @@ mod terminal_mouse_tests {
                 KeyModifiers::SHIFT | KeyModifiers::SUPER
             ),
             'I'
+        ));
+        // Global reset picker (G) uses the same plain-char matching as I.
+        assert!(plain_char_key(
+            KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT),
+            'G'
+        ));
+        assert!(!plain_char_key(
+            KeyEvent::new(
+                KeyCode::Char('G'),
+                KeyModifiers::SHIFT | KeyModifiers::CONTROL
+            ),
+            'G'
+        ));
+        // Lowercase g must not match the global reset picker binding.
+        assert!(!plain_char_key(
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+            'G'
         ));
     }
 

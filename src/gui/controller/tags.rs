@@ -229,51 +229,10 @@ fn show_reset_menu(gui: &mut Gui) -> Result<()> {
     let selected = gui.context_mgr.selected_active();
     let model = gui.model.lock().unwrap();
     if let Some(tag) = model.tags.get(selected) {
-        let hash = tag.hash.clone();
-        let short_hash = if hash.len() > 7 { &hash[..7] } else { &hash };
+        // Prefer the tag name as the ref so the menu title is readable.
+        let ref_name = tag.name.clone();
         drop(model);
-
-        let h1 = hash.clone();
-        let h2 = hash.clone();
-        let h3 = hash.clone();
-
-        gui.popup = PopupState::Menu {
-            title: "Reset to this tag".to_string(),
-            items: vec![
-                MenuItem {
-                    label: "Soft reset".to_string(),
-                    description: format!("reset --soft {}", short_hash),
-                    key: Some("s".to_string()),
-                    action: Some(Box::new(move |gui| {
-                        gui.git.reset_to_commit(&h1, "--soft")?;
-                        gui.needs_refresh = true;
-                        Ok(())
-                    })),
-                },
-                MenuItem {
-                    label: "Mixed reset".to_string(),
-                    description: format!("reset --mixed {}", short_hash),
-                    key: Some("m".to_string()),
-                    action: Some(Box::new(move |gui| {
-                        gui.git.reset_to_commit(&h2, "--mixed")?;
-                        gui.needs_refresh = true;
-                        Ok(())
-                    })),
-                },
-                MenuItem {
-                    label: "Hard reset".to_string(),
-                    description: format!("reset --hard {}", short_hash),
-                    key: Some("h".to_string()),
-                    action: Some(Box::new(move |gui| {
-                        gui.git.reset_to_commit(&h3, "--hard")?;
-                        gui.needs_refresh = true;
-                        Ok(())
-                    })),
-                },
-            ],
-            selected: 0,
-            loading_index: None,
-        };
+        return super::commits::show_reset_menu_for_ref(gui, &ref_name);
     }
     Ok(())
 }
