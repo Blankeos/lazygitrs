@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.29] - 2026-08-02
+
+### Bug Fixes
+
+- Show placeholder for binary files in diff views by @Blankeos
+- Include `--root` for root-commit file diffs by @Blankeos
+- Fix portrait sidebar resize hit-testing and ratio mapping by @Blankeos
+- Restore syntax highlighting for multi-file commit previews by @Blankeos
+
+### Features
+
+- Migrate help overlays to executable command palettes by @Blankeos
+- Add global reset picker and share reset actions by @Blankeos
+- Support AI commit message generation for commit rewording by @Blankeos
+
+### Performance
+
+- Skip commit file stats when loading stash contents by @Blankeos
+- Batch directory diffs and parallelize multi-file highlighting by @Blankeos
+
 ## [0.0.28] - 2026-07-27
 
 ### Bug Fixes
