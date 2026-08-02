@@ -4,7 +4,8 @@ use crossterm::event::{KeyCode, KeyEvent};
 use crate::config::KeybindingConfig;
 use crate::gui::Gui;
 use crate::gui::popup::{
-    ListPickerCore, ListPickerItem, MenuItem, PopupState, make_help_search_textarea, make_textarea,
+    ListPickerCore, ListPickerItem, MenuItem, PopupState, make_command_palette_search_textarea,
+    make_textarea,
 };
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, _keybindings: &KeybindingConfig) -> Result<()> {
@@ -160,7 +161,7 @@ fn prompt_remote_tag_delete(
         core: ListPickerCore {
             items,
             selected: 0,
-            search_textarea: make_help_search_textarea(),
+            search_textarea: make_command_palette_search_textarea(),
             scroll_offset: 0,
         },
         on_confirm: Box::new(move |gui, remote| {

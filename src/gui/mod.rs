@@ -37,7 +37,7 @@ use self::layout::LayoutState;
 use self::modes::diff_mode::DiffModeState;
 use self::modes::patch_building::PatchBuildingState;
 use self::modes::rebase_mode::{EntryStatus, RebaseModeState, RebasePhase};
-use self::popup::{HelpEntry, HelpSection};
+use self::popup::{CommandAction, CommandEntry, CommandSection};
 use self::popup::{ListPickerItem, MessageKind, PopupState};
 
 /// Compute the display row index for a given item selection,
@@ -2707,7 +2707,7 @@ impl Gui {
 
         // Help popup (?)
         if key.code == KeyCode::Char('?') {
-            self.show_help();
+            self.show_command_palette();
             return Ok(());
         }
 
@@ -3019,7 +3019,7 @@ impl Gui {
 
         // Help popup
         if key.code == KeyCode::Char('?') {
-            self.show_diff_help();
+            self.show_diff_command_palette();
             return Ok(());
         }
 
@@ -3272,7 +3272,7 @@ impl Gui {
                     }
                 }
             }
-            PopupState::Help {
+            PopupState::CommandPalette {
                 selected,
                 scroll_offset,
                 search_textarea,
@@ -3336,7 +3336,7 @@ impl Gui {
     }
 
     pub(crate) fn handle_popup_key(&mut self, key: KeyEvent) -> Result<()> {
-        let was_help = matches!(self.popup, PopupState::Help { .. });
+        let was_help = matches!(self.popup, PopupState::CommandPalette { .. });
         let was_ref_picker = matches!(self.popup, PopupState::RefPicker { .. });
         let was_theme_picker = matches!(self.popup, PopupState::ThemePicker { .. });
 
@@ -3994,7 +3994,7 @@ impl Gui {
             PopupState::Loading { .. } => {
                 // Block all input while loading — user must wait
             }
-            PopupState::Help { .. } => {}
+            PopupState::CommandPalette { .. } => {}
             PopupState::RefPicker { .. } => {}
             PopupState::ThemePicker { .. } => {}
             PopupState::None => {}
@@ -4004,8 +4004,8 @@ impl Gui {
         // Use else-if so that a handler that transitions to another popup
         // (e.g. Help → ThemePicker on Enter) does not also fire the new
         // popup's handler with the same key event.
-        if was_help && matches!(self.popup, PopupState::Help { .. }) {
-            self.handle_help_popup_key(key);
+        if was_help && matches!(self.popup, PopupState::CommandPalette { .. }) {
+            self.handle_command_palette_key(key)?;
         } else if was_ref_picker && matches!(self.popup, PopupState::RefPicker { .. }) {
             self.handle_ref_picker_key(key)?;
         } else if was_theme_picker && matches!(self.popup, PopupState::ThemePicker { .. }) {
@@ -4015,9 +4015,9 @@ impl Gui {
         Ok(())
     }
 
-    fn handle_help_popup_key(&mut self, key: KeyEvent) {
+    fn handle_command_palette_key(&mut self, key: KeyEvent) -> Result<()> {
         // Helper: compute display index for a given entry selection
-        fn find_display_idx(sections: &[HelpSection], sel: usize, search_lower: &str) -> usize {
+        fn find_display_idx(sections: &[CommandSection], sel: usize, search_lower: &str) -> usize {
             let has_search = !search_lower.is_empty();
             let mut ei = 0usize;
             let mut di = 0usize;
@@ -4043,7 +4043,7 @@ impl Gui {
             di
         }
 
-        fn count_visible(sections: &[HelpSection], search_lower: &str) -> usize {
+        fn count_visible(sections: &[CommandSection], search_lower: &str) -> usize {
             let has_search = !search_lower.is_empty();
             sections
                 .iter()
@@ -4063,9 +4063,9 @@ impl Gui {
                 .sum()
         }
 
-        let mut open_theme_picker = false;
+        let mut selected_action = None;
 
-        if let PopupState::Help {
+        if let PopupState::CommandPalette {
             sections,
             selected,
             search_textarea,
@@ -4085,13 +4085,11 @@ impl Gui {
                     if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
                 {
                     self.popup = PopupState::None;
-                    return;
+                    return Ok(());
                 }
                 KeyCode::Enter => {
-                    // Check if the selected entry is "Color theme..."
                     let has_search = !search_lower.is_empty();
                     let mut ei = 0usize;
-                    let mut found_desc = String::new();
                     'outer: for section in sections.iter() {
                         for entry in &section.entries {
                             let vis = !has_search
@@ -4099,15 +4097,12 @@ impl Gui {
                                 || entry.description.to_lowercase().contains(&search_lower);
                             if vis {
                                 if ei == *selected {
-                                    found_desc = entry.description.clone();
+                                    selected_action = Some(entry.action.clone());
                                     break 'outer;
                                 }
                                 ei += 1;
                             }
                         }
-                    }
-                    if found_desc == "Color theme..." {
-                        open_theme_picker = true;
                     }
                 }
                 KeyCode::Down => {
@@ -4144,10 +4139,21 @@ impl Gui {
             }
         }
 
-        if open_theme_picker {
-            self.popup = PopupState::None;
-            self.show_theme_picker();
+        if let Some(action) = selected_action {
+            match action {
+                CommandAction::Dispatch(key) => {
+                    self.popup = PopupState::None;
+                    self.handle_key(key)?;
+                }
+                CommandAction::OpenThemePicker => {
+                    self.popup = PopupState::None;
+                    self.show_theme_picker();
+                }
+                CommandAction::Unavailable => {}
+            }
         }
+
+        Ok(())
     }
 
     fn handle_ref_picker_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -4333,7 +4339,9 @@ impl Gui {
     }
 
     fn show_theme_picker(&mut self) {
-        use crate::gui::popup::{ListPickerCore, ListPickerItem, make_help_search_textarea};
+        use crate::gui::popup::{
+            ListPickerCore, ListPickerItem, make_command_palette_search_textarea,
+        };
 
         let original = self.current_theme_index;
         let items: Vec<ListPickerItem> = crate::config::COLOR_THEMES
@@ -4349,7 +4357,7 @@ impl Gui {
             core: ListPickerCore {
                 items,
                 selected: original,
-                search_textarea: make_help_search_textarea(),
+                search_textarea: make_command_palette_search_textarea(),
                 scroll_offset: 0,
             },
             original_theme_index: original,
@@ -4357,7 +4365,7 @@ impl Gui {
     }
 
     pub fn show_interactive_rebase_picker(&mut self) {
-        use crate::gui::popup::{ListPickerCore, make_help_search_textarea};
+        use crate::gui::popup::{ListPickerCore, make_command_palette_search_textarea};
 
         // Skip HEAD branch / HEAD commit — rebasing onto current tip is a no-op.
         let items = self.collect_reset_rebase_picker_items(/*skip_head=*/ true);
@@ -4367,7 +4375,7 @@ impl Gui {
             core: ListPickerCore {
                 items,
                 selected: 0,
-                search_textarea: make_help_search_textarea(),
+                search_textarea: make_command_palette_search_textarea(),
                 scroll_offset: 0,
             },
             on_confirm: Box::new(|gui, ref_name| {
@@ -4382,7 +4390,7 @@ impl Gui {
     /// interactive rebase picker, then the shared reset-options menu used by
     /// contextual lowercase `g`.
     pub fn show_reset_picker(&mut self) {
-        use crate::gui::popup::{ListPickerCore, make_help_search_textarea};
+        use crate::gui::popup::{ListPickerCore, make_command_palette_search_textarea};
 
         // Include the current branch name so users can pick it by name; skip
         // HEAD itself in the commit list (resetting to HEAD is a no-op).
@@ -4393,7 +4401,7 @@ impl Gui {
             core: ListPickerCore {
                 items,
                 selected: 0,
-                search_textarea: make_help_search_textarea(),
+                search_textarea: make_command_palette_search_textarea(),
                 scroll_offset: 0,
             },
             on_confirm: Box::new(|gui, ref_name| {
@@ -4456,791 +4464,470 @@ impl Gui {
         items
     }
 
-    fn show_help(&mut self) {
+    fn show_command_palette(&mut self) {
         let kb = &self.config.user_config.keybinding;
         let active = self.context_mgr.active();
 
         // Universal keybindings
-        let universal = HelpSection {
+        let universal = CommandSection {
             title: "Universal".into(),
             entries: vec![
-                HelpEntry {
-                    key: kb.universal.quit.clone(),
-                    description: "Quit".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.quit_alt1.clone(),
-                    description: "Quit (alt)".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.return_key.clone(),
-                    description: "Return / Cancel".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.toggle_panel.clone(),
-                    description: "Next panel".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.toggle_panel_reverse.clone(),
-                    description: "Previous panel".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.prev_item.clone(),
-                    description: "Previous item".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.next_item.clone(),
-                    description: "Next item".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.prev_page.clone(),
-                    description: "Page up".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.next_page.clone(),
-                    description: "Page down".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.goto_top.clone(),
-                    description: "Go to top".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.goto_bottom.clone(),
-                    description: "Go to bottom".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.prev_block.clone(),
-                    description: "Previous panel".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.next_block.clone(),
-                    description: "Next panel".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.start_search.clone(),
-                    description: "Search".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.next_match.clone(),
-                    description: "Next search match".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.prev_match.clone(),
-                    description: "Previous search match".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.scroll_up_main_alt1.clone(),
-                    description: "Scroll diff up".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.scroll_down_main_alt1.clone(),
-                    description: "Scroll diff down".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.scroll_left.clone(),
-                    description: "Scroll left".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.scroll_right.clone(),
-                    description: "Scroll right".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.undo.clone(),
-                    description: "Undo".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.redo.clone(),
-                    description: "Redo".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.refresh.clone(),
-                    description: "Refresh".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.push_files.clone(),
-                    description: "Push".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.pull_files.clone(),
-                    description: "Pull".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.next_screen_mode.clone(),
-                    description: "Enlarge panel".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.prev_screen_mode.clone(),
-                    description: "Shrink panel".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.create_rebase_options_menu.clone(),
-                    description: "Rebase options".into(),
-                },
-                HelpEntry {
-                    key: kb.universal.create_patch_options_menu.clone(),
-                    description: "Patch options".into(),
-                },
-                HelpEntry {
-                    key: "{/}".into(),
-                    description: "Previous/next hunk".into(),
-                },
-                HelpEntry {
-                    key: ";".into(),
-                    description: "Toggle command log".into(),
-                },
-                HelpEntry {
-                    key: "W".into(),
-                    description: "Compare / Diff mode".into(),
-                },
-                HelpEntry {
-                    key: "I".into(),
-                    description: "Interactive rebase onto...".into(),
-                },
-                HelpEntry {
-                    key: "G".into(),
-                    description: "Reset to...".into(),
-                },
-                HelpEntry {
-                    key: "1-5".into(),
-                    description: "Jump to panel".into(),
-                },
-                HelpEntry {
-                    key: "?".into(),
-                    description: "Show this help".into(),
-                },
-                HelpEntry {
-                    key: "▸".into(),
-                    description: "Color theme...".into(),
-                },
+                CommandEntry::keybinding(kb.universal.quit.clone(), "Quit".into()),
+                CommandEntry::keybinding(kb.universal.quit_alt1.clone(), "Quit (alt)".into()),
+                CommandEntry::keybinding(kb.universal.return_key.clone(), "Return / Cancel".into()),
+                CommandEntry::keybinding(kb.universal.toggle_panel.clone(), "Next panel".into()),
+                CommandEntry::keybinding(
+                    kb.universal.toggle_panel_reverse.clone(),
+                    "Previous panel".into(),
+                ),
+                CommandEntry::keybinding(kb.universal.prev_item.clone(), "Previous item".into()),
+                CommandEntry::keybinding(kb.universal.next_item.clone(), "Next item".into()),
+                CommandEntry::keybinding(kb.universal.prev_page.clone(), "Page up".into()),
+                CommandEntry::keybinding(kb.universal.next_page.clone(), "Page down".into()),
+                CommandEntry::keybinding(kb.universal.goto_top.clone(), "Go to top".into()),
+                CommandEntry::keybinding(kb.universal.goto_bottom.clone(), "Go to bottom".into()),
+                CommandEntry::keybinding(kb.universal.prev_block.clone(), "Previous panel".into()),
+                CommandEntry::keybinding(kb.universal.next_block.clone(), "Next panel".into()),
+                CommandEntry::keybinding(kb.universal.start_search.clone(), "Search".into()),
+                CommandEntry::keybinding(
+                    kb.universal.next_match.clone(),
+                    "Next search match".into(),
+                ),
+                CommandEntry::keybinding(
+                    kb.universal.prev_match.clone(),
+                    "Previous search match".into(),
+                ),
+                CommandEntry::keybinding(
+                    kb.universal.scroll_up_main_alt1.clone(),
+                    "Scroll diff up".into(),
+                ),
+                CommandEntry::keybinding(
+                    kb.universal.scroll_down_main_alt1.clone(),
+                    "Scroll diff down".into(),
+                ),
+                CommandEntry::keybinding(kb.universal.scroll_left.clone(), "Scroll left".into()),
+                CommandEntry::keybinding(kb.universal.scroll_right.clone(), "Scroll right".into()),
+                CommandEntry::keybinding(kb.universal.undo.clone(), "Undo".into()),
+                CommandEntry::keybinding(kb.universal.redo.clone(), "Redo".into()),
+                CommandEntry::keybinding(kb.universal.refresh.clone(), "Refresh".into()),
+                CommandEntry::keybinding(kb.universal.push_files.clone(), "Push".into()),
+                CommandEntry::keybinding(kb.universal.pull_files.clone(), "Pull".into()),
+                CommandEntry::keybinding(
+                    kb.universal.next_screen_mode.clone(),
+                    "Enlarge panel".into(),
+                ),
+                CommandEntry::keybinding(
+                    kb.universal.prev_screen_mode.clone(),
+                    "Shrink panel".into(),
+                ),
+                CommandEntry::keybinding(
+                    kb.universal.create_rebase_options_menu.clone(),
+                    "Rebase options".into(),
+                ),
+                CommandEntry::keybinding(
+                    kb.universal.create_patch_options_menu.clone(),
+                    "Patch options".into(),
+                ),
+                CommandEntry::keybinding("{/}".into(), "Previous/next hunk".into()),
+                CommandEntry::keybinding(";".into(), "Toggle command log".into()),
+                CommandEntry::keybinding("W".into(), "Compare / Diff mode".into()),
+                CommandEntry::keybinding("I".into(), "Interactive rebase onto...".into()),
+                CommandEntry::keybinding("G".into(), "Reset to...".into()),
+                CommandEntry::keybinding("1-5".into(), "Jump to panel".into()),
+                CommandEntry::keybinding("?".into(), "Show command palette".into()),
+                CommandEntry::action(
+                    "".into(),
+                    "Color theme...".into(),
+                    CommandAction::OpenThemePicker,
+                ),
             ],
         };
 
         // Context-specific keybindings
         let context_section = match active {
-            ContextId::Files => HelpSection {
+            ContextId::Files => CommandSection {
                 title: "Files".into(),
                 entries: vec![
-                    HelpEntry {
-                        key: "<enter>".into(),
-                        description: "Toggle dir / Focus diff".into(),
-                    },
-                    HelpEntry {
-                        key: "<space>".into(),
-                        description: "Stage / Unstage".into(),
-                    },
-                    HelpEntry {
-                        key: kb.universal.toggle_diff_view_layout.clone(),
-                        description: "Toggle unified / side-by-side view".into(),
-                    },
-                    HelpEntry {
-                        key: kb.files.commit_changes.clone(),
-                        description: "Commit".into(),
-                    },
-                    HelpEntry {
-                        key: kb.files.generate_ai_commit.clone(),
-                        description: "Generate AI commit".into(),
-                    },
-                    HelpEntry {
-                        key: kb.files.amend_last_commit.clone(),
-                        description: "Amend last commit".into(),
-                    },
-                    HelpEntry {
-                        key: kb.files.commit_changes_with_editor.clone(),
-                        description: "Commit with editor".into(),
-                    },
-                    HelpEntry {
-                        key: kb.files.toggle_staged_all.clone(),
-                        description: "Toggle stage all".into(),
-                    },
-                    HelpEntry {
-                        key: kb.files.stash_all_changes.clone(),
-                        description: "Stash changes".into(),
-                    },
-                    HelpEntry {
-                        key: kb.files.view_stash_options.clone(),
-                        description: "Stash options".into(),
-                    },
-                    HelpEntry {
-                        key: kb.files.toggle_tree_view.clone(),
-                        description: "Toggle tree view".into(),
-                    },
-                    HelpEntry {
-                        key: kb.files.fetch.clone(),
-                        description: "Fetch".into(),
-                    },
-                    HelpEntry {
-                        key: kb.files.ignore_file.clone(),
-                        description: "Ignore file".into(),
-                    },
-                    HelpEntry {
-                        key: "d".into(),
-                        description: "Discard changes".into(),
-                    },
-                    HelpEntry {
-                        key: kb.universal.edit.clone(),
-                        description: "Open in editor".into(),
-                    },
-                    HelpEntry {
-                        key: kb.universal.open_file.clone(),
-                        description: "Open in default program".into(),
-                    },
-                    HelpEntry {
-                        key: "y".into(),
-                        description: "Copy to clipboard menu".into(),
-                    },
-                    HelpEntry {
-                        key: "{/}".into(),
-                        description: "Cycle prev/next revert block in diff".into(),
-                    },
-                    HelpEntry {
-                        key: kb.universal.revert_block.clone(),
-                        description: "Open hunk menu (revert selected block)".into(),
-                    },
-                    HelpEntry {
-                        key: kb.universal.undo_revert_block.clone(),
-                        description: "Undo last revert (session)".into(),
-                    },
+                    CommandEntry::keybinding("<enter>".into(), "Toggle dir / Focus diff".into()),
+                    CommandEntry::keybinding("<space>".into(), "Stage / Unstage".into()),
+                    CommandEntry::keybinding(
+                        kb.universal.toggle_diff_view_layout.clone(),
+                        "Toggle unified / side-by-side view".into(),
+                    ),
+                    CommandEntry::keybinding(kb.files.commit_changes.clone(), "Commit".into()),
+                    CommandEntry::keybinding(
+                        kb.files.generate_ai_commit.clone(),
+                        "Generate AI commit".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.files.amend_last_commit.clone(),
+                        "Amend last commit".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.files.commit_changes_with_editor.clone(),
+                        "Commit with editor".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.files.toggle_staged_all.clone(),
+                        "Toggle stage all".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.files.stash_all_changes.clone(),
+                        "Stash changes".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.files.view_stash_options.clone(),
+                        "Stash options".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.files.toggle_tree_view.clone(),
+                        "Toggle tree view".into(),
+                    ),
+                    CommandEntry::keybinding(kb.files.fetch.clone(), "Fetch".into()),
+                    CommandEntry::keybinding(kb.files.ignore_file.clone(), "Ignore file".into()),
+                    CommandEntry::keybinding("d".into(), "Discard changes".into()),
+                    CommandEntry::keybinding(kb.universal.edit.clone(), "Open in editor".into()),
+                    CommandEntry::keybinding(
+                        kb.universal.open_file.clone(),
+                        "Open in default program".into(),
+                    ),
+                    CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
+                    CommandEntry::keybinding(
+                        "{/}".into(),
+                        "Cycle prev/next revert block in diff".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.universal.revert_block.clone(),
+                        "Open hunk menu (revert selected block)".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.universal.undo_revert_block.clone(),
+                        "Undo last revert (session)".into(),
+                    ),
                 ],
             },
-            ContextId::Worktrees => HelpSection {
+            ContextId::Worktrees => CommandSection {
                 title: "Worktrees".into(),
                 entries: vec![
-                    HelpEntry {
-                        key: "<space>".into(),
-                        description: "Switch to worktree".into(),
-                    },
-                    HelpEntry {
-                        key: "n".into(),
-                        description: "Create worktree".into(),
-                    },
-                    HelpEntry {
-                        key: "d".into(),
-                        description: "Remove worktree".into(),
-                    },
+                    CommandEntry::keybinding("<space>".into(), "Switch to worktree".into()),
+                    CommandEntry::keybinding("n".into(), "Create worktree".into()),
+                    CommandEntry::keybinding("d".into(), "Remove worktree".into()),
                 ],
             },
-            ContextId::Submodules => HelpSection {
+            ContextId::Submodules => CommandSection {
                 title: "Submodules".into(),
                 entries: vec![
-                    HelpEntry {
-                        key: "<space>".into(),
-                        description: "Update submodule".into(),
-                    },
-                    HelpEntry {
-                        key: "a".into(),
-                        description: "Add submodule".into(),
-                    },
-                    HelpEntry {
-                        key: "d".into(),
-                        description: "Remove submodule".into(),
-                    },
-                    HelpEntry {
-                        key: "e".into(),
-                        description: "Enter submodule".into(),
-                    },
-                    HelpEntry {
-                        key: "u".into(),
-                        description: "Update all submodules".into(),
-                    },
-                    HelpEntry {
-                        key: "i".into(),
-                        description: "Init submodules".into(),
-                    },
+                    CommandEntry::keybinding("<space>".into(), "Update submodule".into()),
+                    CommandEntry::keybinding("a".into(), "Add submodule".into()),
+                    CommandEntry::keybinding("d".into(), "Remove submodule".into()),
+                    CommandEntry::keybinding("e".into(), "Enter submodule".into()),
+                    CommandEntry::keybinding("u".into(), "Update all submodules".into()),
+                    CommandEntry::keybinding("i".into(), "Init submodules".into()),
                 ],
             },
-            ContextId::Branches => HelpSection {
+            ContextId::Branches => CommandSection {
                 title: "Branches".into(),
                 entries: vec![
-                    HelpEntry {
-                        key: "<enter>".into(),
-                        description: "View branch commits".into(),
-                    },
-                    HelpEntry {
-                        key: "<space>".into(),
-                        description: "Checkout branch".into(),
-                    },
-                    HelpEntry {
-                        key: "c".into(),
-                        description: "Checkout ref".into(),
-                    },
-                    HelpEntry {
-                        key: "-".into(),
-                        description: "Checkout previous branch".into(),
-                    },
-                    HelpEntry {
-                        key: "n".into(),
-                        description: "New branch".into(),
-                    },
-                    HelpEntry {
-                        key: "d".into(),
-                        description: "Delete branch".into(),
-                    },
-                    HelpEntry {
-                        key: kb.branches.merge_into_current_branch.clone(),
-                        description: "Merge into current".into(),
-                    },
-                    HelpEntry {
-                        key: kb.branches.rebase_branch.clone(),
-                        description: "Rebase".into(),
-                    },
-                    HelpEntry {
-                        key: kb.branches.rename_branch.clone(),
-                        description: "Rename branch".into(),
-                    },
-                    HelpEntry {
-                        key: kb.branches.fast_forward.clone(),
-                        description: "Fast-forward".into(),
-                    },
-                    HelpEntry {
-                        key: kb.branches.set_upstream.clone(),
-                        description: "Set upstream".into(),
-                    },
-                    HelpEntry {
-                        key: "y".into(),
-                        description: "Copy to clipboard menu".into(),
-                    },
-                    HelpEntry {
-                        key: kb.branches.create_pull_request.clone(),
-                        description: "Open in browser menu".into(),
-                    },
+                    CommandEntry::keybinding("<enter>".into(), "View branch commits".into()),
+                    CommandEntry::keybinding("<space>".into(), "Checkout branch".into()),
+                    CommandEntry::keybinding("c".into(), "Checkout ref".into()),
+                    CommandEntry::keybinding("-".into(), "Checkout previous branch".into()),
+                    CommandEntry::keybinding("n".into(), "New branch".into()),
+                    CommandEntry::keybinding("d".into(), "Delete branch".into()),
+                    CommandEntry::keybinding(
+                        kb.branches.merge_into_current_branch.clone(),
+                        "Merge into current".into(),
+                    ),
+                    CommandEntry::keybinding(kb.branches.rebase_branch.clone(), "Rebase".into()),
+                    CommandEntry::keybinding(
+                        kb.branches.rename_branch.clone(),
+                        "Rename branch".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.branches.fast_forward.clone(),
+                        "Fast-forward".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.branches.set_upstream.clone(),
+                        "Set upstream".into(),
+                    ),
+                    CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
+                    CommandEntry::keybinding(
+                        kb.branches.create_pull_request.clone(),
+                        "Open in browser menu".into(),
+                    ),
                 ],
             },
-            ContextId::BranchCommits | ContextId::BranchCommitFiles => HelpSection {
+            ContextId::BranchCommits | ContextId::BranchCommitFiles => CommandSection {
                 title: "Branch Commits".into(),
                 entries: vec![
-                    HelpEntry {
-                        key: "<enter>".into(),
-                        description: "View commit files".into(),
-                    },
-                    HelpEntry {
-                        key: "<esc>".into(),
-                        description: "Back to branches".into(),
-                    },
-                    HelpEntry {
-                        key: kb.universal.toggle_diff_view_layout.clone(),
-                        description: "Toggle unified / side-by-side view".into(),
-                    },
-                    HelpEntry {
-                        key: ".".into(),
-                        description: "Toggle commit details panel".into(),
-                    },
+                    CommandEntry::keybinding("<enter>".into(), "View commit files".into()),
+                    CommandEntry::keybinding("<esc>".into(), "Back to branches".into()),
+                    CommandEntry::keybinding(
+                        kb.universal.toggle_diff_view_layout.clone(),
+                        "Toggle unified / side-by-side view".into(),
+                    ),
+                    CommandEntry::keybinding(".".into(), "Toggle commit details panel".into()),
                 ],
             },
             ContextId::Commits => {
                 let mut entries = vec![
-                    HelpEntry {
-                        key: kb.commits.cherry_pick_copy.clone(),
-                        description: "Copy (cherry-pick)".into(),
-                    },
-                    HelpEntry {
-                        key: "<enter>".into(),
-                        description: "View commit files".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.squash_down.clone(),
-                        description: "Squash down".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.rename_commit.clone(),
-                        description: "Reword commit".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.view_reset_options.clone(),
-                        description: "Reset options".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.mark_commit_as_fixup.clone(),
-                        description: "Fixup commit".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.create_fixup_commit.clone(),
-                        description: "Create fixup commit".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.squash_above_commits.clone(),
-                        description: "Apply fixup commits".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.move_up_commit.clone(),
-                        description: "Move commit up".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.move_down_commit.clone(),
-                        description: "Move commit down".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.amend_to_commit.clone(),
-                        description: "Amend to commit".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.pick_commit.clone(),
-                        description: "Pick / Drop commit".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.revert_commit.clone(),
-                        description: "Revert commit".into(),
-                    },
-                    HelpEntry {
-                        key: "v".into(),
-                        description: "Toggle range select".into(),
-                    },
-                    HelpEntry {
-                        key: kb.universal.toggle_diff_view_layout.clone(),
-                        description: "Toggle unified / side-by-side view".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.tag_commit.clone(),
-                        description: "Tag commit".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.checkout_commit.clone(),
-                        description: "Checkout commit".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.view_bisect_options.clone(),
-                        description: "Bisect options".into(),
-                    },
-                    HelpEntry {
-                        key: "o".into(),
-                        description: "Open in browser".into(),
-                    },
-                    HelpEntry {
-                        key: "y".into(),
-                        description: "Copy to clipboard menu".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.interactive_rebase.clone(),
-                        description: "Interactive rebase".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.open_log_menu.clone(),
-                        description: "Filter by branch".into(),
-                    },
-                    HelpEntry {
-                        key: ".".into(),
-                        description: "Toggle commit details panel".into(),
-                    },
+                    CommandEntry::keybinding(
+                        kb.commits.cherry_pick_copy.clone(),
+                        "Copy (cherry-pick)".into(),
+                    ),
+                    CommandEntry::keybinding("<enter>".into(), "View commit files".into()),
+                    CommandEntry::keybinding(kb.commits.squash_down.clone(), "Squash down".into()),
+                    CommandEntry::keybinding(
+                        kb.commits.rename_commit.clone(),
+                        "Reword commit".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.commits.view_reset_options.clone(),
+                        "Reset options".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.commits.mark_commit_as_fixup.clone(),
+                        "Fixup commit".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.commits.create_fixup_commit.clone(),
+                        "Create fixup commit".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.commits.squash_above_commits.clone(),
+                        "Apply fixup commits".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.commits.move_up_commit.clone(),
+                        "Move commit up".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.commits.move_down_commit.clone(),
+                        "Move commit down".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.commits.amend_to_commit.clone(),
+                        "Amend to commit".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.commits.pick_commit.clone(),
+                        "Pick / Drop commit".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.commits.revert_commit.clone(),
+                        "Revert commit".into(),
+                    ),
+                    CommandEntry::keybinding("v".into(), "Toggle range select".into()),
+                    CommandEntry::keybinding(
+                        kb.universal.toggle_diff_view_layout.clone(),
+                        "Toggle unified / side-by-side view".into(),
+                    ),
+                    CommandEntry::keybinding(kb.commits.tag_commit.clone(), "Tag commit".into()),
+                    CommandEntry::keybinding(
+                        kb.commits.checkout_commit.clone(),
+                        "Checkout commit".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.commits.view_bisect_options.clone(),
+                        "Bisect options".into(),
+                    ),
+                    CommandEntry::keybinding("o".into(), "Open in browser".into()),
+                    CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
+                    CommandEntry::keybinding(
+                        kb.commits.interactive_rebase.clone(),
+                        "Interactive rebase".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.commits.open_log_menu.clone(),
+                        "Filter by branch".into(),
+                    ),
+                    CommandEntry::keybinding(".".into(), "Toggle commit details panel".into()),
                 ];
                 if !self.cherry_pick_clipboard.is_empty() {
                     entries.insert(
                         0,
-                        HelpEntry {
-                            key: kb.commits.paste_commits.clone(),
-                            description: "Paste (cherry-pick)".into(),
-                        },
+                        CommandEntry::keybinding(
+                            kb.commits.paste_commits.clone(),
+                            "Paste (cherry-pick)".into(),
+                        ),
                     );
                 }
-                HelpSection {
+                CommandSection {
                     title: "Commits".into(),
                     entries,
                 }
             }
-            ContextId::CommitFiles => HelpSection {
+            ContextId::CommitFiles => CommandSection {
                 title: "Commit Files".into(),
                 entries: vec![
-                    HelpEntry {
-                        key: "<enter>".into(),
-                        description: "Toggle dir / Focus diff".into(),
-                    },
-                    HelpEntry {
-                        key: "<esc>".into(),
-                        description: "Back to commits".into(),
-                    },
-                    HelpEntry {
-                        key: kb.universal.toggle_diff_view_layout.clone(),
-                        description: "Toggle unified / side-by-side view".into(),
-                    },
-                    HelpEntry {
-                        key: kb.files.toggle_tree_view.clone(),
-                        description: "Toggle tree view".into(),
-                    },
-                    HelpEntry {
-                        key: "y".into(),
-                        description: "Copy to clipboard menu".into(),
-                    },
-                    HelpEntry {
-                        key: ".".into(),
-                        description: "Toggle commit details panel".into(),
-                    },
+                    CommandEntry::keybinding("<enter>".into(), "Toggle dir / Focus diff".into()),
+                    CommandEntry::keybinding("<esc>".into(), "Back to commits".into()),
+                    CommandEntry::keybinding(
+                        kb.universal.toggle_diff_view_layout.clone(),
+                        "Toggle unified / side-by-side view".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.files.toggle_tree_view.clone(),
+                        "Toggle tree view".into(),
+                    ),
+                    CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
+                    CommandEntry::keybinding(".".into(), "Toggle commit details panel".into()),
                 ],
             },
-            ContextId::Reflog => HelpSection {
+            ContextId::Reflog => CommandSection {
                 title: "Reflog".into(),
                 entries: vec![
-                    HelpEntry {
-                        key: "<enter>".into(),
-                        description: "View commit files".into(),
-                    },
-                    HelpEntry {
-                        key: kb.universal.toggle_diff_view_layout.clone(),
-                        description: "Toggle unified / side-by-side view".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.checkout_commit.clone(),
-                        description: "Checkout commit".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.view_reset_options.clone(),
-                        description: "Reset options".into(),
-                    },
-                    HelpEntry {
-                        key: kb.commits.cherry_pick_copy.clone(),
-                        description: "Copy (cherry-pick)".into(),
-                    },
-                    HelpEntry {
-                        key: "y".into(),
-                        description: "Copy to clipboard menu".into(),
-                    },
-                    HelpEntry {
-                        key: ".".into(),
-                        description: "Toggle commit details panel".into(),
-                    },
+                    CommandEntry::keybinding("<enter>".into(), "View commit files".into()),
+                    CommandEntry::keybinding(
+                        kb.universal.toggle_diff_view_layout.clone(),
+                        "Toggle unified / side-by-side view".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.commits.checkout_commit.clone(),
+                        "Checkout commit".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.commits.view_reset_options.clone(),
+                        "Reset options".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.commits.cherry_pick_copy.clone(),
+                        "Copy (cherry-pick)".into(),
+                    ),
+                    CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
+                    CommandEntry::keybinding(".".into(), "Toggle commit details panel".into()),
                 ],
             },
-            ContextId::Stash => HelpSection {
+            ContextId::Stash => CommandSection {
                 title: "Stash".into(),
                 entries: vec![
-                    HelpEntry {
-                        key: "<enter>".into(),
-                        description: "View stash files".into(),
-                    },
-                    HelpEntry {
-                        key: "<space>".into(),
-                        description: "Apply stash".into(),
-                    },
-                    HelpEntry {
-                        key: kb.universal.toggle_diff_view_layout.clone(),
-                        description: "Toggle unified / side-by-side view".into(),
-                    },
-                    HelpEntry {
-                        key: kb.stash.pop_stash.clone(),
-                        description: "Pop stash".into(),
-                    },
-                    HelpEntry {
-                        key: kb.stash.rename_stash.clone(),
-                        description: "Rename stash".into(),
-                    },
-                    HelpEntry {
-                        key: "d".into(),
-                        description: "Drop stash".into(),
-                    },
+                    CommandEntry::keybinding("<enter>".into(), "View stash files".into()),
+                    CommandEntry::keybinding("<space>".into(), "Apply stash".into()),
+                    CommandEntry::keybinding(
+                        kb.universal.toggle_diff_view_layout.clone(),
+                        "Toggle unified / side-by-side view".into(),
+                    ),
+                    CommandEntry::keybinding(kb.stash.pop_stash.clone(), "Pop stash".into()),
+                    CommandEntry::keybinding(kb.stash.rename_stash.clone(), "Rename stash".into()),
+                    CommandEntry::keybinding("d".into(), "Drop stash".into()),
                 ],
             },
-            ContextId::StashFiles => HelpSection {
+            ContextId::StashFiles => CommandSection {
                 title: "Stash Files".into(),
                 entries: vec![
-                    HelpEntry {
-                        key: "<enter>".into(),
-                        description: "Toggle dir / Focus diff".into(),
-                    },
-                    HelpEntry {
-                        key: "<esc>".into(),
-                        description: "Back to stash".into(),
-                    },
-                    HelpEntry {
-                        key: kb.universal.toggle_diff_view_layout.clone(),
-                        description: "Toggle unified / side-by-side view".into(),
-                    },
-                    HelpEntry {
-                        key: kb.files.toggle_tree_view.clone(),
-                        description: "Toggle tree view".into(),
-                    },
-                    HelpEntry {
-                        key: "y".into(),
-                        description: "Copy to clipboard menu".into(),
-                    },
+                    CommandEntry::keybinding("<enter>".into(), "Toggle dir / Focus diff".into()),
+                    CommandEntry::keybinding("<esc>".into(), "Back to stash".into()),
+                    CommandEntry::keybinding(
+                        kb.universal.toggle_diff_view_layout.clone(),
+                        "Toggle unified / side-by-side view".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        kb.files.toggle_tree_view.clone(),
+                        "Toggle tree view".into(),
+                    ),
+                    CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
                 ],
             },
-            ContextId::Remotes => HelpSection {
+            ContextId::Remotes => CommandSection {
                 title: "Remotes".into(),
                 entries: vec![
-                    HelpEntry {
-                        key: "<enter>".into(),
-                        description: "View remote branches".into(),
-                    },
-                    HelpEntry {
-                        key: "f".into(),
-                        description: "Fetch from remote".into(),
-                    },
-                    HelpEntry {
-                        key: "n".into(),
-                        description: "Add new remote".into(),
-                    },
-                    HelpEntry {
-                        key: "d".into(),
-                        description: "Delete remote".into(),
-                    },
-                    HelpEntry {
-                        key: kb.universal.push_files.clone(),
-                        description: "Push".into(),
-                    },
-                    HelpEntry {
-                        key: kb.universal.pull_files.clone(),
-                        description: "Pull".into(),
-                    },
+                    CommandEntry::keybinding("<enter>".into(), "View remote branches".into()),
+                    CommandEntry::keybinding("f".into(), "Fetch from remote".into()),
+                    CommandEntry::keybinding("n".into(), "Add new remote".into()),
+                    CommandEntry::keybinding("d".into(), "Delete remote".into()),
+                    CommandEntry::keybinding(kb.universal.push_files.clone(), "Push".into()),
+                    CommandEntry::keybinding(kb.universal.pull_files.clone(), "Pull".into()),
                 ],
             },
-            ContextId::RemoteBranches => HelpSection {
+            ContextId::RemoteBranches => CommandSection {
                 title: "Remote Branches".into(),
                 entries: vec![
-                    HelpEntry {
-                        key: "<enter>".into(),
-                        description: "View branch commits".into(),
-                    },
-                    HelpEntry {
-                        key: "<space>".into(),
-                        description: "Checkout as local branch".into(),
-                    },
-                    HelpEntry {
-                        key: kb.branches.merge_into_current_branch.clone(),
-                        description: "Merge into current".into(),
-                    },
-                    HelpEntry {
-                        key: kb.branches.rebase_branch.clone(),
-                        description: "Rebase".into(),
-                    },
-                    HelpEntry {
-                        key: "d".into(),
-                        description: "Delete remote branch".into(),
-                    },
-                    HelpEntry {
-                        key: "<esc>".into(),
-                        description: "Back to remotes".into(),
-                    },
+                    CommandEntry::keybinding("<enter>".into(), "View branch commits".into()),
+                    CommandEntry::keybinding("<space>".into(), "Checkout as local branch".into()),
+                    CommandEntry::keybinding(
+                        kb.branches.merge_into_current_branch.clone(),
+                        "Merge into current".into(),
+                    ),
+                    CommandEntry::keybinding(kb.branches.rebase_branch.clone(), "Rebase".into()),
+                    CommandEntry::keybinding("d".into(), "Delete remote branch".into()),
+                    CommandEntry::keybinding("<esc>".into(), "Back to remotes".into()),
                 ],
             },
-            ContextId::Tags => HelpSection {
+            ContextId::Tags => CommandSection {
                 title: "Tags".into(),
                 entries: vec![
-                    HelpEntry {
-                        key: "<enter>".into(),
-                        description: "View tag commits".into(),
-                    },
-                    HelpEntry {
-                        key: "n".into(),
-                        description: "Create tag".into(),
-                    },
-                    HelpEntry {
-                        key: "d".into(),
-                        description: "Delete tag".into(),
-                    },
-                    HelpEntry {
-                        key: "P".into(),
-                        description: "Push tag".into(),
-                    },
-                    HelpEntry {
-                        key: "g".into(),
-                        description: "Reset options".into(),
-                    },
+                    CommandEntry::keybinding("<enter>".into(), "View tag commits".into()),
+                    CommandEntry::keybinding("n".into(), "Create tag".into()),
+                    CommandEntry::keybinding("d".into(), "Delete tag".into()),
+                    CommandEntry::keybinding("P".into(), "Push tag".into()),
+                    CommandEntry::keybinding("g".into(), "Reset options".into()),
                 ],
             },
-            ContextId::Status => HelpSection {
+            ContextId::Status => CommandSection {
                 title: "Status".into(),
                 entries: vec![
-                    HelpEntry {
-                        key: "<enter>".into(),
-                        description: "Recent repos".into(),
-                    },
-                    HelpEntry {
-                        key: "y".into(),
-                        description: "Copy to clipboard menu".into(),
-                    },
-                    HelpEntry {
-                        key: "o".into(),
-                        description: "Open in browser menu".into(),
-                    },
+                    CommandEntry::keybinding("<enter>".into(), "Recent repos".into()),
+                    CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
+                    CommandEntry::keybinding("o".into(), "Open in browser menu".into()),
                 ],
             },
-            _ => HelpSection {
+            _ => CommandSection {
                 title: "Navigation".into(),
                 entries: vec![
-                    HelpEntry {
-                        key: "<enter>".into(),
-                        description: "Select / Open".into(),
-                    },
-                    HelpEntry {
-                        key: "<space>".into(),
-                        description: "Toggle / Confirm".into(),
-                    },
+                    CommandEntry::keybinding("<enter>".into(), "Select / Open".into()),
+                    CommandEntry::keybinding("<space>".into(), "Toggle / Confirm".into()),
                 ],
             },
         };
 
         let sections = vec![context_section, universal];
 
-        self.popup = PopupState::Help {
+        self.popup = PopupState::CommandPalette {
             sections,
             selected: 0,
-            search_textarea: popup::make_help_search_textarea(),
+            search_textarea: popup::make_command_palette_search_textarea(),
             scroll_offset: 0,
         };
     }
 
-    fn show_diff_help(&mut self) {
-        let diff_section = HelpSection {
+    fn show_diff_command_palette(&mut self) {
+        let diff_section = CommandSection {
             title: "Diff Viewer".into(),
             entries: vec![
-                HelpEntry {
-                    key: "j/k".into(),
-                    description: "Scroll down / up".into(),
-                },
-                HelpEntry {
-                    key: "h/l".into(),
-                    description: "Scroll left / right".into(),
-                },
-                HelpEntry {
-                    key: "{/}".into(),
-                    description: "Cycle prev / next hunk (selects revert block in Files)".into(),
-                },
-                HelpEntry {
-                    key: "[".into(),
-                    description: "Toggle old-only view".into(),
-                },
-                HelpEntry {
-                    key: "]".into(),
-                    description: "Toggle new-only view".into(),
-                },
-                HelpEntry {
-                    key: self
-                        .config
+                CommandEntry::keybinding("j/k".into(), "Scroll down / up".into()),
+                CommandEntry::keybinding("h/l".into(), "Scroll left / right".into()),
+                CommandEntry::keybinding(
+                    "{/}".into(),
+                    "Cycle prev / next hunk (selects revert block in Files)".into(),
+                ),
+                CommandEntry::keybinding("[".into(), "Toggle old-only view".into()),
+                CommandEntry::keybinding("]".into(), "Toggle new-only view".into()),
+                CommandEntry::keybinding(
+                    self.config
                         .user_config
                         .keybinding
                         .universal
                         .toggle_diff_view_layout
                         .clone(),
-                    description: "Toggle unified / side-by-side view".into(),
-                },
-                HelpEntry {
-                    key: "z".into(),
-                    description: "Toggle line wrap".into(),
-                },
-                HelpEntry {
-                    key: "g/G".into(),
-                    description: "Go to top / bottom".into(),
-                },
-                HelpEntry {
-                    key: "PgUp/PgDn".into(),
-                    description: "Page up / down".into(),
-                },
-                HelpEntry {
-                    key: "/".into(),
-                    description: "Search in diff".into(),
-                },
-                HelpEntry {
-                    key: "n/N".into(),
-                    description: "Next / previous search match".into(),
-                },
-                HelpEntry {
-                    key: "<enter>".into(),
-                    description: "Open hunk menu on selected block (Files)".into(),
-                },
-                HelpEntry {
-                    key: "click 󰧛".into(),
-                    description: "Click revert icon to revert that block".into(),
-                },
-                HelpEntry {
-                    key: "u".into(),
-                    description: if self.diff_view.revert_undo_stack.is_empty() {
+                    "Toggle unified / side-by-side view".into(),
+                ),
+                CommandEntry::keybinding("z".into(), "Toggle line wrap".into()),
+                CommandEntry::keybinding("g/G".into(), "Go to top / bottom".into()),
+                CommandEntry::keybinding("PgUp/PgDn".into(), "Page up / down".into()),
+                CommandEntry::keybinding("/".into(), "Search in diff".into()),
+                CommandEntry::keybinding("n/N".into(), "Next / previous search match".into()),
+                CommandEntry::keybinding(
+                    "<enter>".into(),
+                    "Open hunk menu on selected block (Files)".into(),
+                ),
+                CommandEntry::keybinding(
+                    "click 󰧛".into(),
+                    "Click revert icon to revert that block".into(),
+                ),
+                CommandEntry::keybinding(
+                    "u".into(),
+                    if self.diff_view.revert_undo_stack.is_empty() {
                         "Undo last revert (nothing to undo)".into()
                     } else {
                         format!(
@@ -5249,54 +4936,28 @@ impl Gui {
                             self.diff_view.revert_undo_high_water,
                         )
                     },
-                },
-                HelpEntry {
-                    key: "e".into(),
-                    description: "Edit file at line".into(),
-                },
-                HelpEntry {
-                    key: "o".into(),
-                    description: "Open file in default program".into(),
-                },
-                HelpEntry {
-                    key: "y".into(),
-                    description: "Copy selected text".into(),
-                },
-                HelpEntry {
-                    key: "q".into(),
-                    description: "Quit".into(),
-                },
-                HelpEntry {
-                    key: "+/_".into(),
-                    description: "Enlarge / shrink panel".into(),
-                },
-                HelpEntry {
-                    key: ";".into(),
-                    description: "Toggle command log".into(),
-                },
-                HelpEntry {
-                    key: "1-5".into(),
-                    description: "Jump to sidebar panel".into(),
-                },
-                HelpEntry {
-                    key: "esc".into(),
-                    description: "Return to sidebar".into(),
-                },
-                HelpEntry {
-                    key: "?".into(),
-                    description: "Show this help".into(),
-                },
-                HelpEntry {
-                    key: "▸".into(),
-                    description: "Color theme...".into(),
-                },
+                ),
+                CommandEntry::keybinding("e".into(), "Edit file at line".into()),
+                CommandEntry::keybinding("o".into(), "Open file in default program".into()),
+                CommandEntry::keybinding("y".into(), "Copy selected text".into()),
+                CommandEntry::keybinding("q".into(), "Quit".into()),
+                CommandEntry::keybinding("+/_".into(), "Enlarge / shrink panel".into()),
+                CommandEntry::keybinding(";".into(), "Toggle command log".into()),
+                CommandEntry::keybinding("1-5".into(), "Jump to sidebar panel".into()),
+                CommandEntry::keybinding("esc".into(), "Return to sidebar".into()),
+                CommandEntry::keybinding("?".into(), "Show command palette".into()),
+                CommandEntry::action(
+                    "".into(),
+                    "Color theme...".into(),
+                    CommandAction::OpenThemePicker,
+                ),
             ],
         };
 
-        self.popup = PopupState::Help {
+        self.popup = PopupState::CommandPalette {
             sections: vec![diff_section],
             selected: 0,
-            search_textarea: popup::make_help_search_textarea(),
+            search_textarea: popup::make_command_palette_search_textarea(),
             scroll_offset: 0,
         };
     }
@@ -6046,7 +5707,7 @@ impl Gui {
         }
 
         // Help popup intercepts mouse scroll and click
-        if let PopupState::Help {
+        if let PopupState::CommandPalette {
             sections,
             selected,
             scroll_offset,
@@ -6504,7 +6165,7 @@ impl Gui {
         use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
         // Help popup intercepts mouse scroll
-        if let PopupState::Help {
+        if let PopupState::CommandPalette {
             sections,
             scroll_offset,
             search_textarea,

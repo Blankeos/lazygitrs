@@ -1,4 +1,5 @@
 use anyhow::Result;
+use crossterm::event::KeyEvent;
 use tui_textarea::{CursorMove, TextArea};
 
 use super::Gui;
@@ -172,6 +173,18 @@ impl WrapLayout {
     pub fn line_count(&self) -> usize {
         self.lines.len()
     }
+}
+
+fn parse_command_key(key: &str) -> Option<KeyEvent> {
+    let normalized = match key {
+        "Enter" => "<enter>",
+        "Tab" => "<tab>",
+        "esc" | "Esc" => "<esc>",
+        "Alt+↑" => "<a-k>",
+        "Alt+↓" => "<a-j>",
+        _ => key,
+    };
+    crate::config::keybindings::parse_key(normalized)
 }
 
 impl BodySoftWrap {
@@ -526,9 +539,9 @@ pub enum PopupState {
         search: String,
         on_confirm: ChecklistAction,
     },
-    /// Keybinding help overlay with integrated search.
-    Help {
-        sections: Vec<HelpSection>,
+    /// Searchable command palette with keybinding hints.
+    CommandPalette {
+        sections: Vec<CommandSection>,
         selected: usize,
         search_textarea: TextArea<'static>,
         scroll_offset: usize,
@@ -581,10 +594,10 @@ pub fn make_commit_body_textarea() -> TextArea<'static> {
     ta
 }
 
-pub fn make_help_search_textarea() -> TextArea<'static> {
+pub fn make_command_palette_search_textarea() -> TextArea<'static> {
     use ratatui::style::{Color, Style};
 
-    let mut ta = make_textarea("Type to filter...");
+    let mut ta = make_textarea("Search commands or keybindings...");
     ta.set_style(Style::default().fg(Color::Yellow));
     ta.set_cursor_style(
         Style::default()
@@ -601,14 +614,95 @@ pub struct MenuItem {
     pub action: Option<MenuAction>,
 }
 
-pub struct HelpSection {
+pub struct CommandSection {
     pub title: String,
-    pub entries: Vec<HelpEntry>,
+    pub entries: Vec<CommandEntry>,
 }
 
-pub struct HelpEntry {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandAction {
+    Dispatch(KeyEvent),
+    OpenThemePicker,
+    Unavailable,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandEntry {
     pub key: String,
     pub description: String,
+    pub action: CommandAction,
+}
+
+impl CommandEntry {
+    pub fn keybinding(key: String, description: String) -> Self {
+        let action = parse_command_key(&key)
+            .map(CommandAction::Dispatch)
+            .unwrap_or(CommandAction::Unavailable);
+        Self {
+            key,
+            description: description.into(),
+            action,
+        }
+    }
+
+    pub fn action(key: String, description: String, action: CommandAction) -> Self {
+        Self {
+            key,
+            description,
+            action,
+        }
+    }
+
+    pub fn is_executable(&self) -> bool {
+        self.action != CommandAction::Unavailable
+    }
+}
+
+#[cfg(test)]
+mod command_entry_tests {
+    use super::{CommandAction, CommandEntry};
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    #[test]
+    fn single_key_binding_is_executable() {
+        let entry = CommandEntry::keybinding("x".into(), "Delete".into());
+
+        assert!(entry.is_executable());
+        assert!(matches!(
+            entry.action,
+            CommandAction::Dispatch(key)
+                if key.code == KeyCode::Char('x') && key.modifiers == KeyModifiers::NONE
+        ));
+    }
+
+    #[test]
+    fn compound_key_hint_is_not_executable() {
+        let entry = CommandEntry::keybinding("j/k".into(), "Navigate".into());
+
+        assert!(!entry.is_executable());
+        assert_eq!(entry.action, CommandAction::Unavailable);
+    }
+
+    #[test]
+    fn explicit_action_is_executable_without_a_keybinding() {
+        let entry = CommandEntry::action(
+            String::new(),
+            "Color theme...".into(),
+            CommandAction::OpenThemePicker,
+        );
+
+        assert!(entry.is_executable());
+    }
+
+    #[test]
+    fn display_key_label_is_executable() {
+        let entry = CommandEntry::keybinding("Tab".into(), "Next panel".into());
+
+        assert!(matches!(
+            entry.action,
+            CommandAction::Dispatch(key) if key.code == KeyCode::Tab
+        ));
+    }
 }
 
 pub type ListPickerAction = Box<dyn FnOnce(&mut Gui, &str) -> Result<()>>;

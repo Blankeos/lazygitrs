@@ -6,7 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::config::keybindings::parse_key;
 use crate::gui::modes::diff_mode::{DiffModeFocus, DiffModeSelector};
-use crate::gui::popup::{HelpEntry, HelpSection, MenuItem, PopupState};
+use crate::gui::popup::{CommandEntry, CommandSection, MenuItem, PopupState};
 use crate::gui::{DiffPayload, Gui, textarea_input};
 use crate::model::FileChangeStatus;
 use crate::os::platform::Platform;
@@ -36,7 +36,7 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
 
     // ? to show help
     if key.code == KeyCode::Char('?') {
-        show_diff_mode_help(gui);
+        show_diff_mode_command_palette(gui);
         return Ok(());
     }
 
@@ -788,109 +788,54 @@ pub fn maybe_request_diff(gui: &mut Gui, generation: u64, diff_key: String) {
     }
 }
 
-fn show_diff_mode_help(gui: &mut Gui) {
-    let diff_mode_section = HelpSection {
+fn show_diff_mode_command_palette(gui: &mut Gui) {
+    let diff_mode_section = CommandSection {
         title: "Compare / Diff Mode".into(),
         entries: vec![
-            HelpEntry {
-                key: "q".into(),
-                description: "Exit diff mode".into(),
-            },
-            HelpEntry {
-                key: "Tab".into(),
-                description: "Cycle focus (A → B → Files → Diff)".into(),
-            },
-            HelpEntry {
-                key: "1-4".into(),
-                description: "Jump to panel".into(),
-            },
-            HelpEntry {
-                key: "<c-s>".into(),
-                description: "Swap A and B".into(),
-            },
-            HelpEntry {
-                key: "<enter>".into(),
-                description: "Edit selector / Focus diff".into(),
-            },
-            HelpEntry {
-                key: "`".into(),
-                description: "Toggle file tree view".into(),
-            },
-            HelpEntry {
-                key: "j/k".into(),
-                description: "Navigate files / Scroll diff".into(),
-            },
-            HelpEntry {
-                key: "{/}".into(),
-                description: "Previous / next hunk".into(),
-            },
-            HelpEntry {
-                key: "[/]".into(),
-                description: "Toggle old / new only view".into(),
-            },
-            HelpEntry {
-                key: gui
-                    .config
+            CommandEntry::keybinding("q".into(), "Exit diff mode".into()),
+            CommandEntry::keybinding("Tab".into(), "Cycle focus (A → B → Files → Diff)".into()),
+            CommandEntry::keybinding("1-4".into(), "Jump to panel".into()),
+            CommandEntry::keybinding("<c-s>".into(), "Swap A and B".into()),
+            CommandEntry::keybinding("<enter>".into(), "Edit selector / Focus diff".into()),
+            CommandEntry::keybinding("`".into(), "Toggle file tree view".into()),
+            CommandEntry::keybinding("j/k".into(), "Navigate files / Scroll diff".into()),
+            CommandEntry::keybinding("{/}".into(), "Previous / next hunk".into()),
+            CommandEntry::keybinding("[/]".into(), "Toggle old / new only view".into()),
+            CommandEntry::keybinding(
+                gui.config
                     .user_config
                     .keybinding
                     .universal
                     .toggle_diff_view_layout
                     .clone(),
-                description: "Toggle unified / side-by-side view".into(),
-            },
-            HelpEntry {
-                key: "z".into(),
-                description: "Toggle line wrap".into(),
-            },
-            HelpEntry {
-                key: "g/G".into(),
-                description: "Go to top / bottom".into(),
-            },
-            HelpEntry {
-                key: "/".into(),
-                description: "Search (files or diff content)".into(),
-            },
-            HelpEntry {
-                key: "n/N".into(),
-                description: "Next / previous search match".into(),
-            },
-            HelpEntry {
-                key: "y".into(),
-                description: "Copy to clipboard".into(),
-            },
-            HelpEntry {
-                key: "?".into(),
-                description: "Show this help".into(),
-            },
+                "Toggle unified / side-by-side view".into(),
+            ),
+            CommandEntry::keybinding("z".into(), "Toggle line wrap".into()),
+            CommandEntry::keybinding("g/G".into(), "Go to top / bottom".into()),
+            CommandEntry::keybinding("/".into(), "Search (files or diff content)".into()),
+            CommandEntry::keybinding("n/N".into(), "Next / previous search match".into()),
+            CommandEntry::keybinding("y".into(), "Copy to clipboard".into()),
+            CommandEntry::keybinding("?".into(), "Show command palette".into()),
         ],
     };
 
-    let combobox_section = HelpSection {
+    let combobox_section = CommandSection {
         title: "Combobox (while editing A or B)".into(),
         entries: vec![
-            HelpEntry {
-                key: "<enter>".into(),
-                description: "Confirm selection".into(),
-            },
-            HelpEntry {
-                key: "<esc>".into(),
-                description: "Cancel".into(),
-            },
-            HelpEntry {
-                key: "Up/Down".into(),
-                description: "Navigate results".into(),
-            },
-            HelpEntry {
-                key: "Type".into(),
-                description: "Filter branches, tags, commits, remotes".into(),
-            },
+            CommandEntry::keybinding("<enter>".into(), "Confirm selection".into()),
+            CommandEntry::keybinding("<esc>".into(), "Cancel".into()),
+            CommandEntry::keybinding("Up/Down".into(), "Navigate results".into()),
+            CommandEntry::keybinding(
+                "Type".into(),
+                "Filter branches, tags, commits, remotes".into(),
+            ),
         ],
     };
 
-    gui.popup = PopupState::Help {
+    gui.popup = PopupState::CommandPalette {
         sections: vec![diff_mode_section, combobox_section],
         selected: 0,
-        search_textarea: crate::gui::popup::make_help_search_textarea(),
+        search_textarea: crate::gui::popup::make_command_palette_search_textarea(),
         scroll_offset: 0,
     };
 }

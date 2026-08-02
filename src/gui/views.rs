@@ -3217,7 +3217,7 @@ pub fn render_popup(
                 frame.render_widget(Paragraph::new(hint), hint_area);
             }
         }
-        PopupState::Help {
+        PopupState::CommandPalette {
             sections,
             selected,
             search_textarea,
@@ -3228,10 +3228,10 @@ pub fn render_popup(
             let search_lower = search.to_lowercase();
             let has_search = !search_lower.is_empty();
 
-            // Build flat display list: (is_header, key, description, is_match)
-            let mut display: Vec<(bool, String, String)> = Vec::new();
+            // Build flat display list: (is_header, key, description, executable)
+            let mut display: Vec<(bool, String, String, bool)> = Vec::new();
             for section in sections {
-                let visible_entries: Vec<&super::popup::HelpEntry> = if has_search {
+                let visible_entries: Vec<&super::popup::CommandEntry> = if has_search {
                     section
                         .entries
                         .iter()
@@ -3245,9 +3245,19 @@ pub fn render_popup(
                 };
 
                 if !visible_entries.is_empty() {
-                    display.push((true, section.title.clone(), String::new()));
+                    display.push((true, section.title.clone(), String::new(), false));
                     for entry in visible_entries {
-                        display.push((false, entry.key.clone(), entry.description.clone()));
+                        let key = if entry.key.is_empty() && entry.is_executable() {
+                            "▸".into()
+                        } else {
+                            entry.key.clone()
+                        };
+                        display.push((
+                            false,
+                            key,
+                            entry.description.clone(),
+                            entry.is_executable(),
+                        ));
                     }
                 }
             }
@@ -3265,7 +3275,7 @@ pub fn render_popup(
             frame.render_widget(Clear, popup_rect);
 
             let block = Block::default()
-                .title(" Keybindings ")
+                .title(" Command Palette ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.accent));
             frame.render_widget(block, popup_rect);
@@ -3312,7 +3322,7 @@ pub fn render_popup(
             let so = *scroll_offset;
             let effective_scroll = if so > max_scroll { max_scroll } else { so };
 
-            let visible_display: Vec<&(bool, String, String)> = display
+            let visible_display: Vec<&(bool, String, String, bool)> = display
                 .iter()
                 .skip(effective_scroll)
                 .take(list_height)
@@ -3320,7 +3330,7 @@ pub fn render_popup(
 
             // Count non-header entries before scroll offset to track selection
             let mut entry_idx = 0usize;
-            for (is_header, _, _) in display.iter().take(effective_scroll) {
+            for (is_header, _, _, _) in display.iter().take(effective_scroll) {
                 if !is_header {
                     entry_idx += 1;
                 }
@@ -3329,7 +3339,7 @@ pub fn render_popup(
             let key_col_width = 14usize;
 
             let mut list_items: Vec<ListItem> = Vec::new();
-            for (is_header, key_or_title, desc) in visible_display {
+            for (is_header, key_or_title, desc, executable) in visible_display {
                 if *is_header {
                     let line = Line::from(vec![Span::styled(
                         format!(" {} ", key_or_title),
@@ -3349,6 +3359,8 @@ pub fn render_popup(
                         Style::default()
                             .fg(theme.accent_secondary)
                             .add_modifier(Modifier::BOLD)
+                    } else if !executable {
+                        Style::default().fg(theme.text_dimmed)
                     } else {
                         Style::default().fg(theme.accent)
                     };
@@ -3357,6 +3369,8 @@ pub fn render_popup(
                         Style::default()
                             .fg(theme.text_strong)
                             .add_modifier(Modifier::BOLD)
+                    } else if !executable {
+                        Style::default().fg(theme.text_dimmed)
                     } else {
                         Style::default().fg(theme.text)
                     };
@@ -3412,6 +3426,8 @@ pub fn render_popup(
                 Span::styled(": navigate  ", Style::default().fg(theme.text_dimmed)),
                 Span::styled("type", Style::default().fg(theme.accent_secondary)),
                 Span::styled(": search  ", Style::default().fg(theme.text_dimmed)),
+                Span::styled("enter", Style::default().fg(theme.accent_secondary)),
+                Span::styled(": execute  ", Style::default().fg(theme.text_dimmed)),
                 Span::styled("esc", Style::default().fg(theme.accent_secondary)),
                 Span::styled(": close", Style::default().fg(theme.text_dimmed)),
             ]);
