@@ -195,7 +195,7 @@
 
 - [x] Feat: In 'Branches' when I 'checkout' search i.e. (c)... if I type `-` OR 'previous branch' OR 'prev branch', Instead of 'ref', let's show... 'Go to previous branch' (if it's possible to show the name of the actually previous branch (i.e. thinking just a command to check).. If it is, show something like '[-] Previous Branch (branch-name-here)'... but if it's too much of a pain to check for it, dont do it!)
 
-- [ ] Change 'Keybindings' panel (?) to 'Keybindings & Commands'. The only command we have currently is 'Color theme...' (change this to 'Color theme' only no ellipses).
+- [x] Change 'Keybindings' panel (?) to 'Keybindings & Commands'. The only command we have currently is 'Color theme...' (change this to 'Color theme' only no ellipses).
   - Another useful command is
 
 - [x] Flat file view. When I 'add' something, it reorders them in the list which is weird.
@@ -302,4 +302,3 @@ Where I observed this behavior: I noticed this for the "Commit Message" and "Des
 - [x] When viewing a tag in the 'Tags' subtab in '3'. Add a `(main,origin)` label, or the other remotes as well like `(main,origin/main,someremote/main)` or something?
 
 - [x] Optimize the "after pressing enter" when in commiting or rewording.
-- [ ] Interactive rebase, when something is being 'drop'd show a strikethrough on the commit hahs and te author name as well

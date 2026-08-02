@@ -96,8 +96,6 @@ lazygitrs ships with 30+ built-in color themes (Catppuccin, Dracula, Tokyo Night
 }
 ```
 
-To refresh the built-in generated themes from OpenCode upstream: `bun run scripts/gen-themes.ts`
-
 <!-- GEN_BENCHMARKS_START -->
 
 ### Benchmarks

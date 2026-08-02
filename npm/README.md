@@ -59,9 +59,9 @@ lazygitrs
 - [x] **Interactive rebasing** — inspired by gitlens, a clean and easy-to-use UI for pick, reword, edit, squash, fixup, drop and fast rebasing.
 - [x] **Commit Details** — Inspired by zed, just a small details panel about the commit that's easier to look at.
 - [x] **Command Palette** — easily access stuff like:
-  - [ ] `git reset` and then asks, what branch/commit, has quick search.
-  - [x] `git diff/compare` and then asks what branch/commit A and B, has quick search.
-  - [x] `git rebase` and then asks rebase on top of what branch/commit.
+  - [x] `git reset` (global `G`) — asks which branch/commit, has quick search, then soft/mixed/hard options.
+  - [x] `git diff/compare` (global `W`) and then asks what branch/commit A and B, has quick search.
+  - [x] `git rebase` (global `I`) and then asks rebase on top of what branch/commit.
   - [x] 🎨 Themes + Theme-Picker!
 
 ### Configuration
@@ -95,8 +95,6 @@ lazygitrs ships with 30+ built-in color themes (Catppuccin, Dracula, Tokyo Night
   "background": "#1a1a2e"
 }
 ```
-
-To refresh the built-in generated themes from OpenCode upstream: `bun run scripts/gen-themes.ts`
 
 <!-- GEN_BENCHMARKS_START -->
 
