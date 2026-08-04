@@ -820,6 +820,10 @@ impl Gui {
                                 got_rebase_in_progress = true;
                             }
                         }
+                        ModelPart::Head { hash, branch_name } => {
+                            model.head_hash = hash;
+                            model.head_branch_name = branch_name;
+                        }
                         ModelPart::RepoUrl(url) => model.repo_url = url,
                         ModelPart::Contributors(c) => model.contributors = c,
                     }

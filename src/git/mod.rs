@@ -45,6 +45,12 @@ pub enum ModelPart {
         is_bisecting: bool,
         rebase_onto_hash: String,
     },
+    /// Current HEAD hash + branch name. Must be refreshed with the rest of the
+    /// model so the commits graph filled-circle indicator tracks the tip.
+    Head {
+        hash: String,
+        branch_name: String,
+    },
     RepoUrl(String),
     Contributors(Vec<(String, usize)>),
 }
@@ -56,7 +62,7 @@ pub enum ModelPart {
 pub const DEFAULT_COMMIT_LIMIT: usize = 300;
 
 /// Total number of `ModelPart` variants that `load_model_streaming` sends.
-pub const MODEL_PART_COUNT: usize = 13;
+pub const MODEL_PART_COUNT: usize = 14;
 
 struct RepoPaths {
     worktree_path: PathBuf,
@@ -206,8 +212,9 @@ impl GitCommands {
     /// sends its result through `tx` as soon as it finishes, so the UI can
     /// waterfall-display whichever data arrives first.
     ///
-    /// The caller should also set `model.repo_name` and `model.head_hash`
-    /// synchronously since those are cheap.
+    /// The caller may set `model.repo_name` (and optionally an initial
+    /// `head_hash`) synchronously for the first paint; subsequent refreshes
+    /// receive an updated `ModelPart::Head`.
     pub fn load_model_streaming(self: &Arc<Self>, tx: &mpsc::Sender<ModelPart>) {
         macro_rules! spawn_part {
             ($tx:expr, $self:expr, $variant:ident, $expr:expr) => {{
@@ -238,7 +245,8 @@ impl GitCommands {
             .load_reflog(100)
             .or_else(|_| Ok::<_, anyhow::Error>(Vec::new())));
 
-        // DiffStats and RepoStatus have different shapes, spawn them directly.
+        // DiffStats, Head, RepoUrl, Contributors, RepoStatus have different
+        // shapes — spawn them directly.
         {
             let tx = tx.clone();
             let git = Arc::clone(self);
@@ -246,6 +254,15 @@ impl GitCommands {
                 if let Ok((added, deleted)) = git.diff_shortstat() {
                     let _ = tx.send(ModelPart::DiffStats { added, deleted });
                 }
+            });
+        }
+        {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || {
+                let hash = git.head_hash().unwrap_or_default();
+                let branch_name = git.current_branch_name().unwrap_or_default();
+                let _ = tx.send(ModelPart::Head { hash, branch_name });
             });
         }
         {
