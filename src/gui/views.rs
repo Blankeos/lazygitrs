@@ -41,7 +41,7 @@ pub fn render(
     search_textarea: Option<&tui_textarea::TextArea<'_>>,
     command_log: &[String],
     show_command_log: bool,
-    commit_branch_filter: &[String],
+    active_commit_filters: &[String],
     show_commit_file_tree: bool,
     commit_file_tree_nodes: &[CommitFileTreeNode],
     commit_files_collapsed_dirs: &HashSet<String>,
@@ -137,8 +137,8 @@ pub fn render(
                 build_commit_files_title(ctx_id, commit_files_hash, commit_files_message, theme)
             } else if ctx_id == ContextId::BranchCommits {
                 build_branch_commits_title(branch_commits_name, theme)
-            } else if ctx_id == ContextId::Commits && !commit_branch_filter.is_empty() {
-                let filter_label = commit_branch_filter.join(", ");
+            } else if ctx_id == ContextId::Commits && !active_commit_filters.is_empty() {
+                let filter_label = active_commit_filters.join(", ");
                 Line::from(vec![
                     Span::raw(" Commits "),
                     Span::styled(
@@ -426,9 +426,9 @@ pub fn render(
         // Build title with tab indicators for multi-tab windows
         let title = if *window == SideWindow::Commits
             && ctx_id == ContextId::Commits
-            && !commit_branch_filter.is_empty()
+            && !active_commit_filters.is_empty()
         {
-            let filter_label = commit_branch_filter.join(", ");
+            let filter_label = active_commit_filters.join(", ");
             Line::from(vec![
                 Span::raw(" Commits "),
                 Span::styled(
@@ -3446,6 +3446,24 @@ pub fn render_popup(
                 &[
                     ("↑↓", "navigate"),
                     ("type", "jump to"),
+                    ("enter", "select"),
+                    ("esc", "cancel"),
+                ],
+            );
+        }
+        PopupState::ListPicker { title, core, .. } => {
+            render_list_picker(
+                frame,
+                area,
+                theme,
+                core,
+                title,
+                70,
+                72,
+                36,
+                &[
+                    ("↑↓", "navigate"),
+                    ("type", "filter / free entry"),
                     ("enter", "select"),
                     ("esc", "cancel"),
                 ],

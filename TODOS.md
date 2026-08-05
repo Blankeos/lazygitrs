@@ -302,3 +302,5 @@ Where I observed this behavior: I noticed this for the "Commit Message" and "Des
 - [x] When viewing a tag in the 'Tags' subtab in '3'. Add a `(main,origin)` label, or the other remotes as well like `(main,origin/main,someremote/main)` or something?
 
 - [x] Optimize the "after pressing enter" when in commiting or rewording.
+
+- [ ] The `/` filtering needs better UI feedback. In the original lazygit, it highlights the chars that it matches with. But the scope affects a lot, so let's see if we can find a way to do this well.

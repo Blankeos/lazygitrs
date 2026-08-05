@@ -5,7 +5,11 @@ use crate::config::KeybindingConfig;
 use crate::gui::Gui;
 use crate::gui::context::ContextId;
 
-pub fn handle_key(gui: &mut Gui, key: KeyEvent, _keybindings: &KeybindingConfig) -> Result<()> {
+pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
+    if super::commits::matches_key(key, &keybindings.commits.open_log_menu) {
+        return super::commits::show_filtering_menu(gui);
+    }
+
     // Escape: go back to parent context (Branches or Tags)
     if key.code == KeyCode::Esc {
         let parent = gui.sub_commits_parent_context;

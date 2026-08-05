@@ -8,6 +8,15 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+/// Synchronize a free-entry row and keep it selected. Used where the typed
+/// value is valid on its own and suggestions are optional completions.
+pub fn sync_list_picker_prefer_free_entry(core: &mut ListPickerCore, free_entry_category: &str) {
+    sync_list_picker_free_entry(core, free_entry_category);
+    if !core.search_textarea.lines().join("").trim().is_empty() {
+        core.selected = 0;
+    }
+}
+
 /// Reverse hard-wrapping in an externally-formatted commit body so it can be
 /// loaded into a soft-wrapped editor without spurious mid-paragraph line breaks.
 ///
@@ -552,6 +561,15 @@ pub enum PopupState {
         core: ListPickerCore,
         on_confirm: ListPickerAction,
     },
+    /// Generic searchable list picker with free-text entry (path/author filters, etc.).
+    /// Modeled after [`PopupState::RefPicker`] but with a configurable free-entry category.
+    ListPicker {
+        title: String,
+        core: ListPickerCore,
+        /// Category label for the synthetic free-entry row (e.g. `"[path]"`, `"[author]"`).
+        free_entry_category: String,
+        on_confirm: ListPickerAction,
+    },
     /// Color theme picker with live preview and search.
     ThemePicker {
         core: ListPickerCore,
@@ -707,6 +725,9 @@ mod command_entry_tests {
 
 pub type ListPickerAction = Box<dyn FnOnce(&mut Gui, &str) -> Result<()>>;
 
+/// Category used by [`PopupState::RefPicker`] for the synthetic free-entry row.
+pub const REF_FREE_ENTRY_CATEGORY: &str = "[ref]";
+
 #[derive(Debug, Clone)]
 pub struct ListPickerItem {
     /// The value to pass to the callback (ref name, hash, theme id, etc.).
@@ -723,4 +744,183 @@ pub struct ListPickerCore {
     pub selected: usize,
     pub search_textarea: TextArea<'static>,
     pub scroll_offset: usize,
+}
+
+/// True when index 0 is the synthetic free-entry row for `free_entry_category`.
+pub fn is_free_entry_item(items: &[ListPickerItem], free_entry_category: &str) -> bool {
+    !items.is_empty() && items[0].category == free_entry_category
+}
+
+/// Remove the synthetic free-entry row at index 0 if present.
+pub fn remove_free_entry_item(items: &mut Vec<ListPickerItem>, free_entry_category: &str) {
+    if is_free_entry_item(items, free_entry_category) {
+        items.remove(0);
+    }
+}
+
+/// After the search textarea changes, sync the free-entry synthetic item and
+/// update selection to the first matching real item (or the free-entry row).
+///
+/// Scroll offset is left to the caller when matches exist (key vs paste differ);
+/// when search is cleared, `scroll_offset` is reset to 0.
+pub fn sync_list_picker_free_entry(core: &mut ListPickerCore, free_entry_category: &str) {
+    let new_search = core.search_textarea.lines().join("");
+    remove_free_entry_item(&mut core.items, free_entry_category);
+
+    let new_lower = new_search.to_lowercase();
+    if !new_lower.is_empty() {
+        let trimmed = new_search.trim().to_string();
+        core.items.insert(
+            0,
+            ListPickerItem {
+                value: trimmed.clone(),
+                label: trimmed,
+                category: free_entry_category.to_string(),
+            },
+        );
+
+        if let Some(idx) = core.items.iter().skip(1).position(|i| {
+            i.label.to_lowercase().contains(&new_lower)
+                || i.value.to_lowercase().contains(&new_lower)
+        }) {
+            core.selected = idx + 1;
+        } else {
+            core.selected = 0;
+        }
+    } else {
+        core.selected = 0;
+        core.scroll_offset = 0;
+    }
+}
+
+/// Resolve the confirm value for a free-entry list picker: the selected item,
+/// or the trimmed search text when nothing is selected but search is non-empty.
+pub fn list_picker_confirm_value(core: &ListPickerCore) -> Option<String> {
+    let search = core.search_textarea.lines().join("");
+    if let Some(item) = core.items.get(core.selected) {
+        Some(item.value.clone())
+    } else if !search.trim().is_empty() {
+        Some(search.trim().to_string())
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod free_entry_tests {
+    use super::*;
+
+    fn core_with(items: Vec<ListPickerItem>, search: &str) -> ListPickerCore {
+        let mut ta = make_command_palette_search_textarea();
+        if !search.is_empty() {
+            ta.insert_str(search);
+        }
+        ListPickerCore {
+            items,
+            selected: 0,
+            search_textarea: ta,
+            scroll_offset: 3,
+        }
+    }
+
+    fn item(value: &str, category: &str) -> ListPickerItem {
+        ListPickerItem {
+            value: value.to_string(),
+            label: value.to_string(),
+            category: category.to_string(),
+        }
+    }
+
+    #[test]
+    fn sync_inserts_free_entry_and_selects_match() {
+        let mut core = core_with(
+            vec![
+                item("main", "Branches"),
+                item("feature/path-filter", "Branches"),
+                item("v1.0", "Tags"),
+            ],
+            "path",
+        );
+
+        sync_list_picker_free_entry(&mut core, "[path]");
+
+        assert_eq!(core.items.len(), 4);
+        assert!(is_free_entry_item(&core.items, "[path]"));
+        assert_eq!(core.items[0].value, "path");
+        assert_eq!(core.items[0].category, "[path]");
+        // First real match after the free-entry row
+        assert_eq!(core.selected, 2);
+        assert_eq!(core.items[core.selected].value, "feature/path-filter");
+    }
+
+    #[test]
+    fn sync_selects_free_entry_when_no_match() {
+        let mut core = core_with(vec![item("main", "Branches")], "orphan");
+
+        sync_list_picker_free_entry(&mut core, "[author]");
+
+        assert_eq!(core.items.len(), 2);
+        assert_eq!(core.selected, 0);
+        assert_eq!(core.items[0].value, "orphan");
+        assert_eq!(core.items[0].category, "[author]");
+    }
+
+    #[test]
+    fn preferred_free_entry_stays_selected_when_a_suggestion_matches() {
+        let mut core = core_with(vec![item("src/config", "")], "src");
+
+        sync_list_picker_prefer_free_entry(&mut core, "[path]");
+
+        assert_eq!(core.selected, 0);
+        assert_eq!(core.items[0].value, "src");
+        assert_eq!(core.items[1].value, "src/config");
+    }
+
+    #[test]
+    fn sync_replaces_previous_free_entry() {
+        let mut core = core_with(vec![item("old", "[path]"), item("main", "Branches")], "new");
+
+        sync_list_picker_free_entry(&mut core, "[path]");
+
+        assert_eq!(core.items.len(), 2);
+        assert_eq!(core.items[0].value, "new");
+        assert!(core.items.iter().filter(|i| i.category == "[path]").count() == 1);
+    }
+
+    #[test]
+    fn sync_clears_free_entry_and_resets_scroll_when_search_empty() {
+        let mut core = core_with(vec![item("typed", "[path]"), item("main", "Branches")], "");
+        core.selected = 1;
+
+        sync_list_picker_free_entry(&mut core, "[path]");
+
+        assert_eq!(core.items.len(), 1);
+        assert_eq!(core.items[0].value, "main");
+        assert_eq!(core.selected, 0);
+        assert_eq!(core.scroll_offset, 0);
+    }
+
+    #[test]
+    fn confirm_value_prefers_selected_item() {
+        let mut core = core_with(vec![item("main", "Branches")], "mai");
+        sync_list_picker_free_entry(&mut core, "[ref]");
+        // selected should be the real match
+        let value = list_picker_confirm_value(&core).unwrap();
+        assert_eq!(value, "main");
+    }
+
+    #[test]
+    fn confirm_value_falls_back_to_search_when_empty_list() {
+        let core = core_with(vec![], "typed-value");
+        assert_eq!(
+            list_picker_confirm_value(&core).as_deref(),
+            Some("typed-value")
+        );
+    }
+
+    #[test]
+    fn confirm_value_none_when_empty() {
+        let core = core_with(vec![], "");
+        assert!(list_picker_confirm_value(&core).is_none());
+    }
 }

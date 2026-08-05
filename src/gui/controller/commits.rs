@@ -8,7 +8,8 @@ use crate::config::keybindings::parse_key;
 use crate::git::rebase::RebaseAction;
 use crate::gui::Gui;
 use crate::gui::popup::{
-    BodySoftWrap, CommitInputFocus, CommitInputKind, MenuItem, PopupState, make_textarea,
+    BodySoftWrap, CommitInputFocus, CommitInputKind, ListPickerItem, MenuItem, PopupState,
+    make_textarea,
 };
 use crate::model::Branch;
 use crate::os::platform::Platform;
@@ -20,6 +21,7 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
             gui.range_select_anchor = None;
             return Ok(());
         }
+
         if !gui.cherry_pick_clipboard.is_empty() {
             gui.cherry_pick_clipboard.clear();
             return Ok(());
@@ -129,9 +131,9 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return copy_to_clipboard_menu(gui);
     }
 
-    // Filter by branch
+    // Open commit filtering menu
     if matches_key(key, &keybindings.commits.open_log_menu) {
-        return show_branch_filter_menu(gui);
+        return show_filtering_menu(gui);
     }
 
     // Interactive rebase
@@ -895,6 +897,243 @@ pub fn copy_commit_to_clipboard_menu_for(
     }
 }
 
+pub fn show_files_filtering_menu(gui: &mut Gui) -> Result<()> {
+    let selected = gui.context_mgr.selected_active();
+    let selected_path = if gui.show_file_tree {
+        gui.file_tree_nodes
+            .get(selected)
+            .map(|node| node.path.clone())
+    } else {
+        let model = gui.model.lock().unwrap();
+        model
+            .files
+            .get(selected)
+            .map(|file| file.current_path().to_string())
+    };
+
+    show_file_path_filtering_menu(gui, selected_path)
+}
+
+pub fn show_file_path_filtering_menu(gui: &mut Gui, selected_path: Option<String>) -> Result<()> {
+    let mut items = Vec::new();
+    if let Some(path) = selected_path {
+        let label = format!("Filter by path: '{path}'");
+        items.push(MenuItem {
+            label,
+            description: String::new(),
+            key: None,
+            action: Some(Box::new(move |gui| {
+                gui.commit_path_filter = Some(path.clone());
+                apply_commit_filters(gui)
+            })),
+        });
+    }
+    items.push(filter_menu_item(
+        "Enter path to filter by",
+        show_path_filter_input,
+    ));
+    items.push(filter_menu_item(
+        "Enter author to filter by",
+        show_author_filter_input,
+    ));
+
+    if gui.commit_path_filter.is_some() || gui.commit_author_filter.is_some() {
+        items.push(filter_menu_item("Reset filters", |gui| {
+            gui.commit_path_filter = None;
+            gui.commit_author_filter = None;
+            apply_commit_filters(gui)
+        }));
+    }
+
+    gui.popup = PopupState::Menu {
+        title: "Filter commits".to_string(),
+        items,
+        selected: 0,
+        loading_index: None,
+    };
+    Ok(())
+}
+
+pub fn show_filtering_menu(gui: &mut Gui) -> Result<()> {
+    use crate::gui::context::ContextId;
+
+    let active = gui.context_mgr.active();
+    let selected = gui.context_mgr.selected_active();
+    let (selected_author, selected_branch) = {
+        let model = gui.model.lock().unwrap();
+        match active {
+            ContextId::Commits => {
+                let author = model
+                    .commits
+                    .get(selected)
+                    .map(|commit| format!("{} <{}>", commit.author_name, commit.author_email));
+                let branch = model
+                    .commits
+                    .get(selected)
+                    .and_then(|commit| {
+                        model
+                            .branches
+                            .iter()
+                            .find(|branch| branch.hash == commit.hash)
+                    })
+                    .map(|branch| branch.name.clone());
+                (author, branch)
+            }
+            ContextId::BranchCommits => {
+                let author = model
+                    .sub_commits
+                    .get(selected)
+                    .map(|commit| format!("{} <{}>", commit.author_name, commit.author_email));
+                let branch = matches!(
+                    gui.sub_commits_parent_context,
+                    ContextId::Branches | ContextId::RemoteBranches
+                )
+                .then(|| gui.branch_commits_name.clone())
+                .filter(|name| !name.is_empty());
+                (author, branch)
+            }
+            ContextId::Branches => (
+                None,
+                model
+                    .branches
+                    .get(selected)
+                    .map(|branch| branch.name.clone()),
+            ),
+            _ => (None, None),
+        }
+    };
+
+    let mut items = Vec::new();
+    if let Some(author) = selected_author {
+        let label = format!("Filter by author: '{author}'");
+        items.push(MenuItem {
+            label,
+            description: String::new(),
+            key: None,
+            action: Some(Box::new(move |gui| apply_author_filter(gui, &author))),
+        });
+    }
+    if let Some(branch) = selected_branch {
+        let label = format!("Filter by branch: '{branch}'");
+        items.push(MenuItem {
+            label,
+            description: String::new(),
+            key: None,
+            action: Some(Box::new(move |gui| {
+                gui.commit_branch_filter = vec![branch.clone()];
+                apply_commit_filters(gui)
+            })),
+        });
+    }
+    items.push(filter_menu_item(
+        "Enter path to filter by",
+        show_path_filter_input,
+    ));
+    items.push(filter_menu_item(
+        "Select branches to filter by",
+        show_branch_filter_menu,
+    ));
+    items.push(filter_menu_item(
+        "Enter author to filter by",
+        show_author_filter_input,
+    ));
+
+    if gui.commit_path_filter.is_some()
+        || gui.commit_author_filter.is_some()
+        || !gui.commit_branch_filter.is_empty()
+    {
+        items.push(filter_menu_item("Reset filters", |gui| {
+            gui.commit_path_filter = None;
+            gui.commit_author_filter = None;
+            gui.commit_branch_filter.clear();
+            apply_commit_filters(gui)
+        }));
+    }
+
+    gui.popup = PopupState::Menu {
+        title: "Filter commits".to_string(),
+        items,
+        selected: 0,
+        loading_index: None,
+    };
+    Ok(())
+}
+
+fn show_path_filter_input(gui: &mut Gui) -> Result<()> {
+    let items = gui
+        .git
+        .load_commit_filter_paths()?
+        .into_iter()
+        .map(|path| ListPickerItem {
+            value: path.clone(),
+            label: path,
+            category: String::new(),
+        })
+        .collect();
+    gui.show_list_picker(
+        "Filter by path",
+        items,
+        "Path",
+        Box::new(|gui, path| {
+            gui.commit_path_filter = nonempty(path);
+            apply_commit_filters(gui)
+        }),
+    );
+    Ok(())
+}
+
+fn show_author_filter_input(gui: &mut Gui) -> Result<()> {
+    let authors = {
+        let model = gui.model.lock().unwrap();
+        model
+            .commit_filter_authors
+            .values()
+            .map(|author| format!("{} <{}>", author.name, author.email))
+            .collect::<Vec<_>>()
+    };
+    let mut authors = authors;
+    authors.sort_by_key(|author| author.to_lowercase());
+    let items = authors
+        .into_iter()
+        .map(|author| ListPickerItem {
+            value: author.clone(),
+            label: author,
+            category: String::new(),
+        })
+        .collect();
+    gui.show_list_picker(
+        "Filter by author",
+        items,
+        "Author",
+        Box::new(apply_author_filter),
+    );
+    Ok(())
+}
+
+fn apply_author_filter(gui: &mut Gui, author: &str) -> Result<()> {
+    gui.commit_author_filter = nonempty(author);
+    apply_commit_filters(gui)
+}
+
+fn nonempty(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn filter_menu_item(label: &str, action: fn(&mut Gui) -> Result<()>) -> MenuItem {
+    MenuItem {
+        label: label.to_string(),
+        description: String::new(),
+        key: None,
+        action: Some(Box::new(action)),
+    }
+}
+
+fn apply_commit_filters(gui: &mut Gui) -> Result<()> {
+    gui.needs_refresh = true;
+    Ok(())
+}
+
 fn show_branch_filter_menu(gui: &mut Gui) -> Result<()> {
     use crate::gui::popup::ChecklistItem;
 
@@ -922,9 +1161,7 @@ fn show_branch_filter_menu(gui: &mut Gui) -> Result<()> {
         search: String::new(),
         on_confirm: Box::new(|gui: &mut Gui, checked: Vec<String>| {
             gui.commit_branch_filter = checked;
-            gui.needs_refresh = true;
-            gui.context_mgr.set_selection(0);
-            Ok(())
+            apply_commit_filters(gui)
         }),
     };
 
@@ -1043,7 +1280,7 @@ fn enter_interactive_rebase(gui: &mut Gui) -> Result<()> {
     Ok(())
 }
 
-fn matches_key(key: KeyEvent, binding: &str) -> bool {
+pub(super) fn matches_key(key: KeyEvent, binding: &str) -> bool {
     if let Some(expected) = parse_key(binding) {
         key.code == expected.code && key.modifiers == expected.modifiers
     } else {
@@ -1053,7 +1290,7 @@ fn matches_key(key: KeyEvent, binding: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{branches_at_commit, checkout_branch_key, reset_ref_display};
+    use super::{branches_at_commit, checkout_branch_key, nonempty, reset_ref_display};
     use crate::model::Branch;
 
     fn branch(name: &str, hash: &str) -> Branch {
@@ -1111,5 +1348,15 @@ mod tests {
         // Short hashes and non-hex strings are left as-is.
         assert_eq!(reset_ref_display("b838172"), "b838172");
         assert_eq!(reset_ref_display("feature/foo"), "feature/foo");
+    }
+
+    #[test]
+    fn trims_nonempty_filter_values() {
+        assert_eq!(nonempty("  src/main.rs  "), Some("src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn treats_blank_filter_values_as_unset() {
+        assert_eq!(nonempty("   "), None);
     }
 }

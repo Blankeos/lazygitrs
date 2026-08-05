@@ -67,6 +67,95 @@ fn list_picker_visible_height(terminal_height: usize) -> usize {
     popup_h.saturating_sub(2).saturating_sub(3)
 }
 
+/// Shared mouse scroll/click handling for free-entry list pickers (RefPicker, ListPicker).
+fn handle_list_picker_mouse(
+    core: &mut crate::gui::popup::ListPickerCore,
+    mouse: crossterm::event::MouseEvent,
+    layout_width: u16,
+    layout_height: u16,
+) {
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    let total = core.items.len();
+    let h = layout_height as usize;
+    let lh = list_picker_visible_height(h);
+    match mouse.kind {
+        MouseEventKind::ScrollUp => {
+            core.selected = core.selected.saturating_sub(1);
+            if core.selected < core.scroll_offset {
+                core.scroll_offset = core.selected;
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            core.selected = (core.selected + 1).min(total.saturating_sub(1));
+            let di = list_picker_display_idx(&core.items, core.selected);
+            if di >= core.scroll_offset + lh {
+                core.scroll_offset = di.saturating_sub(lh - 1);
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            // Click to select an item in the list picker
+            let area = ratatui::layout::Rect::new(0, 0, layout_width, layout_height);
+            let popup_width = (area.width * 60 / 100).min(60).max(30);
+            let max_popup = (area.height * 60 / 100).max(10);
+            let popup_height = max_popup.min(area.height.saturating_sub(4));
+            let x = (area.width.saturating_sub(popup_width)) / 2;
+            let y = (area.height.saturating_sub(popup_height)) / 2;
+            let inner_y = y + 1;
+            let list_start = inner_y + 2;
+            let inner_height = popup_height.saturating_sub(2);
+            let list_height = inner_height.saturating_sub(3) as usize;
+
+            if mouse.row >= list_start
+                && mouse.row < list_start + list_height as u16
+                && mouse.column >= x
+                && mouse.column < x + popup_width
+            {
+                let row_in_list = (mouse.row - list_start) as usize;
+                // Map display row to entry index, accounting for category headers
+                let has_categories = core.items.iter().any(|i| !i.category.is_empty());
+                let effective_scroll = core.scroll_offset.min(if has_categories {
+                    // display length includes headers
+                    let display_len =
+                        list_picker_display_idx(&core.items, total.saturating_sub(1)) + 1;
+                    display_len.saturating_sub(list_height)
+                } else {
+                    total.saturating_sub(list_height)
+                });
+                let display_idx = effective_scroll + row_in_list;
+
+                if has_categories {
+                    // Walk through display rows to find which entry was clicked
+                    let mut di = 0usize;
+                    let mut ei = 0usize;
+                    let mut last_cat = String::new();
+                    for item in core.items.iter() {
+                        if !item.category.is_empty() && item.category != last_cat {
+                            if di == display_idx {
+                                break; // clicked on header
+                            }
+                            di += 1;
+                            last_cat = item.category.clone();
+                        }
+                        if di == display_idx {
+                            core.selected = ei;
+                            break;
+                        }
+                        di += 1;
+                        ei += 1;
+                    }
+                } else {
+                    let clicked_idx = effective_scroll + row_in_list;
+                    if clicked_idx < total {
+                        core.selected = clicked_idx;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
 const COMMIT_DETAILS_DEBOUNCE: Duration = Duration::from_millis(120);
 const MAX_CONCURRENT_DIFF_JOBS: usize = 2;
@@ -461,6 +550,10 @@ pub struct Gui {
     last_refresh_at: Instant,
     /// Active branch filter for commits panel. When non-empty, only commits from these branches are shown.
     pub commit_branch_filter: Vec<String>,
+    /// Optional path used to filter the main commits panel.
+    pub commit_path_filter: Option<String>,
+    /// Optional author identity used to filter the main commits panel.
+    pub commit_author_filter: Option<String>,
     /// Hash of the commit whose files are being viewed in CommitFiles context.
     pub commit_files_hash: String,
     /// First line of the commit message for the commit being viewed.
@@ -718,6 +811,8 @@ impl Gui {
             search_textarea: None,
             last_refresh_at: Instant::now(),
             commit_branch_filter: Vec::new(),
+            commit_path_filter: None,
+            commit_author_filter: None,
             commit_files_hash: String::new(),
             commit_files_message: String::new(),
             commit_file_tree_nodes: Vec::new(),
@@ -1005,6 +1100,17 @@ impl Gui {
                         None
                     };
                     let cmd_log = self.command_log.lock().unwrap();
+                    let mut active_commit_filters: Vec<String> = self
+                        .commit_branch_filter
+                        .iter()
+                        .map(|branch| format!("branch: {branch}"))
+                        .collect();
+                    if let Some(path) = self.commit_path_filter.as_deref() {
+                        active_commit_filters.push(format!("path: {path}"));
+                    }
+                    if let Some(author) = self.commit_author_filter.as_deref() {
+                        active_commit_filters.push(format!("author: {author}"));
+                    }
                     views::render(
                         frame,
                         &model,
@@ -1024,7 +1130,7 @@ impl Gui {
                         self.search_textarea.as_ref(),
                         &cmd_log,
                         self.show_command_log,
-                        &self.commit_branch_filter,
+                        &active_commit_filters,
                         self.show_commit_file_tree,
                         &self.commit_file_tree_nodes,
                         &self.commit_files_collapsed_dirs,
@@ -1677,14 +1783,14 @@ impl Gui {
         let generation = self.commit_page_generation;
         let git = Arc::clone(&self.git);
         let tx = self.commit_page_tx.clone();
-        let branches = self.commit_branch_filter.clone();
+        let filter = crate::git::commit::CommitFilter {
+            branches: self.commit_branch_filter.clone(),
+            path: self.commit_path_filter.clone(),
+            author: self.commit_author_filter.clone(),
+        };
 
         std::thread::spawn(move || {
-            let result = if branches.is_empty() {
-                git.load_commits_page(DEFAULT_COMMIT_LIMIT, len)
-            } else {
-                git.load_commits_for_branches_page(&branches, DEFAULT_COMMIT_LIMIT, len)
-            };
+            let result = git.load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, len);
             let _ = tx.send(CommitPageResult { generation, result });
         });
     }
@@ -3288,34 +3394,23 @@ impl Gui {
                 *scroll_offset = 0;
             }
             PopupState::RefPicker { core, .. } => {
-                use crate::gui::popup::ListPickerItem;
+                use crate::gui::popup::{REF_FREE_ENTRY_CATEGORY, sync_list_picker_free_entry};
                 let cleaned: String = data.replace('\r', "").replace('\n', " ");
                 core.search_textarea.insert_str(&cleaned);
-                let new_search = core.search_textarea.lines().join("");
-                if !core.items.is_empty() && core.items[0].category == "[ref]" {
-                    core.items.remove(0);
-                }
-                let new_lower = new_search.to_lowercase();
-                if !new_lower.is_empty() {
-                    core.items.insert(
-                        0,
-                        ListPickerItem {
-                            value: new_search.trim().to_string(),
-                            label: new_search.trim().to_string(),
-                            category: "[ref]".to_string(),
-                        },
-                    );
-                    if let Some(idx) = core.items.iter().skip(1).position(|i| {
-                        i.label.to_lowercase().contains(&new_lower)
-                            || i.value.to_lowercase().contains(&new_lower)
-                    }) {
-                        core.selected = idx + 1;
-                    } else {
-                        core.selected = 0;
-                    }
-                } else {
-                    core.selected = 0;
-                }
+                sync_list_picker_free_entry(core, REF_FREE_ENTRY_CATEGORY);
+                // Paste always resets scroll (matches previous RefPicker paste behavior).
+                core.scroll_offset = 0;
+            }
+            PopupState::ListPicker {
+                core,
+                free_entry_category,
+                ..
+            } => {
+                use crate::gui::popup::sync_list_picker_prefer_free_entry;
+                let cleaned: String = data.replace('\r', "").replace('\n', " ");
+                core.search_textarea.insert_str(&cleaned);
+                let category = free_entry_category.clone();
+                sync_list_picker_prefer_free_entry(core, &category);
                 core.scroll_offset = 0;
             }
             PopupState::ThemePicker { core, .. } => {
@@ -3342,6 +3437,7 @@ impl Gui {
     pub(crate) fn handle_popup_key(&mut self, key: KeyEvent) -> Result<()> {
         let was_help = matches!(self.popup, PopupState::CommandPalette { .. });
         let was_ref_picker = matches!(self.popup, PopupState::RefPicker { .. });
+        let was_list_picker = matches!(self.popup, PopupState::ListPicker { .. });
         let was_theme_picker = matches!(self.popup, PopupState::ThemePicker { .. });
 
         match &self.popup {
@@ -4000,6 +4096,7 @@ impl Gui {
             }
             PopupState::CommandPalette { .. } => {}
             PopupState::RefPicker { .. } => {}
+            PopupState::ListPicker { .. } => {}
             PopupState::ThemePicker { .. } => {}
             PopupState::None => {}
         }
@@ -4012,6 +4109,8 @@ impl Gui {
             self.handle_command_palette_key(key)?;
         } else if was_ref_picker && matches!(self.popup, PopupState::RefPicker { .. }) {
             self.handle_ref_picker_key(key)?;
+        } else if was_list_picker && matches!(self.popup, PopupState::ListPicker { .. }) {
+            self.handle_list_picker_key(key)?;
         } else if was_theme_picker && matches!(self.popup, PopupState::ThemePicker { .. }) {
             self.handle_theme_picker_key(key);
         }
@@ -4161,7 +4260,9 @@ impl Gui {
     }
 
     fn handle_ref_picker_key(&mut self, key: KeyEvent) -> Result<()> {
-        use crate::gui::popup::ListPickerItem;
+        use crate::gui::popup::{
+            REF_FREE_ENTRY_CATEGORY, list_picker_confirm_value, sync_list_picker_free_entry,
+        };
 
         if let PopupState::RefPicker { core, .. } = &mut self.popup {
             let search = core.search_textarea.lines().join("");
@@ -4176,11 +4277,7 @@ impl Gui {
                     return Ok(());
                 }
                 KeyCode::Enter => {
-                    let value = if let Some(item) = core.items.get(core.selected) {
-                        item.value.clone()
-                    } else if !search.trim().is_empty() {
-                        search.trim().to_string()
-                    } else {
+                    let Some(value) = list_picker_confirm_value(core) else {
                         return Ok(());
                     };
                     let popup = std::mem::replace(&mut self.popup, PopupState::None);
@@ -4219,41 +4316,118 @@ impl Gui {
                     textarea_input(&mut core.search_textarea, key);
                     let new_search = core.search_textarea.lines().join("");
                     if new_search != search {
-                        // Remove any previous raw-ref item at index 0
-                        if !core.items.is_empty() && core.items[0].category == "[ref]" {
-                            core.items.remove(0);
-                        }
-
-                        let new_lower = new_search.to_lowercase();
-                        if !new_lower.is_empty() {
-                            core.items.insert(
-                                0,
-                                ListPickerItem {
-                                    value: new_search.trim().to_string(),
-                                    label: new_search.trim().to_string(),
-                                    category: "[ref]".to_string(),
-                                },
-                            );
-
-                            if let Some(idx) = core.items.iter().skip(1).position(|i| {
-                                i.label.to_lowercase().contains(&new_lower)
-                                    || i.value.to_lowercase().contains(&new_lower)
-                            }) {
-                                core.selected = idx + 1;
-                            } else {
-                                core.selected = 0;
-                            }
+                        sync_list_picker_free_entry(core, REF_FREE_ENTRY_CATEGORY);
+                        if !new_search.is_empty() {
                             let sdi = list_picker_display_idx(&core.items, core.selected);
                             core.scroll_offset = sdi.saturating_sub(list_height / 2);
-                        } else {
-                            core.selected = 0;
-                            core.scroll_offset = 0;
                         }
                     }
                 }
             }
         }
         Ok(())
+    }
+
+    /// Handle keys for the generic free-entry [`PopupState::ListPicker`].
+    /// Same navigation/search semantics as RefPicker, with a configurable free-entry category.
+    fn handle_list_picker_key(&mut self, key: KeyEvent) -> Result<()> {
+        use crate::gui::popup::{list_picker_confirm_value, sync_list_picker_prefer_free_entry};
+
+        if let PopupState::ListPicker {
+            core,
+            free_entry_category,
+            ..
+        } = &mut self.popup
+        {
+            let search = core.search_textarea.lines().join("");
+            let total = core.items.len();
+            let free_cat = free_entry_category.clone();
+
+            let h = self.layout.height as usize;
+            let list_height = list_picker_visible_height(h);
+
+            match key.code {
+                KeyCode::Esc => {
+                    self.popup = PopupState::None;
+                    return Ok(());
+                }
+                KeyCode::Enter => {
+                    let Some(value) = list_picker_confirm_value(core) else {
+                        return Ok(());
+                    };
+                    let popup = std::mem::replace(&mut self.popup, PopupState::None);
+                    if let PopupState::ListPicker { on_confirm, .. } = popup {
+                        if let Err(e) = on_confirm(self, &value) {
+                            self.popup = PopupState::Message {
+                                title: "Error".to_string(),
+                                message: format!("{}", e),
+                                kind: MessageKind::Error,
+                            };
+                        }
+                    }
+                    return Ok(());
+                }
+                KeyCode::Down => {
+                    if total > 0 {
+                        core.selected = (core.selected + 1).min(total.saturating_sub(1));
+                    }
+                    let sdi = list_picker_display_idx(&core.items, core.selected);
+                    if sdi >= core.scroll_offset + list_height {
+                        core.scroll_offset = sdi.saturating_sub(list_height - 1);
+                    }
+                }
+                KeyCode::Up => {
+                    core.selected = core.selected.saturating_sub(1);
+                    if core.selected == 0 {
+                        core.scroll_offset = 0;
+                    } else {
+                        let sdi = list_picker_display_idx(&core.items, core.selected);
+                        if sdi <= core.scroll_offset {
+                            core.scroll_offset = sdi.saturating_sub(1);
+                        }
+                    }
+                }
+                _ => {
+                    textarea_input(&mut core.search_textarea, key);
+                    let new_search = core.search_textarea.lines().join("");
+                    if new_search != search {
+                        sync_list_picker_prefer_free_entry(core, &free_cat);
+                        if !new_search.is_empty() {
+                            let sdi = list_picker_display_idx(&core.items, core.selected);
+                            core.scroll_offset = sdi.saturating_sub(list_height / 2);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Open a reusable free-entry list picker (path/author filters, etc.).
+    ///
+    /// Callers supply candidate items and a confirm callback. Typing always
+    /// inserts a synthetic free-entry row under `free_entry_category` so the
+    /// user can confirm arbitrary text even when it does not match a candidate.
+    pub fn show_list_picker(
+        &mut self,
+        title: impl Into<String>,
+        items: Vec<crate::gui::popup::ListPickerItem>,
+        free_entry_category: impl Into<String>,
+        on_confirm: crate::gui::popup::ListPickerAction,
+    ) {
+        use crate::gui::popup::{ListPickerCore, make_command_palette_search_textarea};
+
+        self.popup = PopupState::ListPicker {
+            title: title.into(),
+            core: ListPickerCore {
+                items,
+                selected: 0,
+                search_textarea: make_command_palette_search_textarea(),
+                scroll_offset: 0,
+            },
+            free_entry_category: free_entry_category.into(),
+            on_confirm,
+        };
     }
 
     fn handle_theme_picker_key(&mut self, key: KeyEvent) {
@@ -4744,7 +4918,7 @@ impl Gui {
                     ),
                     CommandEntry::keybinding(
                         kb.commits.open_log_menu.clone(),
-                        "Filter by branch".into(),
+                        "Filter commits".into(),
                     ),
                     CommandEntry::keybinding(".".into(), "Toggle commit details panel".into()),
                 ];
@@ -5810,87 +5984,18 @@ impl Gui {
             return;
         }
 
-        // RefPicker popup intercepts mouse scroll and click
-        if let PopupState::RefPicker { core, .. } = &mut self.popup {
-            let total = core.items.len();
-            let h = self.layout.height as usize;
-            let lh = list_picker_visible_height(h);
-            match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    core.selected = core.selected.saturating_sub(1);
-                    if core.selected < core.scroll_offset {
-                        core.scroll_offset = core.selected;
-                    }
+        // Free-entry list pickers (RefPicker / ListPicker) intercept mouse scroll and click
+        if matches!(
+            self.popup,
+            PopupState::RefPicker { .. } | PopupState::ListPicker { .. }
+        ) {
+            let (core, w, h) = match &mut self.popup {
+                PopupState::RefPicker { core, .. } | PopupState::ListPicker { core, .. } => {
+                    (core, self.layout.width, self.layout.height)
                 }
-                MouseEventKind::ScrollDown => {
-                    core.selected = (core.selected + 1).min(total.saturating_sub(1));
-                    let di = list_picker_display_idx(&core.items, core.selected);
-                    if di >= core.scroll_offset + lh {
-                        core.scroll_offset = di.saturating_sub(lh - 1);
-                    }
-                }
-                MouseEventKind::Down(MouseButton::Left) => {
-                    // Click to select an item in the list picker
-                    let area =
-                        ratatui::layout::Rect::new(0, 0, self.layout.width, self.layout.height);
-                    let popup_width = (area.width * 60 / 100).min(60).max(30);
-                    let max_popup = (area.height * 60 / 100).max(10);
-                    let popup_height = max_popup.min(area.height.saturating_sub(4));
-                    let x = (area.width.saturating_sub(popup_width)) / 2;
-                    let y = (area.height.saturating_sub(popup_height)) / 2;
-                    let inner_y = y + 1;
-                    let list_start = inner_y + 2;
-                    let inner_height = popup_height.saturating_sub(2);
-                    let list_height = inner_height.saturating_sub(3) as usize;
-
-                    if mouse.row >= list_start
-                        && mouse.row < list_start + list_height as u16
-                        && mouse.column >= x
-                        && mouse.column < x + popup_width
-                    {
-                        let row_in_list = (mouse.row - list_start) as usize;
-                        // Map display row to entry index, accounting for category headers
-                        let has_categories = core.items.iter().any(|i| !i.category.is_empty());
-                        let effective_scroll = core.scroll_offset.min(if has_categories {
-                            // display length includes headers
-                            let display_len =
-                                list_picker_display_idx(&core.items, total.saturating_sub(1)) + 1;
-                            display_len.saturating_sub(list_height)
-                        } else {
-                            total.saturating_sub(list_height)
-                        });
-                        let display_idx = effective_scroll + row_in_list;
-
-                        if has_categories {
-                            // Walk through display rows to find which entry was clicked
-                            let mut di = 0usize;
-                            let mut ei = 0usize;
-                            let mut last_cat = String::new();
-                            for item in core.items.iter() {
-                                if !item.category.is_empty() && item.category != last_cat {
-                                    if di == display_idx {
-                                        break; // clicked on header
-                                    }
-                                    di += 1;
-                                    last_cat = item.category.clone();
-                                }
-                                if di == display_idx {
-                                    core.selected = ei;
-                                    break;
-                                }
-                                di += 1;
-                                ei += 1;
-                            }
-                        } else {
-                            let clicked_idx = effective_scroll + row_in_list;
-                            if clicked_idx < total {
-                                core.selected = clicked_idx;
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
+                _ => unreachable!(),
+            };
+            handle_list_picker_mouse(core, mouse, w, h);
             return;
         }
 
@@ -6208,83 +6313,18 @@ impl Gui {
             return;
         }
 
-        // RefPicker popup intercepts mouse scroll and click
-        if let PopupState::RefPicker { core, .. } = &mut self.popup {
-            let total = core.items.len();
-            let h = self.layout.height as usize;
-            let lh = list_picker_visible_height(h);
-            match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    core.selected = core.selected.saturating_sub(1);
-                    if core.selected < core.scroll_offset {
-                        core.scroll_offset = core.selected;
-                    }
+        // Free-entry list pickers (RefPicker / ListPicker) intercept mouse scroll and click
+        if matches!(
+            self.popup,
+            PopupState::RefPicker { .. } | PopupState::ListPicker { .. }
+        ) {
+            let (core, w, h) = match &mut self.popup {
+                PopupState::RefPicker { core, .. } | PopupState::ListPicker { core, .. } => {
+                    (core, self.layout.width, self.layout.height)
                 }
-                MouseEventKind::ScrollDown => {
-                    core.selected = (core.selected + 1).min(total.saturating_sub(1));
-                    let di = list_picker_display_idx(&core.items, core.selected);
-                    if di >= core.scroll_offset + lh {
-                        core.scroll_offset = di.saturating_sub(lh - 1);
-                    }
-                }
-                MouseEventKind::Down(MouseButton::Left) => {
-                    let area =
-                        ratatui::layout::Rect::new(0, 0, self.layout.width, self.layout.height);
-                    let popup_width = (area.width * 60 / 100).min(60).max(30);
-                    let max_popup = (area.height * 60 / 100).max(10);
-                    let popup_height = max_popup.min(area.height.saturating_sub(4));
-                    let x = (area.width.saturating_sub(popup_width)) / 2;
-                    let y = (area.height.saturating_sub(popup_height)) / 2;
-                    let inner_y = y + 1;
-                    let list_start = inner_y + 2;
-                    let inner_height = popup_height.saturating_sub(2);
-                    let list_height = inner_height.saturating_sub(3) as usize;
-
-                    if mouse.row >= list_start
-                        && mouse.row < list_start + list_height as u16
-                        && mouse.column >= x
-                        && mouse.column < x + popup_width
-                    {
-                        let row_in_list = (mouse.row - list_start) as usize;
-                        let has_categories = core.items.iter().any(|i| !i.category.is_empty());
-                        let effective_scroll = core.scroll_offset.min(if has_categories {
-                            let display_len =
-                                list_picker_display_idx(&core.items, total.saturating_sub(1)) + 1;
-                            display_len.saturating_sub(list_height)
-                        } else {
-                            total.saturating_sub(list_height)
-                        });
-                        let display_idx = effective_scroll + row_in_list;
-
-                        if has_categories {
-                            let mut di = 0usize;
-                            let mut ei = 0usize;
-                            let mut last_cat = String::new();
-                            for item in core.items.iter() {
-                                if !item.category.is_empty() && item.category != last_cat {
-                                    if di == display_idx {
-                                        break;
-                                    }
-                                    di += 1;
-                                    last_cat = item.category.clone();
-                                }
-                                if di == display_idx {
-                                    core.selected = ei;
-                                    break;
-                                }
-                                di += 1;
-                                ei += 1;
-                            }
-                        } else {
-                            let clicked_idx = effective_scroll + row_in_list;
-                            if clicked_idx < total {
-                                core.selected = clicked_idx;
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
+                _ => unreachable!(),
+            };
+            handle_list_picker_mouse(core, mouse, w, h);
             return;
         }
 
@@ -7119,11 +7159,19 @@ impl Gui {
     fn after_model_refresh(&mut self) -> Result<()> {
         let mut model = self.model.lock().unwrap();
 
-        // If branch filters are active, reload commits for those branches only.
-        if !self.commit_branch_filter.is_empty() {
-            if let Ok(filtered) = self
-                .git
-                .load_commits_for_branches(&self.commit_branch_filter, DEFAULT_COMMIT_LIMIT)
+        // Re-apply commit filters after refresh replaces the model.
+        if !self.commit_branch_filter.is_empty()
+            || self.commit_path_filter.is_some()
+            || self.commit_author_filter.is_some()
+        {
+            let filter = crate::git::commit::CommitFilter {
+                branches: self.commit_branch_filter.clone(),
+                path: self.commit_path_filter.clone(),
+                author: self.commit_author_filter.clone(),
+            };
+            if let Ok(filtered) =
+                self.git
+                    .load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, 0)
             {
                 model.set_commits(filtered);
             }

@@ -5,8 +5,81 @@ use crate::model::{
     Commit, CommitStatus,
     commit::{CommitStat, Divergence},
 };
+use std::collections::HashSet;
+
+#[derive(Debug, Clone, Default)]
+pub struct CommitFilter {
+    pub branches: Vec<String>,
+    pub path: Option<String>,
+    pub author: Option<String>,
+}
+
+fn commit_filter_path_suggestions<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut suggestions = HashSet::new();
+    for path in paths.filter(|path| !path.is_empty()) {
+        suggestions.insert(path.to_string());
+
+        for (separator, _) in path.match_indices('/') {
+            if separator > 0 {
+                suggestions.insert(path[..separator].to_string());
+            }
+        }
+    }
+    let mut suggestions = suggestions.into_iter().collect::<Vec<_>>();
+    suggestions.sort_unstable();
+    suggestions
+}
+
+#[cfg(test)]
+mod commit_filter_suggestion_tests {
+    use super::commit_filter_path_suggestions;
+
+    #[test]
+    fn path_suggestions_include_files_and_each_parent_directory() {
+        let suggestions = commit_filter_path_suggestions(
+            [
+                "src/gui/controller/commits.rs",
+                "README.md",
+                "src/gui/mod.rs",
+                "",
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(
+            suggestions,
+            [
+                "README.md",
+                "src",
+                "src/gui",
+                "src/gui/controller",
+                "src/gui/controller/commits.rs",
+                "src/gui/mod.rs",
+            ]
+        );
+    }
+}
 
 impl GitCommands {
+    /// Return repository paths suitable for history filtering.
+    ///
+    /// This mirrors lazygit's source of path suggestions: tracked files plus
+    /// untracked, non-ignored files. Parent directories are included so users
+    /// can filter a whole subtree without having to type its path.
+    pub fn load_commit_filter_paths(&self) -> Result<Vec<String>> {
+        let result = self
+            .git()
+            .args(&[
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ])
+            .run_expecting_success()?;
+        Ok(commit_filter_path_suggestions(result.stdout.split('\0')))
+    }
+
     /// Load recent commits reachable from any ref.
     pub fn load_commits(&self, limit: usize) -> Result<Vec<Commit>> {
         self.load_commits_page(limit, 0)
@@ -14,7 +87,43 @@ impl GitCommands {
 
     /// Load a page of commits reachable from any ref.
     pub fn load_commits_page(&self, limit: usize, skip: usize) -> Result<Vec<Commit>> {
-        self.load_commits_inner(limit, skip, true)
+        self.load_filtered_commits_page(&CommitFilter::default(), limit, skip)
+    }
+
+    pub fn load_filtered_commits_page(
+        &self,
+        filter: &CommitFilter,
+        limit: usize,
+        skip: usize,
+    ) -> Result<Vec<Commit>> {
+        let format = "%H|%s|%an|%ae|%at|%P|%D";
+        let mut cmd = self.git().arg("log");
+
+        if filter.branches.is_empty() {
+            cmd = cmd.arg("--all");
+        } else {
+            for branch in &filter.branches {
+                cmd = cmd.arg(branch);
+            }
+        }
+        if let Some(author) = filter.author.as_deref() {
+            cmd = cmd.arg(&format!("--author={author}"));
+        }
+        if limit > 0 {
+            cmd = cmd.arg(&format!("--max-count={limit}"));
+        }
+        if skip > 0 {
+            cmd = cmd.arg(&format!("--skip={skip}"));
+        }
+        cmd = cmd
+            .arg(&format!("--format={format}"))
+            .arg("--no-show-signature")
+            .arg("--topo-order");
+        if let Some(path) = filter.path.as_deref() {
+            cmd = cmd.arg("--follow").arg("--").arg(path);
+        }
+
+        self.parse_commit_log(&cmd.run()?)
     }
 
     /// Load commits reachable from a specific branch only.
@@ -38,95 +147,17 @@ impl GitCommands {
         limit: usize,
         skip: usize,
     ) -> Result<Vec<Commit>> {
-        let format = "%H|%s|%an|%ae|%at|%P|%D";
-        let mut cmd = self.git();
-        cmd = cmd.arg("log");
-        for b in branches {
-            cmd = cmd.arg(b);
-        }
-        if limit > 0 {
-            cmd = cmd.arg(&format!("--max-count={}", limit));
-        }
-        if skip > 0 {
-            cmd = cmd.arg(&format!("--skip={}", skip));
-        }
-        cmd = cmd
-            .arg(&format!("--format={}", format))
-            .arg("--no-show-signature")
-            .arg("--topo-order");
-
-        let result = cmd.run()?;
-
-        if !result.success {
-            return Ok(Vec::new());
-        }
-
-        let _head_hash = self.head_hash().unwrap_or_default();
-        let unpushed_hashes = self.unpushed_commit_hashes().unwrap_or_default();
-
-        let mut commits = Vec::new();
-        for line in result.stdout.lines() {
-            let parts: Vec<&str> = line.splitn(7, '|').collect();
-            if parts.len() < 6 {
-                continue;
-            }
-
-            let hash = parts[0].to_string();
-            let name = parts[1].to_string();
-            let author_name = parts[2].to_string();
-            let author_email = parts[3].to_string();
-            let unix_timestamp = parts[4].parse::<i64>().unwrap_or(0);
-            let parents: Vec<String> = parts[5].split_whitespace().map(String::from).collect();
-
-            let decoration = if parts.len() > 6 { parts[6] } else { "" };
-            let tags = extract_tags(decoration);
-            let refs = extract_refs(decoration);
-
-            let status = if unpushed_hashes.contains(&hash) {
-                CommitStatus::Unpushed
-            } else {
-                CommitStatus::Pushed
-            };
-
-            commits.push(Commit {
-                hash,
-                name,
-                status,
-                action: String::new(),
-                tags,
-                refs,
-                extra_info: String::new(),
-                author_name,
-                author_email,
-                unix_timestamp,
-                parents,
-                divergence: Divergence::None,
-            });
-        }
-
-        Ok(commits)
+        self.load_filtered_commits_page(
+            &CommitFilter {
+                branches: branches.to_vec(),
+                ..CommitFilter::default()
+            },
+            limit,
+            skip,
+        )
     }
 
-    fn load_commits_inner(&self, limit: usize, skip: usize, all: bool) -> Result<Vec<Commit>> {
-        let format = "%H|%s|%an|%ae|%at|%P|%D";
-        let mut cmd = self.git();
-        cmd = cmd.arg("log");
-        if all {
-            cmd = cmd.arg("--all");
-        }
-        if limit > 0 {
-            cmd = cmd.arg(&format!("--max-count={}", limit));
-        }
-        if skip > 0 {
-            cmd = cmd.arg(&format!("--skip={}", skip));
-        }
-        cmd = cmd
-            .arg(&format!("--format={}", format))
-            .arg("--no-show-signature")
-            .arg("--topo-order");
-
-        let result = cmd.run()?;
-
+    fn parse_commit_log(&self, result: &crate::os::cmd::CmdResult) -> Result<Vec<Commit>> {
         if !result.success {
             return Ok(Vec::new());
         }

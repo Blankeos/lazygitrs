@@ -12,6 +12,10 @@ use crate::os::platform::Platform;
 use crate::pager::side_by_side::DiffPanel;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
+    if super::commits::matches_key(key, &keybindings.commits.open_log_menu) {
+        return super::commits::show_files_filtering_menu(gui);
+    }
+
     // Enter: toggle directory collapse in tree view, or focus diff for files
     if key.code == KeyCode::Enter {
         if gui.show_file_tree {

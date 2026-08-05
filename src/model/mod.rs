@@ -47,6 +47,9 @@ pub struct Model {
     pub sub_remote_branches: Vec<RemoteBranch>,
     pub commit_files: Vec<CommitFile>,
     pub authors: HashMap<String, Author>,
+    /// Authors encountered in loaded commit history. Unlike `authors`, this is
+    /// retained across filtering so the author palette remains useful.
+    pub commit_filter_authors: HashMap<String, Author>,
     // Total line changes
     pub total_additions: usize,
     pub total_deletions: usize,
@@ -64,6 +67,17 @@ pub struct Model {
 }
 
 impl Model {
+    fn remember_commit_authors(&mut self, commits: &[Commit]) {
+        for commit in commits {
+            self.commit_filter_authors
+                .entry(commit.author_email.clone())
+                .or_insert_with(|| Author {
+                    name: commit.author_name.clone(),
+                    email: commit.author_email.clone(),
+                });
+        }
+    }
+
     /// Replace `self.files` with `new_files`, but preserve the previous
     /// display order of files that still exist. New files are appended in
     /// the order `git status` returned them. Without this, staging a file
@@ -75,7 +89,11 @@ impl Model {
         let commits_revision = self.commits_revision.wrapping_add(1);
         let sub_commits_revision = self.sub_commits_revision.wrapping_add(1);
         let prev_files = std::mem::take(&mut self.files);
+        let previous_commit_authors = std::mem::take(&mut self.commit_filter_authors);
         let new_files = std::mem::take(&mut new_model.files);
+        new_model
+            .commit_filter_authors
+            .extend(previous_commit_authors);
         *self = new_model;
         self.commits_revision = commits_revision;
         self.sub_commits_revision = sub_commits_revision;
@@ -84,11 +102,14 @@ impl Model {
     }
 
     pub fn set_commits(&mut self, commits: Vec<Commit>) {
+        self.remember_commit_authors(&commits);
         self.commits = commits;
         self.commits_revision = self.commits_revision.wrapping_add(1);
     }
 
     pub fn extend_commits(&mut self, commits: impl IntoIterator<Item = Commit>) {
+        let commits = commits.into_iter().collect::<Vec<_>>();
+        self.remember_commit_authors(&commits);
         let previous_len = self.commits.len();
         self.commits.extend(commits);
         if self.commits.len() != previous_len {
@@ -97,6 +118,7 @@ impl Model {
     }
 
     pub fn set_sub_commits(&mut self, commits: Vec<Commit>) {
+        self.remember_commit_authors(&commits);
         self.sub_commits = commits;
         self.sub_commits_revision = self.sub_commits_revision.wrapping_add(1);
     }

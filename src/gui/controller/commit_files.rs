@@ -10,6 +10,22 @@ use crate::model::FileChangeStatus;
 use crate::os::platform::Platform;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
+    if super::commits::matches_key(key, &keybindings.commits.open_log_menu) {
+        let selected = gui.context_mgr.selected_active();
+        let selected_path = if gui.show_commit_file_tree {
+            gui.commit_file_tree_nodes
+                .get(selected)
+                .map(|node| node.path.clone())
+        } else {
+            let model = gui.model.lock().unwrap();
+            model
+                .commit_files
+                .get(selected)
+                .map(|file| file.current_path().to_string())
+        };
+        return super::commits::show_file_path_filtering_menu(gui, selected_path);
+    }
+
     // Escape: go back to parent list (Commits, Stash, BranchCommits, or Reflog)
     if key.code == KeyCode::Esc {
         let parent = if let Some(override_parent) = gui.commit_files_parent_context.take() {

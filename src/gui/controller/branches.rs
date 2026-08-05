@@ -8,6 +8,10 @@ use crate::gui::popup::{MenuItem, MessageKind, PopupState, make_textarea};
 use crate::os::platform::Platform;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
+    if super::commits::matches_key(key, &keybindings.commits.open_log_menu) {
+        return super::commits::show_filtering_menu(gui);
+    }
+
     // Enter: view branch commits
     if key.code == KeyCode::Enter {
         return enter_branch_commits(gui);
