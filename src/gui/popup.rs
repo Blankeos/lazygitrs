@@ -546,6 +546,8 @@ pub enum PopupState {
         items: Vec<ChecklistItem>,
         selected: usize,
         search: String,
+        /// When present, non-empty search text is also a checkable custom item.
+        free_entry_category: Option<String>,
         on_confirm: ChecklistAction,
     },
     /// Searchable command palette with keybinding hints.
@@ -583,6 +585,45 @@ pub type ChecklistAction = Box<dyn FnOnce(&mut Gui, Vec<String>) -> Result<()>>;
 pub struct ChecklistItem {
     pub label: String,
     pub checked: bool,
+    pub is_free_entry: bool,
+}
+
+/// Keep a free-entry checklist row in sync with the current search text.
+///
+/// When `free_entry_category` is set and the search box is non-empty, a
+/// synthetic item whose label is the typed text is inserted at the top so
+/// users can multi-select arbitrary values (authors) just like known ones.
+pub fn sync_checklist_free_entry(
+    items: &mut Vec<ChecklistItem>,
+    free_entry_category: Option<&str>,
+    search: &str,
+) {
+    let previously_checked = items
+        .iter()
+        .find(|item| item.is_free_entry)
+        .map(|item| (item.label.clone(), item.checked));
+    items.retain(|item| !item.is_free_entry);
+    if free_entry_category.is_none() {
+        return;
+    }
+    let search = search.trim();
+    if search.is_empty() {
+        return;
+    }
+    if items.iter().any(|item| item.label == search) {
+        return;
+    }
+    let checked = previously_checked
+        .as_ref()
+        .is_some_and(|(label, checked)| label == search && *checked);
+    items.insert(
+        0,
+        ChecklistItem {
+            label: search.to_string(),
+            checked,
+            is_free_entry: true,
+        },
+    );
 }
 
 impl PartialEq for PopupState {
@@ -922,5 +963,66 @@ mod free_entry_tests {
     fn confirm_value_none_when_empty() {
         let core = core_with(vec![], "");
         assert!(list_picker_confirm_value(&core).is_none());
+    }
+}
+
+#[cfg(test)]
+mod checklist_free_entry_tests {
+    use super::{ChecklistItem, sync_checklist_free_entry};
+
+    fn item(label: &str, checked: bool) -> ChecklistItem {
+        ChecklistItem {
+            label: label.to_string(),
+            checked,
+            is_free_entry: false,
+        }
+    }
+
+    #[test]
+    fn inserts_custom_author_at_top() {
+        let mut items = vec![item("Alice <a@example.com>", false)];
+
+        sync_checklist_free_entry(&mut items, Some("[author]"), "Bob <b@example.com>");
+
+        assert_eq!(items.len(), 2);
+        assert!(items[0].is_free_entry);
+        assert_eq!(items[0].label, "Bob <b@example.com>");
+        assert!(!items[0].checked);
+    }
+
+    #[test]
+    fn preserves_checked_state_for_same_custom_value() {
+        let mut items = vec![
+            ChecklistItem {
+                label: "typed".to_string(),
+                checked: true,
+                is_free_entry: true,
+            },
+            item("Alice <a@example.com>", false),
+        ];
+
+        sync_checklist_free_entry(&mut items, Some("[author]"), "typed");
+
+        assert_eq!(items.len(), 2);
+        assert!(items[0].is_free_entry);
+        assert!(items[0].checked);
+    }
+
+    #[test]
+    fn removes_free_entry_when_search_cleared() {
+        let mut items = vec![
+            ChecklistItem {
+                label: "typed".to_string(),
+                checked: true,
+                is_free_entry: true,
+            },
+            item("Alice <a@example.com>", true),
+        ];
+
+        sync_checklist_free_entry(&mut items, Some("[author]"), "");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "Alice <a@example.com>");
+        assert!(items[0].checked);
     }
 }

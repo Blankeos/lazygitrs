@@ -8,8 +8,8 @@ use crate::config::keybindings::parse_key;
 use crate::git::rebase::RebaseAction;
 use crate::gui::Gui;
 use crate::gui::popup::{
-    BodySoftWrap, CommitInputFocus, CommitInputKind, ListPickerItem, MenuItem, PopupState,
-    make_textarea,
+    BodySoftWrap, ChecklistItem, CommitInputFocus, CommitInputKind, ListPickerItem, MenuItem,
+    PopupState, make_textarea,
 };
 use crate::model::Branch;
 use crate::os::platform::Platform;
@@ -924,29 +924,29 @@ pub fn show_file_path_filtering_menu(gui: &mut Gui, selected_path: Option<String
             key: None,
             action: Some(Box::new(move |gui| {
                 gui.commit_path_filter = Some(path.clone());
-                apply_commit_filters(gui)
+                apply_commit_filters_and_focus(gui)
             })),
         });
     }
     items.push(filter_menu_item(
-        "Enter path to filter by",
+        &path_filter_menu_label(gui),
         show_path_filter_input,
     ));
     items.push(filter_menu_item(
-        "Enter author to filter by",
+        &author_filter_menu_label(gui),
         show_author_filter_input,
     ));
 
-    if gui.commit_path_filter.is_some() || gui.commit_author_filter.is_some() {
+    if gui.commit_path_filter.is_some() || !gui.commit_author_filter.is_empty() {
         items.push(filter_menu_item("Reset filters", |gui| {
             gui.commit_path_filter = None;
-            gui.commit_author_filter = None;
-            apply_commit_filters(gui)
+            gui.commit_author_filter.clear();
+            apply_commit_filters_and_focus(gui)
         }));
     }
 
     gui.popup = PopupState::Menu {
-        title: "Filter commits".to_string(),
+        title: filter_commits_menu_title(gui),
         items,
         selected: 0,
         loading_index: None,
@@ -1010,7 +1010,12 @@ pub fn show_filtering_menu(gui: &mut Gui) -> Result<()> {
             label,
             description: String::new(),
             key: None,
-            action: Some(Box::new(move |gui| apply_author_filter(gui, &author))),
+            action: Some(Box::new(move |gui| {
+                apply_author_filters(gui, vec![author.clone()])?;
+                gui.context_mgr
+                    .set_active(crate::gui::context::ContextId::Commits);
+                Ok(())
+            })),
         });
     }
     if let Some(branch) = selected_branch {
@@ -1021,37 +1026,37 @@ pub fn show_filtering_menu(gui: &mut Gui) -> Result<()> {
             key: None,
             action: Some(Box::new(move |gui| {
                 gui.commit_branch_filter = vec![branch.clone()];
-                apply_commit_filters(gui)
+                apply_commit_filters_and_focus(gui)
             })),
         });
     }
     items.push(filter_menu_item(
-        "Enter path to filter by",
+        &path_filter_menu_label(gui),
         show_path_filter_input,
     ));
     items.push(filter_menu_item(
-        "Select branches to filter by",
+        &branch_filter_menu_label(gui),
         show_branch_filter_menu,
     ));
     items.push(filter_menu_item(
-        "Enter author to filter by",
+        &author_filter_menu_label(gui),
         show_author_filter_input,
     ));
 
     if gui.commit_path_filter.is_some()
-        || gui.commit_author_filter.is_some()
+        || !gui.commit_author_filter.is_empty()
         || !gui.commit_branch_filter.is_empty()
     {
         items.push(filter_menu_item("Reset filters", |gui| {
             gui.commit_path_filter = None;
-            gui.commit_author_filter = None;
+            gui.commit_author_filter.clear();
             gui.commit_branch_filter.clear();
-            apply_commit_filters(gui)
+            apply_commit_filters_and_focus(gui)
         }));
     }
 
     gui.popup = PopupState::Menu {
-        title: "Filter commits".to_string(),
+        title: filter_commits_menu_title(gui),
         items,
         selected: 0,
         loading_index: None,
@@ -1076,7 +1081,7 @@ fn show_path_filter_input(gui: &mut Gui) -> Result<()> {
         "Path",
         Box::new(|gui, path| {
             gui.commit_path_filter = nonempty(path);
-            apply_commit_filters(gui)
+            apply_commit_filters_and_focus(gui)
         }),
     );
     Ok(())
@@ -1093,26 +1098,40 @@ fn show_author_filter_input(gui: &mut Gui) -> Result<()> {
     };
     let mut authors = authors;
     authors.sort_by_key(|author| author.to_lowercase());
+    let selected_authors = &gui.commit_author_filter;
     let items = authors
         .into_iter()
-        .map(|author| ListPickerItem {
-            value: author.clone(),
+        .map(|author| ChecklistItem {
+            checked: selected_authors.contains(&author),
             label: author,
-            category: String::new(),
+            is_free_entry: false,
         })
         .collect();
-    gui.show_list_picker(
-        "Filter by author",
+    gui.popup = PopupState::Checklist {
+        title: "Filter by author".to_string(),
         items,
-        "Author",
-        Box::new(apply_author_filter),
-    );
+        selected: 0,
+        search: String::new(),
+        free_entry_category: Some("[author]".to_string()),
+        on_confirm: Box::new(|gui, authors| apply_author_filters(gui, authors)),
+    };
     Ok(())
 }
 
-fn apply_author_filter(gui: &mut Gui, author: &str) -> Result<()> {
-    gui.commit_author_filter = nonempty(author);
-    apply_commit_filters(gui)
+fn apply_author_filters(gui: &mut Gui, authors: Vec<String>) -> Result<()> {
+    gui.commit_author_filter = authors
+        .into_iter()
+        .map(|author| author.trim().to_string())
+        .filter(|author| !author.is_empty())
+        .collect();
+    apply_commit_filters_and_focus(gui)
+}
+
+fn apply_commit_filters_and_focus(gui: &mut Gui) -> Result<()> {
+    apply_commit_filters(gui)?;
+    gui.context_mgr
+        .set_active(crate::gui::context::ContextId::Commits);
+    Ok(())
 }
 
 fn nonempty(value: &str) -> Option<String> {
@@ -1126,6 +1145,64 @@ fn filter_menu_item(label: &str, action: fn(&mut Gui) -> Result<()>) -> MenuItem
         description: String::new(),
         key: None,
         action: Some(Box::new(action)),
+    }
+}
+
+fn active_commit_filter_summary(gui: &Gui) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(path) = gui
+        .commit_path_filter
+        .as_deref()
+        .filter(|path| !path.is_empty())
+    {
+        parts.push(format!("path: {path}"));
+    }
+    if !gui.commit_author_filter.is_empty() {
+        parts.push(format!("author: {}", gui.commit_author_filter.join(", ")));
+    }
+    if !gui.commit_branch_filter.is_empty() {
+        parts.push(format!("branch: {}", gui.commit_branch_filter.join(", ")));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" | "))
+    }
+}
+
+fn filter_commits_menu_title(gui: &Gui) -> String {
+    match active_commit_filter_summary(gui) {
+        Some(summary) => format!("Filter commits ({summary})"),
+        None => "Filter commits".to_string(),
+    }
+}
+
+fn path_filter_menu_label(gui: &Gui) -> String {
+    match gui.commit_path_filter.as_deref() {
+        Some(path) if !path.is_empty() => format!("Enter path to filter by: '{path}'"),
+        _ => "Enter path to filter by".to_string(),
+    }
+}
+
+fn author_filter_menu_label(gui: &Gui) -> String {
+    if gui.commit_author_filter.is_empty() {
+        "Enter author to filter by".to_string()
+    } else {
+        format!(
+            "Enter author to filter by: '{}'",
+            gui.commit_author_filter.join(", ")
+        )
+    }
+}
+
+fn branch_filter_menu_label(gui: &Gui) -> String {
+    if gui.commit_branch_filter.is_empty() {
+        "Enter branches to filter by".to_string()
+    } else {
+        format!(
+            "Enter branches to filter by: '{}'",
+            gui.commit_branch_filter.join(", ")
+        )
     }
 }
 
@@ -1150,6 +1227,7 @@ fn show_branch_filter_menu(gui: &mut Gui) -> Result<()> {
             ChecklistItem {
                 label: name,
                 checked,
+                is_free_entry: false,
             }
         })
         .collect();
@@ -1161,8 +1239,9 @@ fn show_branch_filter_menu(gui: &mut Gui) -> Result<()> {
         search: String::new(),
         on_confirm: Box::new(|gui: &mut Gui, checked: Vec<String>| {
             gui.commit_branch_filter = checked;
-            apply_commit_filters(gui)
+            apply_commit_filters_and_focus(gui)
         }),
+        free_entry_category: None,
     };
 
     Ok(())

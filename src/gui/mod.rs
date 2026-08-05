@@ -553,7 +553,7 @@ pub struct Gui {
     /// Optional path used to filter the main commits panel.
     pub commit_path_filter: Option<String>,
     /// Optional author identity used to filter the main commits panel.
-    pub commit_author_filter: Option<String>,
+    pub commit_author_filter: Vec<String>,
     /// Hash of the commit whose files are being viewed in CommitFiles context.
     pub commit_files_hash: String,
     /// First line of the commit message for the commit being viewed.
@@ -812,7 +812,7 @@ impl Gui {
             last_refresh_at: Instant::now(),
             commit_branch_filter: Vec::new(),
             commit_path_filter: None,
-            commit_author_filter: None,
+            commit_author_filter: Vec::new(),
             commit_files_hash: String::new(),
             commit_files_message: String::new(),
             commit_file_tree_nodes: Vec::new(),
@@ -1108,8 +1108,9 @@ impl Gui {
                     if let Some(path) = self.commit_path_filter.as_deref() {
                         active_commit_filters.push(format!("path: {path}"));
                     }
-                    if let Some(author) = self.commit_author_filter.as_deref() {
-                        active_commit_filters.push(format!("author: {author}"));
+                    if !self.commit_author_filter.is_empty() {
+                        active_commit_filters
+                            .push(format!("author: {}", self.commit_author_filter.join(", ")));
                     }
                     views::render(
                         frame,
@@ -1786,7 +1787,7 @@ impl Gui {
         let filter = crate::git::commit::CommitFilter {
             branches: self.commit_branch_filter.clone(),
             path: self.commit_path_filter.clone(),
-            author: self.commit_author_filter.clone(),
+            authors: self.commit_author_filter.clone(),
         };
 
         std::thread::spawn(move || {
@@ -4005,7 +4006,8 @@ impl Gui {
                 let visible_count = items
                     .iter()
                     .filter(|it| {
-                        search.is_empty()
+                        it.is_free_entry
+                            || search.is_empty()
                             || it.label.to_lowercase().contains(&search.to_lowercase())
                     })
                     .count();
@@ -4035,7 +4037,8 @@ impl Gui {
                                 .iter()
                                 .enumerate()
                                 .filter(|(_, it)| {
-                                    search.is_empty()
+                                    it.is_free_entry
+                                        || search.is_empty()
                                         || it.label.to_lowercase().contains(&search.to_lowercase())
                                 })
                                 .map(|(i, _)| i)
@@ -4070,10 +4073,19 @@ impl Gui {
                     }
                     KeyCode::Backspace => {
                         if let PopupState::Checklist {
-                            search, selected, ..
+                            items,
+                            search,
+                            selected,
+                            free_entry_category,
+                            ..
                         } = &mut self.popup
                         {
                             search.pop();
+                            crate::gui::popup::sync_checklist_free_entry(
+                                items,
+                                free_entry_category.as_deref(),
+                                search,
+                            );
                             *selected = 0;
                         }
                     }
@@ -4081,10 +4093,19 @@ impl Gui {
                         // Type into search filter (but not j/k which are nav)
                         // j/k already handled above, this won't fire for them
                         if let PopupState::Checklist {
-                            search, selected, ..
+                            items,
+                            search,
+                            selected,
+                            free_entry_category,
+                            ..
                         } = &mut self.popup
                         {
                             search.push(c);
+                            crate::gui::popup::sync_checklist_free_entry(
+                                items,
+                                free_entry_category.as_deref(),
+                                search,
+                            );
                             *selected = 0;
                         }
                     }
@@ -6094,7 +6115,8 @@ impl Gui {
                             .iter()
                             .enumerate()
                             .filter(|(_, it)| {
-                                search.is_empty()
+                                it.is_free_entry
+                                    || search.is_empty()
                                     || it.label.to_lowercase().contains(&search.to_lowercase())
                             })
                             .map(|(i, _)| i)
@@ -7162,12 +7184,12 @@ impl Gui {
         // Re-apply commit filters after refresh replaces the model.
         if !self.commit_branch_filter.is_empty()
             || self.commit_path_filter.is_some()
-            || self.commit_author_filter.is_some()
+            || !self.commit_author_filter.is_empty()
         {
             let filter = crate::git::commit::CommitFilter {
                 branches: self.commit_branch_filter.clone(),
                 path: self.commit_path_filter.clone(),
-                author: self.commit_author_filter.clone(),
+                authors: self.commit_author_filter.clone(),
             };
             if let Ok(filtered) =
                 self.git

@@ -1315,7 +1315,11 @@ pub fn checklist_item_at(popup: &PopupState, area: Rect, col: u16, row: u16) -> 
     let (x, popup_width) = centered_popup_x_width(area);
     let visible_count = items
         .iter()
-        .filter(|it| search.is_empty() || it.label.to_lowercase().contains(&search.to_lowercase()))
+        .filter(|it| {
+            it.is_free_entry
+                || search.is_empty()
+                || it.label.to_lowercase().contains(&search.to_lowercase())
+        })
         .count();
     // Matches `PopupState::Checklist` in `render_popup`.
     let content_lines = visible_count.max(1);
@@ -1453,14 +1457,17 @@ mod tests {
                 ChecklistItem {
                     label: "one".to_string(),
                     checked: false,
+                    is_free_entry: false,
                 },
                 ChecklistItem {
                     label: "two".to_string(),
                     checked: true,
+                    is_free_entry: false,
                 },
             ],
             selected: 0,
             search: String::new(),
+            free_entry_category: None,
             on_confirm: Box::new(|_gui, _ids| Ok(())),
         };
         // height = max(8, 2+6)=8; y=(30-8)/2=11; list_start=y+1+2=14
@@ -3081,14 +3088,18 @@ pub fn render_popup(
             items,
             selected,
             search,
+            free_entry_category,
             ..
         } => {
-            // Filter items by search query
+            // Filter items by search query. Free-entry rows always remain
+            // visible because they represent the current typed value.
             let visible: Vec<(usize, &super::popup::ChecklistItem)> = items
                 .iter()
                 .enumerate()
                 .filter(|(_, it)| {
-                    search.is_empty() || it.label.to_lowercase().contains(&search.to_lowercase())
+                    it.is_free_entry
+                        || search.is_empty()
+                        || it.label.to_lowercase().contains(&search.to_lowercase())
                 })
                 .collect();
 
@@ -3115,8 +3126,13 @@ pub fn render_popup(
                 // Search bar row
                 let search_area = Rect::new(inner.x, inner.y, inner.width, 1);
                 let search_display = if search.is_empty() {
+                    let placeholder = if free_entry_category.is_some() {
+                        " Type to filter or enter custom value..."
+                    } else {
+                        " Type to filter..."
+                    };
                     Line::from(Span::styled(
-                        " Type to filter...",
+                        placeholder,
                         Style::default().fg(theme.text_dimmed),
                     ))
                 } else {
@@ -3152,13 +3168,21 @@ pub fn render_popup(
                             theme.text_dimmed
                         };
                         let is_selected = vi == *selected;
+                        let category = if item.is_free_entry {
+                            free_entry_category
+                                .as_deref()
+                                .map(|c| format!("  {c}"))
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
 
                         let line = Line::from(vec![
                             Span::raw("  "),
                             Span::styled(check_sym, Style::default().fg(check_color)),
                             Span::raw("  "),
                             Span::styled(
-                                item.label.clone(),
+                                format!("{}{}", item.label, category),
                                 if is_selected {
                                     Style::default()
                                         .fg(theme.text_strong)

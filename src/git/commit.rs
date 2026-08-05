@@ -11,7 +11,7 @@ use std::collections::HashSet;
 pub struct CommitFilter {
     pub branches: Vec<String>,
     pub path: Option<String>,
-    pub author: Option<String>,
+    pub authors: Vec<String>,
 }
 
 fn commit_filter_path_suggestions<'a>(paths: impl Iterator<Item = &'a str>) -> Vec<String> {
@@ -106,7 +106,7 @@ impl GitCommands {
                 cmd = cmd.arg(branch);
             }
         }
-        if let Some(author) = filter.author.as_deref() {
+        for author in &filter.authors {
             cmd = cmd.arg(&format!("--author={author}"));
         }
         if limit > 0 {
