@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.30] - 2026-08-05
+
+### Features
+
+- Add list search match highlighting in rendered panels by @Blankeos
+- Support multi-author commit filtering by @Blankeos
+- Ctrl-s, add commit filtering by branch, path, and author by @Blankeos
+- Stream HEAD metadata during model loading by @Blankeos
+
 ## [0.0.29] - 2026-08-02
 
 ### Bug Fixes
