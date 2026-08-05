@@ -362,6 +362,12 @@ pub fn render(
                     frame.render_widget(widget, fl.main_panel);
                 }
             }
+            // Highlight `/` search matches on the full-mode list.
+            if let Some((query, _, _)) = search_state {
+                if !query.is_empty() {
+                    render_list_search_highlights(frame, fl.main_panel, query, theme);
+                }
+            }
         }
         // Full-mode details strip (sidebar-focused only) — compact, above sidebar.
         if let (Some(details_rect), Some(commit)) = (fl.commit_details_panel, current_commit) {
@@ -973,6 +979,16 @@ pub fn render(
             _ => {
                 let widget = Paragraph::new("").block(block);
                 frame.render_widget(widget, rect);
+            }
+        }
+    }
+
+    // Highlight `/` search matches on the active list (lazygit-style substring).
+    // Applied after list widgets paint so selection styles stay intact.
+    if let Some((query, _, _)) = search_state {
+        if !query.is_empty() {
+            if let Some(list_rect) = fl.side_panels.get(active_panel_index).copied() {
+                render_list_search_highlights(frame, list_rect, query, theme);
             }
         }
     }
@@ -1974,6 +1990,73 @@ fn render_commit_list_ctx(
         .collect();
 
     frame.render_widget(List::new(visible_items).block(block), rect);
+}
+
+/// Highlight contiguous `/` search matches in a list panel (lazygit-style).
+/// Scans already-painted buffer cells so item styling (selection, colors) is preserved.
+fn render_list_search_highlights(
+    frame: &mut Frame,
+    area: Rect,
+    query: &str,
+    theme: &crate::config::Theme,
+) {
+    if query.is_empty() || area.width < 3 || area.height < 3 {
+        return;
+    }
+
+    let query_lower: Vec<char> = query.to_lowercase().chars().collect();
+    if query_lower.is_empty() {
+        return;
+    }
+
+    let highlight = theme.search_match;
+    let buf = frame.buffer_mut();
+    let buf_area = *buf.area();
+
+    let inner_x = area.x + 1;
+    let inner_end_x = area.x + area.width.saturating_sub(1);
+    let inner_y = area.y + 1;
+    let inner_end_y = area.y + area.height.saturating_sub(1);
+
+    for y in inner_y..inner_end_y {
+        if y >= buf_area.y + buf_area.height {
+            break;
+        }
+
+        let mut row_chars: Vec<(u16, char)> = Vec::new();
+        for x in inner_x..inner_end_x.min(buf_area.x + buf_area.width) {
+            if let Some(cell) = buf.cell((x, y)) {
+                let ch = cell.symbol().chars().next().unwrap_or(' ');
+                row_chars.push((x, ch));
+            }
+        }
+        if row_chars.is_empty() {
+            continue;
+        }
+
+        let row_text: String = row_chars.iter().map(|(_, c)| *c).collect();
+        let row_lower = row_text.to_lowercase();
+        let row_lower_chars: Vec<char> = row_lower.chars().collect();
+
+        let mut start = 0usize;
+        while start + query_lower.len() <= row_lower_chars.len() {
+            let is_match = row_lower_chars[start..start + query_lower.len()]
+                .iter()
+                .zip(query_lower.iter())
+                .all(|(a, b)| a == b);
+            if is_match {
+                for i in 0..query_lower.len() {
+                    let (x, _) = row_chars[start + i];
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        cell.set_style(highlight);
+                    }
+                }
+                start += query_lower.len();
+            } else {
+                start += 1;
+            }
+        }
+    }
 }
 
 fn render_list_with_range_raw(
