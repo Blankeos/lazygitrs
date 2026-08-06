@@ -303,4 +303,8 @@ Where I observed this behavior: I noticed this for the "Commit Message" and "Des
 
 - [x] Optimize the "after pressing enter" when in commiting or rewording.
 
-- [ ] The `/` filtering needs better UI feedback. In the original lazygit, it highlights the chars that it matches with. But the scope affects a lot, so let's see if we can find a way to do this well.
+- [x] The `/` filtering needs better UI feedback. In the original lazygit, it highlights the chars that it matches with. But the scope affects a lot, so let's see if we can find a way to do this well.
+
+- [x] If the new commit in `main` is super fresh.. The first time I do `p` Pull, throws an eror of 'divergent branches', but then the second time I run `p` and enter. it's okay.
+
+- [ ] Checking out pull requests branches, by pressing space I think? `gh pr checkout` and also doing `P` or `p` from the pr head? I was thinking a bunhc of settings to do `P` and then see something like a a custom push command there like push to a different origin etc. Idk tbh what UX i want here.

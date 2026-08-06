@@ -108,15 +108,18 @@ impl GitCommands {
     }
 
     pub fn fetch(&self, remote: &str) -> Result<()> {
+        // --no-write-fetch-head: still updates remote-tracking refs, but avoids
+        // racing a concurrent `git pull` on .git/FETCH_HEAD (can surface as a
+        // spurious "divergent branches" / merge failure on the first p).
         self.git()
-            .args(&["fetch", remote])
+            .args(&["fetch", "--no-write-fetch-head", remote])
             .run_expecting_success()?;
         Ok(())
     }
 
     pub fn fetch_all(&self) -> Result<()> {
         self.git()
-            .args(&["fetch", "--all"])
+            .args(&["fetch", "--all", "--no-write-fetch-head"])
             .run_expecting_success()?;
         Ok(())
     }
@@ -127,7 +130,7 @@ impl GitCommands {
     pub fn fetch_all_background(&self) -> Result<bool> {
         let result = self
             .git()
-            .args(&["fetch", "--all"])
+            .args(&["fetch", "--all", "--no-write-fetch-head"])
             .env("GIT_TERMINAL_PROMPT", "0")
             .run_expecting_success()?;
         Ok(!result.stdout.trim().is_empty() || !result.stderr.trim().is_empty())

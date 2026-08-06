@@ -1816,6 +1816,12 @@ impl Gui {
         if self.auto_fetch_in_flight {
             return;
         }
+        // Don't race a user-initiated push/pull/fetch (even with
+        // --no-write-fetch-head, concurrent network ops are wasteful and can
+        // still contend on packed-refs / remote-tracking updates).
+        if self.remote_op_label.is_some() {
+            return;
+        }
         let due = match self.last_auto_fetch_at {
             None => true, // first fetch happens immediately after startup
             Some(t) => t.elapsed().as_secs() >= interval,
