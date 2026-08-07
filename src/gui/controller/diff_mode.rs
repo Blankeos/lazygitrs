@@ -731,6 +731,20 @@ pub fn maybe_request_diff(gui: &mut Gui, generation: u64, diff_key: String) {
                 Ok(diff) if diff.is_empty() => DiffPayload::Empty,
                 Ok(diff) => {
                     let exists = git.repo_path().join(&current_path).exists();
+                    // Pure renames between refs: show file content at ref_b.
+                    if crate::pager::side_by_side::is_rename_only_diff(&diff) {
+                        if let Ok(content) = git.file_content_at_commit(&ref_b, &current_path) {
+                            if !content.is_empty() {
+                                return DiffPayload::Parsed(DiffViewState::parse_content(
+                                    &current_path,
+                                    &content,
+                                    &content,
+                                    4,
+                                    exists,
+                                ));
+                            }
+                        }
+                    }
                     DiffPayload::Parsed(DiffViewState::parse_diff_output(&name, &diff, 4, exists))
                 }
                 Err(_) => DiffPayload::Empty,

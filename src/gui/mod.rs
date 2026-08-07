@@ -28,7 +28,7 @@ use crate::model::Model;
 use crate::model::file_tree::{CommitFileTreeNode, FileTreeNode, build_file_tree};
 use crate::os::platform::Platform;
 use crate::pager::side_by_side::{
-    DiffPanel, DiffPanelLayout, DiffViewLayout, DiffViewState, TextSelection,
+    DiffPanel, DiffPanelLayout, DiffViewLayout, DiffViewState, TextSelection, is_rename_only_diff,
 };
 
 use self::context::{ContextId, ContextManager, SideWindow};
@@ -674,6 +674,61 @@ fn synthesize_binary_file_diff(filename: &str) -> String {
     )
 }
 
+/// Pure renames have no hunks; show file content instead of only path lines.
+fn parse_file_diff_payload(
+    git: &GitCommands,
+    name: &str,
+    current_path: &str,
+    diff: &str,
+    exists: bool,
+    prefer_staged: bool,
+) -> DiffPayload {
+    if is_rename_only_diff(diff) {
+        let content = if prefer_staged {
+            git.file_content_staged(current_path)
+                .or_else(|_| git.file_content(current_path))
+        } else {
+            git.file_content(current_path)
+                .or_else(|_| git.file_content_staged(current_path))
+        };
+        if let Ok(content) = content {
+            if !content.is_empty() {
+                return DiffPayload::Parsed(DiffViewState::parse_content(
+                    current_path,
+                    &content,
+                    &content,
+                    4,
+                    exists,
+                ));
+            }
+        }
+    }
+    DiffPayload::Parsed(DiffViewState::parse_diff_output(name, diff, 4, exists))
+}
+
+fn parse_commit_file_diff_payload(
+    git: &GitCommands,
+    hash: &str,
+    name: &str,
+    current_path: &str,
+    diff: &str,
+) -> DiffPayload {
+    if is_rename_only_diff(diff) {
+        if let Ok(content) = git.file_content_at_commit(hash, current_path) {
+            if !content.is_empty() {
+                return DiffPayload::Parsed(DiffViewState::parse_content(
+                    current_path,
+                    &content,
+                    &content,
+                    4,
+                    false,
+                ));
+            }
+        }
+    }
+    DiffPayload::Parsed(DiffViewState::parse_diff_output(name, diff, 4, false))
+}
+
 impl Gui {
     fn show_error(&mut self, title: &str, err: anyhow::Error) {
         self.popup = PopupState::Message {
@@ -884,7 +939,10 @@ impl Gui {
                         ModelPart::Commits(v) => {
                             // Keep filtered commits visible during streaming refresh;
                             // after_model_refresh reloads the filtered set when done.
-                            if self.commit_branch_filter.is_empty() {
+                            let has_commit_filter = self.commit_path_filter.is_some()
+                                || !self.commit_author_filter.is_empty()
+                                || !self.commit_branch_filter.is_empty();
+                            if !has_commit_filter {
                                 self.commit_history_complete = v.len() < DEFAULT_COMMIT_LIMIT;
                                 model.set_commits(v);
                             }
@@ -2240,9 +2298,14 @@ impl Gui {
                                 }
                             }
                             Ok(diff) if diff.is_empty() => DiffPayload::Empty,
-                            Ok(diff) => DiffPayload::Parsed(DiffViewState::parse_diff_output(
-                                &name, &diff, 4, exists,
-                            )),
+                            Ok(diff) => parse_file_diff_payload(
+                                &git,
+                                &name,
+                                &current_path,
+                                &diff,
+                                exists,
+                                has_staged && !has_unstaged,
+                            ),
                             Err(_) => DiffPayload::Empty,
                         }
                     });
@@ -2442,10 +2505,13 @@ impl Gui {
                             if diff.is_empty() {
                                 DiffPayload::Empty
                             } else {
-                                let exists = git.repo_path().join(&current_path).exists();
-                                DiffPayload::Parsed(DiffViewState::parse_diff_output(
-                                    &name, &diff, 4, exists,
-                                ))
+                                parse_commit_file_diff_payload(
+                                    &git,
+                                    &hash,
+                                    &name,
+                                    &current_path,
+                                    &diff,
+                                )
                             }
                         } else {
                             DiffPayload::Empty

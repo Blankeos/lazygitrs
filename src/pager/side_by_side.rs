@@ -2894,6 +2894,11 @@ fn binary_file_placeholder_lines(tab_width: usize) -> Vec<DiffLine> {
     }]
 }
 
+/// True when git emitted a rename/copy with no content hunks (pure move).
+pub fn is_rename_only_diff(diff: &str) -> bool {
+    rename_only_paths(diff).is_some()
+}
+
 fn rename_only_paths(diff: &str) -> Option<(String, String)> {
     if diff.lines().any(|line| line.starts_with("@@")) {
         return None;
@@ -3258,6 +3263,24 @@ mod tests {
             parsed.lines[0].new_line,
             Some((1, "src/views/provider_oauth_flow.rs".to_string()))
         );
+    }
+
+    #[test]
+    fn detects_rename_only_without_hunks() {
+        let diff = "diff --git a/old/tab-indent.ts b/new/tab-indent.ts\n\
+                    similarity index 100%\n\
+                    rename from old/tab-indent.ts\n\
+                    rename to new/tab-indent.ts\n";
+        assert!(is_rename_only_diff(diff));
+        assert!(!is_rename_only_diff(
+            "diff --git a/a.rs b/b.rs\n\
+             similarity index 90%\n\
+             rename from a.rs\n\
+             rename to b.rs\n\
+             @@ -1 +1 @@\n\
+             -old\n\
+             +new\n"
+        ));
     }
 
     #[test]
