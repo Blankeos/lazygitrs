@@ -180,20 +180,48 @@ pub(crate) fn textarea_input(
     textarea: &mut tui_textarea::TextArea<'static>,
     key: KeyEvent,
 ) -> bool {
+    use tui_textarea::CursorMove;
+
     let cmd = has_command_modifier(key.modifiers);
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
     match key.code {
-        KeyCode::Left if cmd => textarea.move_cursor(tui_textarea::CursorMove::Head),
-        KeyCode::Right if cmd => textarea.move_cursor(tui_textarea::CursorMove::End),
+        // Cmd+Left/Right (and Ctrl+Left/Right): line head/end.
+        // Many macOS terminals remap Cmd+arrows to Home/End, so handle those too.
+        KeyCode::Left if cmd || ctrl => textarea.move_cursor(CursorMove::Head),
+        KeyCode::Right if cmd || ctrl => textarea.move_cursor(CursorMove::End),
+        KeyCode::Home => textarea.move_cursor(CursorMove::Head),
+        KeyCode::End => textarea.move_cursor(CursorMove::End),
+        // Cmd/Ctrl+Backspace: delete to start of line
         KeyCode::Backspace if cmd => {
             textarea.delete_line_by_head();
         }
+        // Option/Alt+Left/Right: move by word
+        KeyCode::Left if alt => textarea.move_cursor(CursorMove::WordBack),
+        KeyCode::Right if alt => textarea.move_cursor(CursorMove::WordForward),
+        // Option/Alt+Backspace: delete previous word
+        KeyCode::Backspace if alt => {
+            let (row, col) = textarea.cursor();
+            textarea.move_cursor(CursorMove::WordBack);
+            let (new_row, new_col) = textarea.cursor();
+            if new_row == row {
+                for _ in new_col..col {
+                    textarea.delete_next_char();
+                }
+            } else {
+                textarea.move_cursor(CursorMove::Jump(row as u16, col as u16));
+                for _ in 0..=col {
+                    textarea.delete_char();
+                }
+            }
+        }
         KeyCode::Char(_) if cmd => return false,
-        KeyCode::Char('a') if ctrl => textarea.move_cursor(tui_textarea::CursorMove::Head),
-        KeyCode::Char('e') if ctrl => textarea.move_cursor(tui_textarea::CursorMove::End),
+        KeyCode::Char('a') if ctrl => textarea.move_cursor(CursorMove::Head),
+        KeyCode::Char('e') if ctrl => textarea.move_cursor(CursorMove::End),
         KeyCode::Char('u') if ctrl => {
             textarea.delete_line_by_head();
         }
+        // Fall through: tui-textarea handles Alt+b/f/h/l and plain chars
         _ => return textarea.input(key),
     };
     true
@@ -3466,6 +3494,23 @@ impl Gui {
                 *selected = 0;
                 *scroll_offset = 0;
             }
+            PopupState::Checklist {
+                items,
+                selected,
+                search_textarea,
+                free_entry_category,
+                ..
+            } => {
+                let cleaned: String = data.replace('\r', "").replace('\n', " ");
+                search_textarea.insert_str(&cleaned);
+                let after = search_textarea.lines().join("");
+                crate::gui::popup::sync_checklist_free_entry(
+                    items,
+                    free_entry_category.as_deref(),
+                    &after,
+                );
+                *selected = 0;
+            }
             PopupState::RefPicker { core, .. } => {
                 use crate::gui::popup::{REF_FREE_ENTRY_CATEGORY, sync_list_picker_free_entry};
                 let cleaned: String = data.replace('\r', "").replace('\n', " ");
@@ -4061,20 +4106,11 @@ impl Gui {
             }
             PopupState::Checklist {
                 items,
-                selected,
-                search,
+                selected: _,
+                search_textarea,
                 ..
             } => {
-                use crossterm::event::KeyModifiers;
-                // Ctrl+A: clear all checks
-                if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                    if let PopupState::Checklist { items, .. } = &mut self.popup {
-                        for item in items.iter_mut() {
-                            item.checked = false;
-                        }
-                    }
-                    return Ok(());
-                }
+                let search = search_textarea.lines().join("");
                 let visible_count = items
                     .iter()
                     .filter(|it| {
@@ -4084,27 +4120,30 @@ impl Gui {
                     })
                     .count();
                 match key.code {
-                    KeyCode::Down | KeyCode::Char('j') => {
+                    // Arrow keys only for navigation — j/k must type into the search filter
+                    // (same pattern as ListPicker / CommandPalette / ThemePicker).
+                    KeyCode::Down if key.modifiers.is_empty() => {
                         if let PopupState::Checklist { selected, .. } = &mut self.popup {
                             if visible_count > 0 {
                                 *selected = (*selected + 1).min(visible_count - 1);
                             }
                         }
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
+                    KeyCode::Up if key.modifiers.is_empty() => {
                         if let PopupState::Checklist { selected, .. } = &mut self.popup {
                             *selected = selected.saturating_sub(1);
                         }
                     }
-                    KeyCode::Char(' ') => {
+                    KeyCode::Char(' ') if key.modifiers.is_empty() => {
                         // Toggle checked state on the visible item at `selected`
                         if let PopupState::Checklist {
                             items,
                             selected,
-                            search,
+                            search_textarea,
                             ..
                         } = &mut self.popup
                         {
+                            let search = search_textarea.lines().join("");
                             let visible_indices: Vec<usize> = items
                                 .iter()
                                 .enumerate()
@@ -4143,45 +4182,29 @@ impl Gui {
                     KeyCode::Esc => {
                         self.popup = PopupState::None;
                     }
-                    KeyCode::Backspace => {
+                    _ => {
+                        // Search input: chars, backspace, Option/Cmd word/line edits.
                         if let PopupState::Checklist {
                             items,
-                            search,
                             selected,
+                            search_textarea,
                             free_entry_category,
                             ..
                         } = &mut self.popup
                         {
-                            search.pop();
-                            crate::gui::popup::sync_checklist_free_entry(
-                                items,
-                                free_entry_category.as_deref(),
-                                search,
-                            );
-                            *selected = 0;
+                            let before = search_textarea.lines().join("");
+                            textarea_input(search_textarea, key);
+                            let after = search_textarea.lines().join("");
+                            if after != before {
+                                crate::gui::popup::sync_checklist_free_entry(
+                                    items,
+                                    free_entry_category.as_deref(),
+                                    &after,
+                                );
+                                *selected = 0;
+                            }
                         }
                     }
-                    KeyCode::Char(c) => {
-                        // Type into search filter (but not j/k which are nav)
-                        // j/k already handled above, this won't fire for them
-                        if let PopupState::Checklist {
-                            items,
-                            search,
-                            selected,
-                            free_entry_category,
-                            ..
-                        } = &mut self.popup
-                        {
-                            search.push(c);
-                            crate::gui::popup::sync_checklist_free_entry(
-                                items,
-                                free_entry_category.as_deref(),
-                                search,
-                            );
-                            *selected = 0;
-                        }
-                    }
-                    _ => {}
                 }
             }
             PopupState::Loading { .. } => {
@@ -6178,11 +6201,12 @@ impl Gui {
                 if let PopupState::Checklist {
                     items,
                     selected,
-                    search,
+                    search_textarea,
                     ..
                 } = &mut self.popup
                 {
                     if *selected == visible_idx {
+                        let search = search_textarea.lines().join("");
                         let visible_indices: Vec<usize> = items
                             .iter()
                             .enumerate()

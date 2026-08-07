@@ -1322,9 +1322,15 @@ pub fn menu_item_at(popup: &PopupState, area: Rect, col: u16, row: u16) -> Optio
 
 /// Returns the visible checklist option index under `(col, row)`.
 pub fn checklist_item_at(popup: &PopupState, area: Rect, col: u16, row: u16) -> Option<usize> {
-    let PopupState::Checklist { items, search, .. } = popup else {
+    let PopupState::Checklist {
+        items,
+        search_textarea,
+        ..
+    } = popup
+    else {
         return None;
     };
+    let search = search_textarea.lines().join("");
     if area.width < 4 || area.height < 4 {
         return None;
     }
@@ -1482,7 +1488,7 @@ mod tests {
                 },
             ],
             selected: 0,
-            search: String::new(),
+            search_textarea: crate::gui::popup::make_checklist_search_textarea(),
             free_entry_category: None,
             on_confirm: Box::new(|_gui, _ids| Ok(())),
         };
@@ -3170,10 +3176,11 @@ pub fn render_popup(
             title,
             items,
             selected,
-            search,
+            search_textarea,
             free_entry_category,
             ..
         } => {
+            let search = search_textarea.lines().join("");
             // Filter items by search query. Free-entry rows always remain
             // visible because they represent the current typed value.
             let visible: Vec<(usize, &super::popup::ChecklistItem)> = items
@@ -3206,26 +3213,9 @@ pub fn render_popup(
             if inner.height < 3 {
                 // Too small, skip
             } else {
-                // Search bar row
+                // Search bar row (TextArea for cursor + word/line edits)
                 let search_area = Rect::new(inner.x, inner.y, inner.width, 1);
-                let search_display = if search.is_empty() {
-                    let placeholder = if free_entry_category.is_some() {
-                        " Type to filter or enter custom value..."
-                    } else {
-                        " Type to filter..."
-                    };
-                    Line::from(Span::styled(
-                        placeholder,
-                        Style::default().fg(theme.text_dimmed),
-                    ))
-                } else {
-                    Line::from(vec![
-                        Span::styled(" ", Style::default().fg(theme.accent_secondary)),
-                        Span::styled(search.clone(), Style::default().fg(theme.accent_secondary)),
-                        Span::styled("▏", Style::default().fg(theme.accent_secondary)),
-                    ])
-                };
-                frame.render_widget(Paragraph::new(search_display), search_area);
+                frame.render_widget(search_textarea, search_area);
 
                 // Separator line
                 let sep_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);

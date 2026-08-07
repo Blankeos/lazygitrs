@@ -1111,7 +1111,7 @@ fn show_author_filter_input(gui: &mut Gui) -> Result<()> {
         title: "Filter by author".to_string(),
         items,
         selected: 0,
-        search: String::new(),
+        search_textarea: crate::gui::popup::make_checklist_search_textarea(),
         free_entry_category: Some("[author]".to_string()),
         on_confirm: Box::new(|gui, authors| apply_author_filters(gui, authors)),
     };
@@ -1236,7 +1236,7 @@ fn show_branch_filter_menu(gui: &mut Gui) -> Result<()> {
         title: "Filter commits by branch".to_string(),
         items,
         selected: 0,
-        search: String::new(),
+        search_textarea: crate::gui::popup::make_checklist_search_textarea(),
         on_confirm: Box::new(|gui: &mut Gui, checked: Vec<String>| {
             gui.commit_branch_filter = checked;
             apply_commit_filters_and_focus(gui)

@@ -545,7 +545,7 @@ pub enum PopupState {
         title: String,
         items: Vec<ChecklistItem>,
         selected: usize,
-        search: String,
+        search_textarea: TextArea<'static>,
         /// When present, non-empty search text is also a checkable custom item.
         free_entry_category: Option<String>,
         on_confirm: ChecklistAction,
@@ -657,6 +657,19 @@ pub fn make_command_palette_search_textarea() -> TextArea<'static> {
     use ratatui::style::{Color, Style};
 
     let mut ta = make_textarea("Search commands or keybindings...");
+    ta.set_style(Style::default().fg(Color::Yellow));
+    ta.set_cursor_style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(ratatui::style::Modifier::REVERSED),
+    );
+    ta
+}
+
+pub fn make_checklist_search_textarea() -> TextArea<'static> {
+    use ratatui::style::{Color, Style};
+
+    let mut ta = make_textarea("Filter...");
     ta.set_style(Style::default().fg(Color::Yellow));
     ta.set_cursor_style(
         Style::default()
