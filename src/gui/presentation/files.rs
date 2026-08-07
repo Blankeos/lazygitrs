@@ -178,8 +178,8 @@ pub fn render_file_tree<'a>(
                 let name_style = file_name_style(file, theme);
 
                 let spans = vec![
+                    Span::raw(format!(" {}", indent)),
                     Span::styled(format!("{} ", status_icon), status_style),
-                    Span::raw(indent),
                     Span::styled(node.name.clone(), name_style),
                 ];
                 let line = Line::from(append_file_stats(

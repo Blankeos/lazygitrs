@@ -309,4 +309,4 @@ Where I observed this behavior: I noticed this for the "Commit Message" and "Des
 
 - [ ] Checking out pull requests branches, by pressing space I think? `gh pr checkout` and also doing `P` or `p` from the pr head? I was thinking a bunhc of settings to do `P` and then see something like a a custom push command there like push to a different origin etc. Idk tbh what UX i want here.
 
-- [ ] IN filetree view, the "M" or "A" or "??" should be slightly more indented. in Files.. Because currently it's lesser indented than the ▶︎ characters, visually makes u think it's at the root, which is bad UX.
+- [x] IN filetree view, the "M" or "A" or "??" should be slightly more indented. in Files.. Because currently it's lesser indented than the ▶︎ characters, visually makes u think it's at the root, which is bad UX.

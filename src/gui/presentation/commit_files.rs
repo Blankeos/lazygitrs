@@ -102,8 +102,8 @@ pub fn render_commit_file_tree<'a>(
                 let (status_style, status_icon) = commit_file_status_display(file, theme);
 
                 let spans = vec![
-                    Span::styled(format!("{} ", status_icon), status_style),
                     Span::raw(indent),
+                    Span::styled(format!("{} ", status_icon), status_style),
                     Span::styled(node.name.clone(), Style::default().fg(theme.text_strong)),
                 ];
                 let line = Line::from(append_file_stats(
