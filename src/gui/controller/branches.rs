@@ -217,10 +217,14 @@ fn checkout_picker(gui: &mut Gui) -> Result<()> {
 }
 
 fn start_async_checkout(gui: &mut Gui, name: String) {
-    gui.start_remote_op("Checking out", &format!("Checking out {}", name), move |git| {
-        git.checkout_branch(&name)?;
-        Ok(())
-    });
+    gui.start_remote_op(
+        "Checking out",
+        &format!("Checking out {}", name),
+        move |git| {
+            git.checkout_branch(&name)?;
+            Ok(())
+        },
+    );
 }
 
 fn show_checkout_error_or_refresh(gui: &mut Gui, name: &str) -> Result<()> {

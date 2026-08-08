@@ -2014,6 +2014,34 @@ impl Gui {
         }
     }
 
+    /// Stage/unstage everything on a background thread, then status-only refresh.
+    pub(crate) fn enqueue_stage_all_then_refresh(&mut self, stage: bool) {
+        let git = Arc::clone(&self.git);
+        let should_send_files = !self.files_refresh_in_progress;
+        if should_send_files {
+            self.files_refresh_in_progress = true;
+            let (tx, rx) = mpsc::channel();
+            self.files_refresh_rx = Some(rx);
+            std::thread::spawn(move || {
+                if stage {
+                    let _ = git.stage_all();
+                } else {
+                    let _ = git.unstage_all();
+                }
+                let _ = tx.send(git.refresh_files_status_only());
+            });
+        } else {
+            self.needs_files_refresh = true;
+            std::thread::spawn(move || {
+                if stage {
+                    let _ = git.stage_all();
+                } else {
+                    let _ = git.unstage_all();
+                }
+            });
+        }
+    }
+
     /// Apply a completed status-only files refresh.
     fn receive_files_refresh(&mut self) {
         let Some(rx) = self.files_refresh_rx.as_ref() else {
@@ -2027,10 +2055,8 @@ impl Gui {
                     let mut model = self.model.lock().unwrap();
                     model.set_files(files);
                     if self.show_file_tree {
-                        self.file_tree_nodes =
-                            build_file_tree(&model.files, &self.collapsed_dirs);
-                        self.context_mgr.files_list_len_override =
-                            Some(self.file_tree_nodes.len());
+                        self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
+                        self.context_mgr.files_list_len_override = Some(self.file_tree_nodes.len());
                     } else {
                         self.file_tree_nodes.clear();
                         self.context_mgr.files_list_len_override = None;

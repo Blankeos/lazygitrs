@@ -207,19 +207,26 @@ fn toggle_stage(gui: &mut Gui) -> Result<()> {
 }
 
 fn toggle_stage_all(gui: &mut Gui) -> Result<()> {
-    let model = gui.model.lock().unwrap();
+    // Optimistic UI + background git (same pattern as Space / dir toggle).
+    let mut model = gui.model.lock().unwrap();
     let any_unstaged = model
         .files
         .iter()
         .any(|f| f.has_unstaged_changes || !f.tracked);
-    drop(model);
-
-    if any_unstaged {
-        gui.git.stage_all()?;
-    } else {
-        gui.git.unstage_all()?;
+    let stage = any_unstaged;
+    for f in model.files.iter_mut() {
+        if stage {
+            if f.has_unstaged_changes || !f.tracked {
+                let _ = f.optimistic_stage();
+            }
+        } else if f.has_staged_changes {
+            let _ = f.optimistic_unstage();
+        }
     }
-    gui.needs_files_refresh = true;
+    drop(model);
+    gui.rebuild_file_tree_from_model();
+    gui.needs_diff_refresh = true;
+    gui.enqueue_stage_all_then_refresh(stage);
     Ok(())
 }
 
