@@ -115,8 +115,10 @@ impl GitCommands {
     }
 
     pub fn stage_file(&self, path: &str) -> Result<()> {
+        // --literal-pathspecs (global flag, before subcommand) prevents git
+        // from interpreting [] chars in paths as glob/magic pathspecs.
         self.git()
-            .args(&["add", "--", path])
+            .args(&["--literal-pathspecs", "add", "--", path])
             .run_expecting_success()?;
         Ok(())
     }
@@ -126,7 +128,7 @@ impl GitCommands {
         if paths.is_empty() {
             return Ok(());
         }
-        let mut args = vec!["add", "--"];
+        let mut args = vec!["--literal-pathspecs", "add", "--"];
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
         args.extend(refs);
         self.git().args(&args).run_expecting_success()?;
@@ -135,7 +137,7 @@ impl GitCommands {
 
     pub fn unstage_file(&self, path: &str) -> Result<()> {
         self.git()
-            .args(&["reset", "HEAD", "--", path])
+            .args(&["--literal-pathspecs", "reset", "HEAD", "--", path])
             .run_expecting_success()?;
         Ok(())
     }
@@ -145,7 +147,7 @@ impl GitCommands {
         if paths.is_empty() {
             return Ok(());
         }
-        let mut args = vec!["reset", "HEAD", "--"];
+        let mut args = vec!["--literal-pathspecs", "reset", "HEAD", "--"];
         let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
         args.extend(refs);
         self.git().args(&args).run_expecting_success()?;

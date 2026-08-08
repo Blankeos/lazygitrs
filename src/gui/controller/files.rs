@@ -128,30 +128,37 @@ fn toggle_stage(gui: &mut Gui) -> Result<()> {
             if node.is_dir {
                 let child_indices = node.child_file_indices.clone();
                 let model = gui.model.lock().unwrap();
-                // Check if any child has unstaged changes
-                let any_unstaged = child_indices.iter().any(|&i| {
-                    model
-                        .files
-                        .get(i)
-                        .map_or(false, |f| f.has_unstaged_changes || !f.tracked)
-                });
-                let paths: Vec<String> = child_indices
+                // Only stage children that still need staging. Re-adding already
+                // fully staged paths fails when the path is gone from disk
+                // (e.g. staged deletions). Matches lazygit:
+                // filterNodesHaveUnstagedChanges + StageFiles.
+                let to_stage: Vec<String> = child_indices
                     .iter()
-                    .filter_map(|&i| model.files.get(i))
-                    .flat_map(|f| {
-                        if any_unstaged {
-                            vec![f.git_add_path().to_string()]
-                        } else {
-                            f.git_reset_paths().into_iter().map(String::from).collect()
-                        }
+                    .filter_map(|&i| {
+                        model.files.get(i).and_then(|f| {
+                            if f.has_unstaged_changes || !f.tracked {
+                                Some(f.git_add_path().to_string())
+                            } else {
+                                None
+                            }
+                        })
                     })
                     .collect();
+                let to_unstage: Vec<String> = if to_stage.is_empty() {
+                    child_indices
+                        .iter()
+                        .filter_map(|&i| model.files.get(i))
+                        .flat_map(|f| f.git_reset_paths().into_iter().map(String::from))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 drop(model);
 
-                if any_unstaged {
-                    gui.git.stage_files(&paths)?;
-                } else {
-                    gui.git.unstage_files(&paths)?;
+                if !to_stage.is_empty() {
+                    gui.git.stage_files(&to_stage)?;
+                } else if !to_unstage.is_empty() {
+                    gui.git.unstage_files(&to_unstage)?;
                 }
                 gui.needs_files_refresh = true;
                 return Ok(());
