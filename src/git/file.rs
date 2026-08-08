@@ -6,7 +6,17 @@ use super::GitCommands;
 use crate::model::{File, FileStatus};
 
 impl GitCommands {
+    /// Full load: porcelain status + per-file numstat/hunk counts.
+    /// Prefer [`load_files_status_only`] on the Space-toggle hot path.
     pub fn load_files(&self) -> Result<Vec<File>> {
+        let mut files = self.load_files_status_only()?;
+        self.populate_file_diff_stats(&mut files);
+        Ok(files)
+    }
+
+    /// Fast status-only load (no numstat / hunk-count subprocesses).
+    /// Rapid stage/unstage stays responsive; stats catch up on full refresh.
+    pub fn load_files_status_only(&self) -> Result<Vec<File>> {
         let result = self
             .git()
             .args(&["status", "--porcelain", "-uall"])
@@ -56,8 +66,6 @@ impl GitCommands {
                 deletions: 0,
             });
         }
-
-        self.populate_file_diff_stats(&mut files);
 
         Ok(files)
     }

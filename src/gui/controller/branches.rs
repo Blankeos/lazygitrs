@@ -106,7 +106,14 @@ fn checkout_branch(gui: &mut Gui) -> Result<()> {
         }
         let name = branch.name.clone();
         drop(model);
-        show_checkout_error_or_refresh(gui, &name)?;
+        // Optimistic head flip so the UI reacts immediately.
+        {
+            let mut model = gui.model.lock().unwrap();
+            for (i, b) in model.branches.iter_mut().enumerate() {
+                b.head = i == selected;
+            }
+        }
+        start_async_checkout(gui, name);
     }
     Ok(())
 }
@@ -115,11 +122,18 @@ fn checkout_previous(gui: &mut Gui) -> Result<()> {
     // Resolve @{-1} to an actual ref name before checking out. This is more
     // reliable than `git checkout -`, which can fail when the previous ref is
     // not a local branch or when the reflog entry has become invalid.
-    if let Some(name) = gui.git.previous_branch_name() {
-        show_checkout_error_or_refresh(gui, &name)?;
-    } else {
-        show_checkout_error_or_refresh(gui, "-")?;
+    let name = gui
+        .git
+        .previous_branch_name()
+        .unwrap_or_else(|| "-".to_string());
+    // Optimistic: mark matching local branch as head if we can resolve it.
+    if name != "-" {
+        let mut model = gui.model.lock().unwrap();
+        for b in model.branches.iter_mut() {
+            b.head = b.name == name;
+        }
     }
+    start_async_checkout(gui, name);
     Ok(())
 }
 
@@ -188,14 +202,31 @@ fn checkout_picker(gui: &mut Gui) -> Result<()> {
             scroll_offset: 0,
         },
         on_confirm: Box::new(|gui, ref_name| {
-            show_checkout_error_or_refresh(gui, ref_name)?;
+            // Optimistic head flip for local branches.
+            {
+                let mut model = gui.model.lock().unwrap();
+                for b in model.branches.iter_mut() {
+                    b.head = b.name == ref_name;
+                }
+            }
+            start_async_checkout(gui, ref_name.to_string());
             Ok(())
         }),
     };
     Ok(())
 }
 
+fn start_async_checkout(gui: &mut Gui, name: String) {
+    gui.start_remote_op("Checking out", &format!("Checking out {}", name), move |git| {
+        git.checkout_branch(&name)?;
+        Ok(())
+    });
+}
+
 fn show_checkout_error_or_refresh(gui: &mut Gui, name: &str) -> Result<()> {
+    // Kept for call sites that still need a synchronous checkout (e.g. picker
+    // confirmations that want an immediate error). Prefer start_async_checkout
+    // on interactive hot paths.
     match gui.git.checkout_branch(name) {
         Ok(()) => {
             gui.needs_refresh = true;

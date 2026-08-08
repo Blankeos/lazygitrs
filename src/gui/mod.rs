@@ -542,6 +542,9 @@ pub struct Gui {
     remote_op_rx: mpsc::Receiver<Result<()>>,
     /// Sender cloned into background threads for remote operations.
     remote_op_tx: mpsc::Sender<Result<()>>,
+    /// Async light files refresh (status-only) so Space-spam doesn't freeze.
+    files_refresh_rx: Option<mpsc::Receiver<Result<Vec<crate::model::File>>>>,
+    files_refresh_in_progress: bool,
     /// Receiver for silent auto-fetch results. Kept separate from remote_op
     /// so auto-fetch failures don't show error popups or clobber a
     /// user-initiated push/pull.
@@ -878,6 +881,8 @@ impl Gui {
             ai_commit_source: AiCommitSource::Staged,
             remote_op_rx,
             remote_op_tx,
+            files_refresh_rx: None,
+            files_refresh_in_progress: false,
             auto_fetch_rx,
             auto_fetch_tx,
             last_auto_fetch_at: None,
@@ -1316,18 +1321,16 @@ impl Gui {
             // initial load). Avoids freezing the UI for ~1s on commit/reword.
             if self.needs_refresh && !self.refresh_in_progress && self.initial_load_rx.is_none() {
                 self.start_background_refresh();
-            } else if self.needs_files_refresh && !self.refresh_in_progress {
-                match self.refresh_files_only() {
-                    Ok(()) => {
-                        self.needs_files_refresh = false;
-                        self.needs_diff_refresh = true;
-                    }
-                    Err(err) => {
-                        self.needs_files_refresh = false;
-                        self.show_error("Refresh failed", err);
-                    }
-                }
+            } else if self.needs_files_refresh
+                && !self.refresh_in_progress
+                && !self.files_refresh_in_progress
+            {
+                // Status-only async refresh — Space spam stays responsive.
+                self.start_files_refresh_async();
             }
+
+            // Apply completed light files refresh without blocking input.
+            self.receive_files_refresh();
 
             if self.should_quit {
                 break;
@@ -1956,6 +1959,99 @@ impl Gui {
                         kind: MessageKind::Error,
                     };
                 }
+            }
+        }
+    }
+
+    /// Kick off a status-only files refresh on a background thread.
+    fn start_files_refresh_async(&mut self) {
+        if self.files_refresh_in_progress {
+            return;
+        }
+        self.needs_files_refresh = false;
+        self.files_refresh_in_progress = true;
+        let git = Arc::clone(&self.git);
+        let (tx, rx) = mpsc::channel();
+        self.files_refresh_rx = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(git.refresh_files_status_only());
+        });
+    }
+
+    /// Stage/unstage paths on a background thread, then load status-only and
+    /// apply via the files-refresh channel. Avoids racing a status refresh
+    /// ahead of the git add/reset (which would clobber optimistic UI).
+    pub(crate) fn enqueue_stage_then_refresh(&mut self, paths: Vec<String>, stage: bool) {
+        if paths.is_empty() {
+            return;
+        }
+        // Coalesce: if a light refresh is already in flight, just mark that we
+        // need another after it lands; still run the git op so the index keeps
+        // up with optimistic presses.
+        let git = Arc::clone(&self.git);
+        let should_send_files = !self.files_refresh_in_progress;
+        if should_send_files {
+            self.files_refresh_in_progress = true;
+            let (tx, rx) = mpsc::channel();
+            self.files_refresh_rx = Some(rx);
+            std::thread::spawn(move || {
+                if stage {
+                    let _ = git.stage_files(&paths);
+                } else {
+                    let _ = git.unstage_files(&paths);
+                }
+                let _ = tx.send(git.refresh_files_status_only());
+            });
+        } else {
+            self.needs_files_refresh = true;
+            std::thread::spawn(move || {
+                if stage {
+                    let _ = git.stage_files(&paths);
+                } else {
+                    let _ = git.unstage_files(&paths);
+                }
+            });
+        }
+    }
+
+    /// Apply a completed status-only files refresh.
+    fn receive_files_refresh(&mut self) {
+        let Some(rx) = self.files_refresh_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(files)) => {
+                self.files_refresh_rx = None;
+                self.files_refresh_in_progress = false;
+                {
+                    let mut model = self.model.lock().unwrap();
+                    model.set_files(files);
+                    if self.show_file_tree {
+                        self.file_tree_nodes =
+                            build_file_tree(&model.files, &self.collapsed_dirs);
+                        self.context_mgr.files_list_len_override =
+                            Some(self.file_tree_nodes.len());
+                    } else {
+                        self.file_tree_nodes.clear();
+                        self.context_mgr.files_list_len_override = None;
+                    }
+                }
+                // If more stage ops landed while we were refreshing, do another.
+                if self.needs_files_refresh {
+                    self.start_files_refresh_async();
+                } else {
+                    self.needs_diff_refresh = true;
+                }
+            }
+            Ok(Err(err)) => {
+                self.files_refresh_rx = None;
+                self.files_refresh_in_progress = false;
+                self.show_error("Refresh failed", err);
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.files_refresh_rx = None;
+                self.files_refresh_in_progress = false;
             }
         }
     }
@@ -7396,24 +7492,15 @@ impl Gui {
     }
 
     /// Lightweight refresh that only reloads files and diff stats.
-    /// Use this after staging/unstaging operations where branches, commits,
-    /// tags, etc. haven't changed.
+    /// Prefer the async status-only path after stage/unstage; this full
+    /// variant is kept for callers that need numstat immediately.
     fn refresh_files_only(&mut self) -> Result<()> {
         self.clear_diff_preview_cache();
-        let (files, shortstat) = std::thread::scope(|s| {
-            let h_files = s.spawn(|| self.git.load_files());
-            let h_stat = s.spawn(|| self.git.diff_shortstat());
-            (h_files.join().unwrap(), h_stat.join().unwrap())
-        });
-
+        // Status-only is enough for staging correctness; skip expensive
+        // numstat/hunk subprocesses on this hot path.
+        let files = self.git.load_files_status_only()?;
         let mut model = self.model.lock().unwrap();
-        if let Ok(f) = files {
-            model.set_files(f);
-        }
-        if let Ok((added, deleted)) = shortstat {
-            model.total_additions = added;
-            model.total_deletions = deleted;
-        }
+        model.set_files(files);
 
         if self.show_file_tree {
             self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
@@ -7424,6 +7511,18 @@ impl Gui {
         }
 
         Ok(())
+    }
+
+    /// Rebuild the file tree from the current in-memory model (no git).
+    pub(crate) fn rebuild_file_tree_from_model(&mut self) {
+        let model = self.model.lock().unwrap();
+        if self.show_file_tree {
+            self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
+            self.context_mgr.files_list_len_override = Some(self.file_tree_nodes.len());
+        } else {
+            self.file_tree_nodes.clear();
+            self.context_mgr.files_list_len_override = None;
+        }
     }
 
     /// Resolve the currently selected file index in the files panel.

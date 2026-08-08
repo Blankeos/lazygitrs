@@ -141,7 +141,15 @@ impl Model {
 
         let mut out = Vec::with_capacity(by_name.len() + self.files.len());
         for prev in &self.files {
-            if let Some(f) = by_name.remove(&prev.name) {
+            if let Some(mut f) = by_name.remove(&prev.name) {
+                // Light status-only refreshes leave stats at 0; keep prior
+                // numstat/hunk counts so the tree doesn't flicker until a full
+                // refresh repopulates them.
+                if f.additions == 0 && f.deletions == 0 && f.hunk_count == 0 {
+                    f.additions = prev.additions;
+                    f.deletions = prev.deletions;
+                    f.hunk_count = prev.hunk_count;
+                }
                 out.push(f);
             }
         }

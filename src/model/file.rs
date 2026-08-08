@@ -72,6 +72,65 @@ impl File {
         self.has_staged_changes || self.has_unstaged_changes
     }
 
+    /// Optimistically apply a stage transition in-memory (lazygit-style).
+    /// Returns false when the short status isn't a simple map case.
+    pub fn optimistic_stage(&mut self) -> bool {
+        let next = match self.short_status.as_str() {
+            "??" => "A ",
+            " M" => "M ",
+            "MM" => "M ",
+            " D" => "D ",
+            " A" => "A ",
+            "AM" => "A ",
+            "MD" => "D ",
+            _ => return false,
+        };
+        self.apply_short_status(next);
+        true
+    }
+
+    /// Optimistically apply an unstage transition in-memory (lazygit-style).
+    pub fn optimistic_unstage(&mut self) -> bool {
+        let next = match self.short_status.as_str() {
+            "A " => "??",
+            "M " => " M",
+            "D " => " D",
+            _ => return false,
+        };
+        self.apply_short_status(next);
+        true
+    }
+
+    fn apply_short_status(&mut self, short: &str) {
+        let mut chars = short.chars();
+        let x = chars.next().unwrap_or(' ');
+        let y = chars.next().unwrap_or(' ');
+        self.short_status = format!("{}{}", x, y);
+        let tracked = !(x == '?' && y == '?');
+        let has_staged = x != ' ' && x != '?';
+        let has_unstaged = y != ' ' && y != '?';
+        // Untracked is both unstaged and untracked.
+        let has_unstaged = if !tracked { true } else { has_unstaged };
+        self.tracked = tracked;
+        self.has_staged_changes = has_staged;
+        self.has_unstaged_changes = has_unstaged;
+        self.added = x == 'A' || y == 'A' || !tracked;
+        self.deleted = x == 'D' || y == 'D';
+        self.status = if !tracked {
+            FileStatus::Untracked
+        } else if x == 'A' || y == 'A' {
+            FileStatus::Added
+        } else if x == 'D' || y == 'D' {
+            FileStatus::Deleted
+        } else if x == 'R' {
+            FileStatus::Renamed
+        } else if x == 'C' {
+            FileStatus::Copied
+        } else {
+            FileStatus::Modified
+        };
+    }
+
     /// For renamed files, `name` is stored as "old -> new". This returns
     /// both halves so callers can pass them to git as separate pathspecs.
     pub fn rename_paths(&self) -> Option<(&str, &str)> {

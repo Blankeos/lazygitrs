@@ -121,46 +121,52 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
 }
 
 fn toggle_stage(gui: &mut Gui) -> Result<()> {
-    // If in tree view and a directory is selected, stage/unstage all child files
+    // If in tree view and a directory is selected, stage/unstage all child files.
+    // Optimistic UI + background git so rapid Space presses stay snappy.
     if gui.show_file_tree {
         let selected = gui.context_mgr.selected_active();
         if let Some(node) = gui.file_tree_nodes.get(selected) {
             if node.is_dir {
                 let child_indices = node.child_file_indices.clone();
-                let model = gui.model.lock().unwrap();
+                let mut model = gui.model.lock().unwrap();
                 // Only stage children that still need staging. Re-adding already
                 // fully staged paths fails when the path is gone from disk
                 // (e.g. staged deletions). Matches lazygit:
                 // filterNodesHaveUnstagedChanges + StageFiles.
-                let to_stage: Vec<String> = child_indices
-                    .iter()
-                    .filter_map(|&i| {
-                        model.files.get(i).and_then(|f| {
-                            if f.has_unstaged_changes || !f.tracked {
-                                Some(f.git_add_path().to_string())
-                            } else {
-                                None
-                            }
-                        })
-                    })
-                    .collect();
-                let to_unstage: Vec<String> = if to_stage.is_empty() {
-                    child_indices
-                        .iter()
-                        .filter_map(|&i| model.files.get(i))
-                        .flat_map(|f| f.git_reset_paths().into_iter().map(String::from))
-                        .collect()
-                } else {
-                    Vec::new()
-                };
+                let mut staging = false;
+                for &i in &child_indices {
+                    if let Some(f) = model.files.get(i) {
+                        if f.has_unstaged_changes || !f.tracked {
+                            staging = true;
+                            break;
+                        }
+                    }
+                }
+                let mut to_stage = Vec::new();
+                let mut to_unstage = Vec::new();
+                for &i in &child_indices {
+                    let Some(f) = model.files.get_mut(i) else {
+                        continue;
+                    };
+                    if staging {
+                        if f.has_unstaged_changes || !f.tracked {
+                            to_stage.push(f.git_add_path().to_string());
+                            let _ = f.optimistic_stage();
+                        }
+                    } else {
+                        to_unstage.extend(f.git_reset_paths().into_iter().map(String::from));
+                        let _ = f.optimistic_unstage();
+                    }
+                }
                 drop(model);
+                gui.rebuild_file_tree_from_model();
+                gui.needs_diff_refresh = true;
 
                 if !to_stage.is_empty() {
-                    gui.git.stage_files(&to_stage)?;
+                    gui.enqueue_stage_then_refresh(to_stage, true);
                 } else if !to_unstage.is_empty() {
-                    gui.git.unstage_files(&to_unstage)?;
+                    gui.enqueue_stage_then_refresh(to_unstage, false);
                 }
-                gui.needs_files_refresh = true;
                 return Ok(());
             }
         }
@@ -169,8 +175,8 @@ fn toggle_stage(gui: &mut Gui) -> Result<()> {
     let Some(file_idx) = gui.selected_file_index() else {
         return Ok(());
     };
-    let model = gui.model.lock().unwrap();
-    if let Some(file) = model.files.get(file_idx) {
+    let mut model = gui.model.lock().unwrap();
+    if let Some(file) = model.files.get_mut(file_idx) {
         let add_path = file.git_add_path().to_string();
         let reset_paths: Vec<String> = file
             .git_reset_paths()
@@ -179,14 +185,23 @@ fn toggle_stage(gui: &mut Gui) -> Result<()> {
             .collect();
         let has_staged = file.has_staged_changes;
         let has_unstaged = file.has_unstaged_changes;
-        drop(model);
-
-        if has_unstaged || !has_staged {
-            gui.git.stage_file(&add_path)?;
+        let should_stage = has_unstaged || !has_staged;
+        if should_stage {
+            let _ = file.optimistic_stage();
         } else {
-            gui.git.unstage_files(&reset_paths)?;
+            let _ = file.optimistic_unstage();
         }
-        gui.needs_files_refresh = true;
+        drop(model);
+        gui.rebuild_file_tree_from_model();
+        gui.needs_diff_refresh = true;
+
+        if should_stage {
+            gui.enqueue_stage_then_refresh(vec![add_path], true);
+        } else {
+            gui.enqueue_stage_then_refresh(reset_paths, false);
+        }
+    } else {
+        drop(model);
     }
     Ok(())
 }
