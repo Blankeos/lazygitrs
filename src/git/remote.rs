@@ -107,6 +107,20 @@ impl GitCommands {
         Ok(())
     }
 
+    pub fn rename_remote(&self, old_name: &str, new_name: &str) -> Result<()> {
+        self.git()
+            .args(&["remote", "rename", old_name, new_name])
+            .run_expecting_success()?;
+        Ok(())
+    }
+
+    pub fn update_remote_url(&self, name: &str, url: &str) -> Result<()> {
+        self.git()
+            .args(&["remote", "set-url", name, url])
+            .run_expecting_success()?;
+        Ok(())
+    }
+
     pub fn fetch(&self, remote: &str) -> Result<()> {
         // --no-write-fetch-head: still updates remote-tracking refs, but avoids
         // racing a concurrent `git pull` on .git/FETCH_HEAD (can surface as a

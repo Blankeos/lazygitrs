@@ -326,7 +326,8 @@ impl DiffPreviewCache {
     /// Drop entries whose content can go stale on refresh (working-tree
     /// diffs), keeping hash-keyed commit/stash diffs that never change.
     fn retain_immutable(&mut self) {
-        self.entries.retain(|entry| diff_key_is_immutable(&entry.key));
+        self.entries
+            .retain(|entry| diff_key_is_immutable(&entry.key));
         self.estimated_bytes = self.entries.iter().map(|e| e.estimated_bytes).sum();
     }
 
@@ -467,7 +468,10 @@ struct DiffPrefetchJob {
 /// Every job MUST produce a result: `begin_diff_request` skips spawning an
 /// interactive job when a prefetch for the same key is in flight, and waits
 /// for this result instead.
-fn spawn_diff_prefetch_workers(rx: mpsc::Receiver<DiffPrefetchJob>, result_tx: mpsc::Sender<DiffResult>) {
+fn spawn_diff_prefetch_workers(
+    rx: mpsc::Receiver<DiffPrefetchJob>,
+    result_tx: mpsc::Sender<DiffResult>,
+) {
     let rx = Arc::new(Mutex::new(rx));
     for _ in 0..DIFF_PREFETCH_WORKERS {
         let rx = Arc::clone(&rx);
@@ -508,7 +512,9 @@ fn stash_diff_payload(git: &GitCommands, index: usize) -> DiffPayload {
         Ok(diff) => {
             let filename = format!("stash@{{{}}}", index);
             let exists = git.repo_path().join(&filename).exists();
-            DiffPayload::Parsed(DiffViewState::parse_diff_output(&filename, &diff, 4, exists))
+            DiffPayload::Parsed(DiffViewState::parse_diff_output(
+                &filename, &diff, 4, exists,
+            ))
         }
         Err(_) => DiffPayload::Empty,
     }
@@ -1569,8 +1575,7 @@ impl Gui {
         match payload {
             DiffPayload::Content { filename, old, new } => {
                 self.diff_view.load(&filename, &old, &new);
-                self.diff_view.file_exists_on_disk =
-                    self.git.repo_path().join(&filename).exists();
+                self.diff_view.file_exists_on_disk = self.git.repo_path().join(&filename).exists();
                 self.displayed_diff_key = diff_key;
             }
             DiffPayload::UnifiedDiff {
@@ -1579,8 +1584,7 @@ impl Gui {
             } => {
                 self.diff_view
                     .load_from_diff_output(&filename, &diff_output);
-                self.diff_view.file_exists_on_disk =
-                    self.git.repo_path().join(&filename).exists();
+                self.diff_view.file_exists_on_disk = self.git.repo_path().join(&filename).exists();
                 self.displayed_diff_key = diff_key;
             }
             DiffPayload::Parsed(parsed) => {
@@ -1862,7 +1866,9 @@ impl Gui {
             return;
         }
         self.diff_prefetch_inflight.insert(diff_key.clone());
-        let _ = self.diff_prefetch_tx.send(DiffPrefetchJob { diff_key, load });
+        let _ = self
+            .diff_prefetch_tx
+            .send(DiffPrefetchJob { diff_key, load });
     }
 
     fn clear_diff_preview_cache(&mut self) {
@@ -5508,7 +5514,9 @@ impl Gui {
                 entries: vec![
                     CommandEntry::keybinding("<enter>".into(), "View remote branches".into()),
                     CommandEntry::keybinding("f".into(), "Fetch from remote".into()),
+                    CommandEntry::keybinding("F".into(), "Add fork remote".into()),
                     CommandEntry::keybinding("n".into(), "Add new remote".into()),
+                    CommandEntry::keybinding("e".into(), "Edit remote".into()),
                     CommandEntry::keybinding("d".into(), "Delete remote".into()),
                     CommandEntry::keybinding(kb.universal.push_files.clone(), "Push".into()),
                     CommandEntry::keybinding(kb.universal.pull_files.clone(), "Pull".into()),
@@ -8369,11 +8377,15 @@ mod terminal_mouse_tests {
         assert!(diff_key_is_immutable("Stash:abc123"));
         // Working-tree and ref-relative diffs can go stale on refresh.
         assert!(!diff_key_is_immutable("Files:file:src/main.rs"));
-        assert!(!diff_key_is_immutable("DiffMode:main..dev:file:src/main.rs"));
+        assert!(!diff_key_is_immutable(
+            "DiffMode:main..dev:file:src/main.rs"
+        ));
         // Prefix cousins must not ride along.
         assert!(!diff_key_is_immutable("CommitFiles:abc:file:src/main.rs"));
         assert!(!diff_key_is_immutable("StashFiles:abc:file:src/main.rs"));
-        assert!(!diff_key_is_immutable("BranchCommitFiles:abc:file:src/main.rs"));
+        assert!(!diff_key_is_immutable(
+            "BranchCommitFiles:abc:file:src/main.rs"
+        ));
     }
 
     #[test]

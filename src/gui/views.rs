@@ -2359,6 +2359,7 @@ fn render_status_bar(
                 hints.extend([
                     ("enter", "branches"),
                     ("f", "fetch"),
+                    ("e", "edit"),
                     ("P", "push"),
                     ("p", "pull"),
                 ]);
