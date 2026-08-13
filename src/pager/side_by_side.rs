@@ -1236,6 +1236,18 @@ pub fn render_diff(
         );
     }
 
+    // The previous selection's diff stays on screen while the next one loads;
+    // flag it so a slow load doesn't pass for current content.
+    if diff_loading {
+        block = block.title_bottom(
+            Line::from(Span::styled(
+                " loading… ",
+                Style::default().fg(theme.text_dimmed),
+            ))
+            .alignment(ratatui::layout::Alignment::Right),
+        );
+    }
+
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

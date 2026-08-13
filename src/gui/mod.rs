@@ -159,9 +159,15 @@ fn handle_list_picker_mouse(
 pub type Term = Terminal<CrosstermBackend<Stdout>>;
 const COMMIT_DETAILS_DEBOUNCE: Duration = Duration::from_millis(120);
 const MAX_CONCURRENT_DIFF_JOBS: usize = 2;
-const DIFF_PREVIEW_CACHE_ENTRIES: usize = 8;
+const DIFF_PREVIEW_CACHE_ENTRIES: usize = 24;
 const DIFF_PREVIEW_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_CACHED_DIFF_BYTES: usize = 8 * 1024 * 1024;
+/// How many diffs below/above the selection to warm in the preview cache.
+const DIFF_PREFETCH_AHEAD: usize = 3;
+const DIFF_PREFETCH_BEHIND: usize = 1;
+/// At most this many prefetch loads queued or running at once.
+const DIFF_PREFETCH_INFLIGHT_MAX: usize = 2;
+const DIFF_PREFETCH_WORKERS: usize = 2;
 
 fn plain_char_key(key: KeyEvent, expected: char) -> bool {
     let modifiers = if expected.is_uppercase() {
@@ -235,6 +241,9 @@ pub(crate) struct DiffResult {
     pub diff_key: String,
     /// The computed diff data: (filename, old_content, new_content) or None for empty.
     pub payload: DiffPayload,
+    /// True for speculative neighbor loads: applied if the user is already
+    /// waiting on this key, cached for later otherwise. Never generation-gated.
+    pub is_prefetch: bool,
 }
 
 pub(crate) enum DiffPayload {
@@ -308,6 +317,17 @@ impl DiffPreviewCache {
         let entry = self.entries.remove(index)?;
         self.estimated_bytes = self.estimated_bytes.saturating_sub(entry.estimated_bytes);
         Some(entry.view)
+    }
+
+    fn contains(&self, key: &str) -> bool {
+        self.entries.iter().any(|entry| entry.key == key)
+    }
+
+    /// Drop entries whose content can go stale on refresh (working-tree
+    /// diffs), keeping hash-keyed commit/stash diffs that never change.
+    fn retain_immutable(&mut self) {
+        self.entries.retain(|entry| diff_key_is_immutable(&entry.key));
+        self.estimated_bytes = self.entries.iter().map(|e| e.estimated_bytes).sum();
     }
 
     fn remove(&mut self, key: &str) {
@@ -420,11 +440,78 @@ fn spawn_diff_job(
                     generation: job.generation,
                     diff_key: job.diff_key,
                     payload,
+                    is_prefetch: false,
                 });
             }
         }
         let _ = scheduler_tx.send(DiffSchedulerEvent::Complete);
     });
+}
+
+/// Diff keys derived from a commit or stash hash: the content can never
+/// change, so caches keyed this way survive refreshes and never need a
+/// same-key reload.
+fn diff_key_is_immutable(key: &str) -> bool {
+    key.starts_with("Commits:")
+        || key.starts_with("Reflog:")
+        || key.starts_with("BranchCommits:")
+        || key.starts_with("Stash:")
+}
+
+struct DiffPrefetchJob {
+    diff_key: String,
+    load: Box<dyn FnOnce() -> DiffPayload + Send>,
+}
+
+/// Low-priority lane that warms the preview cache with neighbor diffs.
+/// Every job MUST produce a result: `begin_diff_request` skips spawning an
+/// interactive job when a prefetch for the same key is in flight, and waits
+/// for this result instead.
+fn spawn_diff_prefetch_workers(rx: mpsc::Receiver<DiffPrefetchJob>, result_tx: mpsc::Sender<DiffResult>) {
+    let rx = Arc::new(Mutex::new(rx));
+    for _ in 0..DIFF_PREFETCH_WORKERS {
+        let rx = Arc::clone(&rx);
+        let result_tx = result_tx.clone();
+        std::thread::spawn(move || {
+            loop {
+                let job = match rx.lock() {
+                    Ok(guard) => guard.recv(),
+                    Err(_) => return,
+                };
+                let Ok(job) = job else { return };
+                let payload = (job.load)();
+                let _ = result_tx.send(DiffResult {
+                    generation: 0,
+                    diff_key: job.diff_key,
+                    payload,
+                    is_prefetch: true,
+                });
+            }
+        });
+    }
+}
+
+/// Load + parse one commit's diff — shared by interactive loads and prefetch
+/// so both produce byte-identical payloads for the same key.
+fn commit_diff_payload(git: &GitCommands, hash: &str, label_prefix: &str) -> DiffPayload {
+    if let Ok(diff) = git.diff_commit(hash) {
+        let filename = format!("{}:{}", label_prefix, &hash[..7.min(hash.len())]);
+        DiffPayload::Parsed(DiffViewState::parse_diff_output(&filename, &diff, 4, false))
+    } else {
+        DiffPayload::Empty
+    }
+}
+
+fn stash_diff_payload(git: &GitCommands, index: usize) -> DiffPayload {
+    match git.stash_diff(index) {
+        Ok(diff) if diff.is_empty() => DiffPayload::Empty,
+        Ok(diff) => {
+            let filename = format!("stash@{{{}}}", index);
+            let exists = git.repo_path().join(&filename).exists();
+            DiffPayload::Parsed(DiffViewState::parse_diff_output(&filename, &diff, 4, exists))
+        }
+        Err(_) => DiffPayload::Empty,
+    }
 }
 
 fn spawn_latest_background_worker(rx: mpsc::Receiver<BackgroundJob>) {
@@ -518,6 +605,16 @@ pub struct Gui {
     diff_scheduler_tx: mpsc::Sender<DiffSchedulerEvent>,
     /// Recently completed parsed previews, moved in and out for instant revisits.
     diff_preview_cache: DiffPreviewCache,
+    /// The diff key whose content `diff_view` currently shows. Stays on the
+    /// outgoing key while a newer selection loads (stale content is kept
+    /// visible instead of blanking the pane), and is how the outgoing view
+    /// finds its slot in the preview cache when the replacement arrives.
+    displayed_diff_key: String,
+    /// Sender for the speculative neighbor-diff lane.
+    diff_prefetch_tx: mpsc::Sender<DiffPrefetchJob>,
+    /// Keys with a prefetch queued or running. An interactive request for one
+    /// of these waits for the prefetch result instead of duplicating the work.
+    diff_prefetch_inflight: HashSet<String>,
     /// Receiver for AI commit message generation results.
     ai_commit_rx: mpsc::Receiver<AiCommitResult>,
     /// Sender cloned into background threads for AI commit generation.
@@ -772,6 +869,7 @@ impl Gui {
     pub fn new(config: AppConfig, git: GitCommands) -> Result<Self> {
         let (diff_tx, diff_rx) = mpsc::channel();
         let (diff_scheduler_tx, diff_scheduler_rx) = mpsc::channel();
+        let (diff_prefetch_tx, diff_prefetch_rx) = mpsc::channel();
         let (commit_details_job_tx, commit_details_job_rx) = mpsc::channel();
         let (ai_commit_tx, ai_commit_rx) = mpsc::channel();
         let (commit_page_tx, commit_page_rx) = mpsc::channel();
@@ -809,7 +907,11 @@ impl Gui {
             diff_tx.clone(),
             Arc::clone(&diff_generation),
         );
+        spawn_diff_prefetch_workers(diff_prefetch_rx, diff_tx.clone());
         spawn_latest_background_worker(commit_details_job_rx);
+        // Compile tree-sitter highlight queries off the critical path so the
+        // first diff shown doesn't pay the ~40-60ms lazy-init cost.
+        std::thread::spawn(crate::pager::highlight::warm_configs);
         let mut model = Model::default();
         model.repo_name = git.repo_name();
         model.head_hash = git.head_hash().unwrap_or_default();
@@ -869,6 +971,9 @@ impl Gui {
             diff_rx,
             diff_scheduler_tx,
             diff_preview_cache: DiffPreviewCache::default(),
+            displayed_diff_key: String::new(),
+            diff_prefetch_tx,
+            diff_prefetch_inflight: HashSet::new(),
             ai_commit_rx,
             ai_commit_tx,
             commit_page_rx,
@@ -961,6 +1066,7 @@ impl Gui {
             if let Some(rx) = &self.initial_load_rx {
                 let mut got_files = false;
                 let mut got_rebase_in_progress = false;
+                let received_before = self.initial_load_received;
                 while let Ok(part) = rx.try_recv() {
                     let mut model = self.model.lock().unwrap();
                     match part {
@@ -1031,8 +1137,12 @@ impl Gui {
                     self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
                     self.context_mgr.files_list_len_override = Some(self.file_tree_nodes.len());
                 }
-                // Trigger a diff load once any data arrives.
-                if self.initial_load_received > 0 {
+                // Trigger a diff reload when new data arrived THIS frame.
+                // (A cumulative `> 0` check here re-requested the same diff
+                // every frame for the whole stream, and each request's
+                // generation bump invalidated the in-flight result — diffs
+                // only settled once streaming finished.)
+                if self.initial_load_received > received_before {
                     self.needs_diff_refresh = true;
                 }
                 // All parts received — done loading.
@@ -1058,6 +1168,9 @@ impl Gui {
 
             // Check for completed background diff results
             self.receive_diff_results();
+
+            // Warm the preview cache with neighbor diffs while idle
+            self.maybe_prefetch_diffs();
 
             // Queue details for only the commit where navigation has settled.
             self.maybe_request_commit_details();
@@ -1416,33 +1529,67 @@ impl Gui {
         // Drain all available results, keeping only the latest valid one
         let current_gen = self.diff_generation.load(Ordering::Relaxed);
         while let Ok(result) = self.diff_rx.try_recv() {
+            if result.is_prefetch {
+                self.diff_prefetch_inflight.remove(&result.diff_key);
+                if result.diff_key == self.last_diff_key && self.diff_loading {
+                    // The user navigated onto this key while the prefetch was
+                    // in flight and is waiting on it — apply it directly.
+                    self.apply_diff_payload(result.diff_key, result.payload);
+                } else if result.diff_key != self.last_diff_key
+                    && result.diff_key != self.displayed_diff_key
+                {
+                    if let DiffPayload::Parsed(parsed) = result.payload {
+                        let mut view = DiffViewState::new();
+                        view.wrap = self.diff_view.wrap;
+                        view.view_layout = self.diff_view.view_layout;
+                        view.apply_parsed(parsed);
+                        self.diff_preview_cache.insert(result.diff_key, view);
+                    }
+                }
+                continue;
+            }
             // Discard stale results from older generations
             if result.generation != current_gen || result.diff_key != self.last_diff_key {
                 continue;
             }
-            self.diff_loading = false;
-            self.diff_loading_since = None;
-            match result.payload {
-                DiffPayload::Content { filename, old, new } => {
-                    self.diff_view.load(&filename, &old, &new);
-                    self.diff_view.file_exists_on_disk =
-                        self.git.repo_path().join(&filename).exists();
-                }
-                DiffPayload::UnifiedDiff {
-                    filename,
-                    diff_output,
-                } => {
-                    self.diff_view
-                        .load_from_diff_output(&filename, &diff_output);
-                    self.diff_view.file_exists_on_disk =
-                        self.git.repo_path().join(&filename).exists();
-                }
-                DiffPayload::Parsed(parsed) => {
-                    self.diff_view.apply_parsed(parsed);
-                }
-                DiffPayload::Empty => {
-                    self.diff_view.reset_keep_prefs();
-                }
+            self.apply_diff_payload(result.diff_key, result.payload);
+        }
+    }
+
+    /// Swap a completed diff into the view, stashing the outgoing one for
+    /// instant revisits.
+    fn apply_diff_payload(&mut self, diff_key: String, payload: DiffPayload) {
+        self.diff_loading = false;
+        self.diff_loading_since = None;
+        if self.displayed_diff_key != diff_key {
+            // The view still shows the previous selection — cache it before
+            // overwriting. This also resets scroll/search for the new content.
+            self.stash_displayed_diff();
+        }
+        match payload {
+            DiffPayload::Content { filename, old, new } => {
+                self.diff_view.load(&filename, &old, &new);
+                self.diff_view.file_exists_on_disk =
+                    self.git.repo_path().join(&filename).exists();
+                self.displayed_diff_key = diff_key;
+            }
+            DiffPayload::UnifiedDiff {
+                filename,
+                diff_output,
+            } => {
+                self.diff_view
+                    .load_from_diff_output(&filename, &diff_output);
+                self.diff_view.file_exists_on_disk =
+                    self.git.repo_path().join(&filename).exists();
+                self.displayed_diff_key = diff_key;
+            }
+            DiffPayload::Parsed(parsed) => {
+                self.diff_view.apply_parsed(parsed);
+                self.displayed_diff_key = diff_key;
+            }
+            DiffPayload::Empty => {
+                self.diff_view.reset_keep_prefs();
+                self.displayed_diff_key.clear();
             }
         }
     }
@@ -1546,9 +1693,21 @@ impl Gui {
         }
 
         let selection_changed = diff_key != self.last_diff_key;
-        if selection_changed {
-            self.cache_current_diff_for_revisit();
+
+        // Same-key refresh of a hash-keyed diff: the content cannot have
+        // changed, so skip the reload when it's already on screen — and when
+        // it's already loading, let the in-flight job finish instead of
+        // bumping the generation (which would invalidate its result and
+        // restart the race on every refresh tick).
+        if !selection_changed
+            && diff_key_is_immutable(&diff_key)
+            && (self.diff_loading
+                || (self.displayed_diff_key == diff_key && !self.diff_view.is_empty()))
+        {
+            self.needs_diff_refresh = false;
+            return None;
         }
+
         self.last_diff_key = diff_key.clone();
         self.needs_diff_refresh = false;
 
@@ -1557,12 +1716,22 @@ impl Gui {
             if let Some(mut cached) = self.diff_preview_cache.take(&diff_key) {
                 cached.wrap = self.diff_view.wrap;
                 cached.view_layout = self.diff_view.view_layout;
+                self.stash_displayed_diff();
                 self.diff_view = cached;
+                self.displayed_diff_key = diff_key;
                 self.diff_loading = false;
                 self.diff_loading_since = None;
                 return None;
             }
-            self.diff_view.reset_keep_prefs();
+            // A prefetch for this key is already in flight — wait for its
+            // result instead of spawning a duplicate load.
+            if self.diff_prefetch_inflight.contains(&diff_key) {
+                self.diff_loading = true;
+                self.diff_loading_since = Some(Instant::now());
+                return None;
+            }
+            // Cache miss: keep the outgoing diff on screen while the new one
+            // loads. It moves into the revisit cache when the result arrives.
         }
 
         self.diff_loading = false;
@@ -1570,8 +1739,11 @@ impl Gui {
         Some(generation)
     }
 
-    fn cache_current_diff_for_revisit(&mut self) {
-        if self.diff_loading || self.diff_view.is_empty() || self.last_diff_key.is_empty() {
+    /// Move the currently displayed diff into the revisit cache, leaving a
+    /// fresh view (prefs preserved) in its place.
+    fn stash_displayed_diff(&mut self) {
+        if self.diff_view.is_empty() || self.displayed_diff_key.is_empty() {
+            self.displayed_diff_key.clear();
             return;
         }
 
@@ -1580,7 +1752,117 @@ impl Gui {
         replacement.view_layout = self.diff_view.view_layout;
         let view = std::mem::replace(&mut self.diff_view, replacement);
         self.diff_preview_cache
-            .insert(self.last_diff_key.clone(), view);
+            .insert(std::mem::take(&mut self.displayed_diff_key), view);
+    }
+
+    /// Blank the diff pane (nothing selected / context without a diff),
+    /// preserving the outgoing view for instant revisits.
+    pub(crate) fn clear_diff_view(&mut self) {
+        self.stash_displayed_diff();
+        self.diff_view.reset_keep_prefs();
+    }
+
+    /// Speculatively warm the preview cache with diffs the user is likely to
+    /// view next: neighbors of the selection in commit-like panels, and the
+    /// Commits selection while another panel is focused (so switching to
+    /// Commits shows its diff instantly). Commit/stash diffs are immutable,
+    /// so warmed entries never go stale.
+    fn maybe_prefetch_diffs(&mut self) {
+        if self.diff_mode.active || self.rebase_mode.active || self.patch_building.active {
+            return;
+        }
+        if self.diff_prefetch_inflight.len() >= DIFF_PREFETCH_INFLIGHT_MAX {
+            return;
+        }
+
+        let active = self.context_mgr.active();
+        match active {
+            ContextId::Commits
+            | ContextId::Reflog
+            | ContextId::BranchCommits
+            | ContextId::Stash => {
+                let selected = self.context_mgr.selected_active();
+                for step in 1..=DIFF_PREFETCH_AHEAD {
+                    self.maybe_prefetch_one(active, selected + step);
+                }
+                for step in 1..=DIFF_PREFETCH_BEHIND {
+                    let Some(index) = selected.checked_sub(step) else {
+                        break;
+                    };
+                    self.maybe_prefetch_one(active, index);
+                }
+            }
+            _ => {
+                self.maybe_prefetch_one(
+                    ContextId::Commits,
+                    self.context_mgr.selected(ContextId::Commits),
+                );
+            }
+        }
+    }
+
+    fn maybe_prefetch_one(&mut self, context: ContextId, index: usize) {
+        if self.diff_prefetch_inflight.len() >= DIFF_PREFETCH_INFLIGHT_MAX {
+            return;
+        }
+        let (diff_key, load): (String, Box<dyn FnOnce() -> DiffPayload + Send>) = {
+            let model = self.model.lock().unwrap();
+            let git = Arc::clone(&self.git);
+            match context {
+                ContextId::Commits => {
+                    let Some(commit) = model.commits.get(index) else {
+                        return;
+                    };
+                    let hash = commit.hash.clone();
+                    let key = format!("Commits:{}", hash);
+                    (
+                        key,
+                        Box::new(move || commit_diff_payload(&git, &hash, "commit")),
+                    )
+                }
+                ContextId::BranchCommits => {
+                    let Some(commit) = model.sub_commits.get(index) else {
+                        return;
+                    };
+                    let hash = commit.hash.clone();
+                    let key = format!("BranchCommits:{}", hash);
+                    (
+                        key,
+                        Box::new(move || commit_diff_payload(&git, &hash, "commit")),
+                    )
+                }
+                ContextId::Reflog => {
+                    let Some(commit) = model.reflog_commits.get(index) else {
+                        return;
+                    };
+                    let hash = commit.hash.clone();
+                    let key = format!("Reflog:{}", hash);
+                    (
+                        key,
+                        Box::new(move || commit_diff_payload(&git, &hash, "reflog")),
+                    )
+                }
+                ContextId::Stash => {
+                    let Some(entry) = model.stash_entries.get(index) else {
+                        return;
+                    };
+                    let key = format!("Stash:{}", entry.hash);
+                    let stash_index = entry.index;
+                    (key, Box::new(move || stash_diff_payload(&git, stash_index)))
+                }
+                _ => return,
+            }
+        };
+
+        if diff_key == self.last_diff_key
+            || diff_key == self.displayed_diff_key
+            || self.diff_prefetch_inflight.contains(&diff_key)
+            || self.diff_preview_cache.contains(&diff_key)
+        {
+            return;
+        }
+        self.diff_prefetch_inflight.insert(diff_key.clone());
+        let _ = self.diff_prefetch_tx.send(DiffPrefetchJob { diff_key, load });
     }
 
     fn clear_diff_preview_cache(&mut self) {
@@ -2523,15 +2805,15 @@ impl Gui {
                             });
                         } else {
                             drop(model);
-                            self.diff_view.reset_keep_prefs();
+                            self.clear_diff_view();
                         }
                     } else {
                         drop(model);
-                        self.diff_view.reset_keep_prefs();
+                        self.clear_diff_view();
                     }
                 } else {
                     drop(model);
-                    self.diff_view.reset_keep_prefs();
+                    self.clear_diff_view();
                 }
             }
             ContextId::Commits => {
@@ -2545,15 +2827,11 @@ impl Gui {
                     self.diff_loading = true;
                     self.diff_loading_since = Some(Instant::now());
                     self.queue_diff_job(generation, diff_key, move || {
-                        if let Ok(diff) = git.diff_commit(&hash) {
-                            let filename = format!("commit:{}", &hash[..7.min(hash.len())]);
-                            DiffPayload::Parsed(DiffViewState::parse_diff_output(
-                                &filename, &diff, 4, false,
-                            ))
-                        } else {
-                            DiffPayload::Empty
-                        }
+                        commit_diff_payload(&git, &hash, "commit")
                     });
+                } else {
+                    drop(model);
+                    self.clear_diff_view();
                 }
             }
             ContextId::Reflog => {
@@ -2567,15 +2845,11 @@ impl Gui {
                     self.diff_loading = true;
                     self.diff_loading_since = Some(Instant::now());
                     self.queue_diff_job(generation, diff_key, move || {
-                        if let Ok(diff) = git.diff_commit(&hash) {
-                            let filename = format!("reflog:{}", &hash[..7.min(hash.len())]);
-                            DiffPayload::Parsed(DiffViewState::parse_diff_output(
-                                &filename, &diff, 4, false,
-                            ))
-                        } else {
-                            DiffPayload::Empty
-                        }
+                        commit_diff_payload(&git, &hash, "reflog")
                     });
+                } else {
+                    drop(model);
+                    self.clear_diff_view();
                 }
             }
             ContextId::Stash => {
@@ -2589,22 +2863,11 @@ impl Gui {
                     self.diff_loading = true;
                     self.diff_loading_since = Some(Instant::now());
                     self.queue_diff_job(generation, diff_key, move || {
-                        if let Ok(diff) = git.stash_diff(index) {
-                            if diff.is_empty() {
-                                DiffPayload::Empty
-                            } else {
-                                let filename = format!("stash@{{{}}}", index);
-                                let exists = git.repo_path().join(&filename).exists();
-                                DiffPayload::Parsed(DiffViewState::parse_diff_output(
-                                    &filename, &diff, 4, exists,
-                                ))
-                            }
-                        } else {
-                            DiffPayload::Empty
-                        }
+                        stash_diff_payload(&git, index)
                     });
                 } else {
                     drop(model);
+                    self.clear_diff_view();
                 }
             }
             ContextId::BranchCommits => {
@@ -2618,17 +2881,11 @@ impl Gui {
                     self.diff_loading = true;
                     self.diff_loading_since = Some(Instant::now());
                     self.queue_diff_job(generation, diff_key, move || {
-                        if let Ok(diff) = git.diff_commit(&hash) {
-                            let filename = format!("commit:{}", &hash[..7.min(hash.len())]);
-                            DiffPayload::Parsed(DiffViewState::parse_diff_output(
-                                &filename, &diff, 4, false,
-                            ))
-                        } else {
-                            DiffPayload::Empty
-                        }
+                        commit_diff_payload(&git, &hash, "commit")
                     });
                 } else {
                     drop(model);
+                    self.clear_diff_view();
                 }
             }
             ContextId::CommitFiles | ContextId::StashFiles | ContextId::BranchCommitFiles => {
@@ -2705,20 +2962,21 @@ impl Gui {
                             });
                         } else {
                             drop(model);
-                            self.diff_view.reset_keep_prefs();
+                            self.clear_diff_view();
                         }
                     } else {
                         drop(model);
-                        self.diff_view.reset_keep_prefs();
+                        self.clear_diff_view();
                     }
                 } else {
                     // No file selected — clear diff
                     drop(model);
-                    self.diff_view.reset_keep_prefs();
+                    self.clear_diff_view();
                 }
             }
             _ => {
                 drop(model);
+                self.clear_diff_view();
             }
         }
     }
@@ -3010,7 +3268,7 @@ impl Gui {
         // Diff/Compare mode (W)
         if key.code == KeyCode::Char('W') {
             self.diff_mode.enter(self.show_file_tree);
-            self.diff_view.reset_keep_prefs();
+            self.clear_diff_view();
             return Ok(());
         }
 
@@ -5681,6 +5939,7 @@ impl Gui {
                         gui.needs_refresh = false;
                         gui.needs_diff_refresh = true;
                         gui.context_mgr = context::ContextManager::new();
+                        gui.displayed_diff_key.clear();
                         gui.diff_view.reset_keep_prefs();
                         if gui.show_file_tree {
                             gui.update_file_tree_state();
@@ -7376,7 +7635,7 @@ impl Gui {
         self.refresh_in_progress = true;
         self.needs_refresh = false;
         self.reset_commit_pagination();
-        self.clear_diff_preview_cache();
+        self.diff_preview_cache.retain_immutable();
         let git = Arc::clone(&self.git);
         std::thread::spawn(move || {
             git.load_model_streaming(&tx);
@@ -7385,7 +7644,7 @@ impl Gui {
 
     fn refresh(&mut self) -> Result<()> {
         self.reset_commit_pagination();
-        self.clear_diff_preview_cache();
+        self.diff_preview_cache.retain_immutable();
         let new_model = self.git.load_model()?;
         {
             let mut model = self.model.lock().unwrap();
@@ -7521,7 +7780,7 @@ impl Gui {
     /// Prefer the async status-only path after stage/unstage; this full
     /// variant is kept for callers that need numstat immediately.
     fn refresh_files_only(&mut self) -> Result<()> {
-        self.clear_diff_preview_cache();
+        self.diff_preview_cache.retain_immutable();
         // Status-only is enough for staging correctness; skip expensive
         // numstat/hunk subprocesses on this hot path.
         let files = self.git.load_files_status_only()?;
@@ -8100,6 +8359,75 @@ mod terminal_mouse_tests {
             restored.map(|view| view.filename),
             Some(format!("file-{DIFF_PREVIEW_CACHE_ENTRIES}"))
         );
+    }
+
+    #[test]
+    fn immutable_diff_keys_are_hash_scoped_only() {
+        assert!(diff_key_is_immutable("Commits:abc123"));
+        assert!(diff_key_is_immutable("Reflog:abc123"));
+        assert!(diff_key_is_immutable("BranchCommits:abc123"));
+        assert!(diff_key_is_immutable("Stash:abc123"));
+        // Working-tree and ref-relative diffs can go stale on refresh.
+        assert!(!diff_key_is_immutable("Files:file:src/main.rs"));
+        assert!(!diff_key_is_immutable("DiffMode:main..dev:file:src/main.rs"));
+        // Prefix cousins must not ride along.
+        assert!(!diff_key_is_immutable("CommitFiles:abc:file:src/main.rs"));
+        assert!(!diff_key_is_immutable("StashFiles:abc:file:src/main.rs"));
+        assert!(!diff_key_is_immutable("BranchCommitFiles:abc:file:src/main.rs"));
+    }
+
+    #[test]
+    fn retain_immutable_keeps_commit_diffs_and_recomputes_bytes() {
+        let mut cache = DiffPreviewCache::default();
+        for key in ["Commits:abc", "Files:file:a.rs", "Stash:def"] {
+            let mut view = DiffViewState::new();
+            view.filename = key.to_string();
+            view.lines.push(crate::pager::DiffLine {
+                old_line: Some((1, "old".to_string())),
+                new_line: Some((1, "new".to_string())),
+                change_type: crate::pager::ChangeType::Modified,
+                old_segments: None,
+                new_segments: None,
+                file_header: None,
+                section_index: 0,
+            });
+            cache.insert(key.to_string(), view);
+        }
+
+        cache.retain_immutable();
+
+        assert!(cache.contains("Commits:abc"));
+        assert!(cache.contains("Stash:def"));
+        assert!(!cache.contains("Files:file:a.rs"));
+        let expected: usize = cache.entries.iter().map(|e| e.estimated_bytes).sum();
+        assert_eq!(cache.estimated_bytes, expected);
+    }
+
+    #[test]
+    fn prefetch_workers_always_deliver_a_result() {
+        // begin_diff_request skips spawning an interactive job while a
+        // prefetch for the key is in flight, so a lost result would leave the
+        // pane loading forever.
+        let (job_tx, job_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        spawn_diff_prefetch_workers(job_rx, result_tx);
+
+        for index in 0..8 {
+            job_tx
+                .send(DiffPrefetchJob {
+                    diff_key: format!("Commits:{index}"),
+                    load: Box::new(|| DiffPayload::Empty),
+                })
+                .unwrap();
+        }
+
+        let mut keys = HashSet::new();
+        for _ in 0..8 {
+            let result = result_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert!(result.is_prefetch);
+            keys.insert(result.diff_key);
+        }
+        assert_eq!(keys.len(), 8);
     }
 }
 
