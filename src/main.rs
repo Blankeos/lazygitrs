@@ -5,16 +5,20 @@ mod gui;
 mod model;
 mod os;
 mod pager;
+mod upgrade;
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 const LOGO: &str = include_str!("../logo.txt");
 
 #[derive(Parser)]
 #[command(name = "lazygitrs", version, about = "A fast and ergonomic terminal UI for git", before_help = LOGO)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     /// Path to the git repository
     #[arg(short, long)]
     path: Option<PathBuf>,
@@ -30,6 +34,15 @@ struct Cli {
     /// Enable debug logging
     #[arg(short, long)]
     debug: bool,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Upgrade lazygitrs to the latest (or a specific) version
+    Upgrade {
+        /// Target version (e.g. `0.0.32`) or `latest`
+        target: Option<String>,
+    },
 }
 
 /// Restore the terminal on panic so the user isn't left in raw mode + mouse
@@ -54,6 +67,14 @@ fn install_panic_hook() {
 fn main() {
     install_panic_hook();
     let cli = Cli::parse();
+
+    if let Some(Commands::Upgrade { target }) = cli.command {
+        if let Err(e) = upgrade::upgrade(target.as_deref()) {
+            eprintln!("Error: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     // Set up logging if debug mode
     if cli.debug {

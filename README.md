@@ -33,6 +33,15 @@ Then run:
 lazygitrs
 ```
 
+### Upgrade
+
+Detects how you installed (brew / npm / bun / cargo / install.sh) and upgrades in place:
+
+```sh
+lazygitrs upgrade          # latest
+lazygitrs upgrade 0.0.32   # specific version
+```
+
 ### What's different
 
 - [x] **AI commit messages** — works with whatever agent you already use (claude, opencode, codex, or my minimal shim [modelcli](https://github.com/blankeos/modelcli)). Set `git.commit.generateCommand` (see [Configuration](#configuration)):
