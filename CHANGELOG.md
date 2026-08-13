@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.32] - 2026-08-13
+
+### Features
+
+- Add remote edit and fork-remote workflows by @Blankeos
+- Add lazygitrs self-upgrade command by @Blankeos
+
+### Performance
+
+- Make commit diff navigation instant with prefetch and churn fix (#24) by @joshxfi in [#24](https://github.com/Blankeos/lazygitrs/pull/24)
+
+
+### New Contributors
+
+- @joshxfi made their first contribution in [#24](https://github.com/Blankeos/lazygitrs/pull/24)
 ## [0.0.31] - 2026-08-13
 
 ### Bug Fixes
