@@ -495,6 +495,45 @@ mod tests {
         assert_eq!(git.repo_name(), "main-repo");
     }
 
+    #[test]
+    fn load_files_is_fast_on_unborn_repo_with_many_untracked() {
+        let temp = TempDir::new("many-untracked");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        assert_success(Command::new("git").arg("init").arg(&repo).status());
+
+        // node_modules-style tree: many untracked files, no commits yet.
+        let nm = repo.join("node_modules").join("pkg");
+        std::fs::create_dir_all(&nm).expect("mkdir nm");
+        for i in 0..500 {
+            std::fs::write(
+                nm.join(format!("f{i}.js")),
+                format!("console.log({i});\n").repeat(20),
+            )
+            .expect("write");
+        }
+        std::fs::write(repo.join("README.md"), "hi\n").expect("write readme");
+
+        let git = GitCommands::new(&repo).expect("git");
+        let start = std::time::Instant::now();
+        let files = git.load_files().expect("load_files");
+        let elapsed = start.elapsed();
+
+        assert!(
+            files.len() >= 501,
+            "expected all untracked files, got {}",
+            files.len()
+        );
+        assert!(
+            files.iter().all(|f| !f.tracked && f.additions == 0),
+            "untracked files should not pay for line counts (lazygit parity)"
+        );
+        assert!(
+            elapsed.as_secs() < 5,
+            "load_files too slow on large untracked tree: {elapsed:?}"
+        );
+    }
+
     fn assert_success(status: std::io::Result<std::process::ExitStatus>) {
         assert!(status.expect("run git command").success());
     }

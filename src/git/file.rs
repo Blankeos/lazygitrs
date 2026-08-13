@@ -107,18 +107,19 @@ impl GitCommands {
             .map(|result| parse_hunk_counts(&result.stdout))
             .unwrap_or_default();
 
+        // Match lazygit: only attach numstat/hunk counts for tracked paths.
+        // Reading every untracked file (e.g. a full node_modules tree) makes
+        // load_files hang for tens of seconds on large untracked worktrees.
         for file in files {
-            let path = file.current_path().to_string();
-            if file.tracked {
-                if let Some(&(additions, deletions)) = line_stats.get(&path) {
-                    file.additions = additions;
-                    file.deletions = deletions;
-                }
-                file.hunk_count = hunk_counts.get(&path).copied().unwrap_or(0);
-            } else if let Ok(content) = std::fs::read_to_string(self.repo_path().join(&path)) {
-                file.additions = content.lines().count();
-                file.hunk_count = usize::from(file.additions > 0);
+            if !file.tracked {
+                continue;
             }
+            let path = file.current_path().to_string();
+            if let Some(&(additions, deletions)) = line_stats.get(&path) {
+                file.additions = additions;
+                file.deletions = deletions;
+            }
+            file.hunk_count = hunk_counts.get(&path).copied().unwrap_or(0);
         }
     }
 

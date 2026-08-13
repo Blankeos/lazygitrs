@@ -178,11 +178,25 @@ impl GitCommands {
         }
     }
 
-    /// Get total insertions/deletions across all working tree changes,
-    /// including untracked files (counted as all additions).
-    /// Uses `git diff HEAD` to get the combined staged+unstaged delta from HEAD.
+    /// Get total insertions/deletions across tracked working tree changes.
+    /// Uses `git diff HEAD` for the combined staged+unstaged delta from HEAD.
+    /// Untracked files are omitted (matching lazygit) — reading every untracked
+    /// path is prohibitively slow on large trees like node_modules.
     pub fn diff_shortstat(&self) -> Result<(usize, usize)> {
-        let result = self.git().args(&["diff", "HEAD", "--shortstat"]).run()?;
+        // Unborn HEAD (no commits yet): fall back to index vs empty tree / worktree.
+        let result = if self
+            .git()
+            .args(&["rev-parse", "--verify", "HEAD"])
+            .run()
+            .is_ok_and(|r| r.success)
+        {
+            self.git().args(&["diff", "HEAD", "--shortstat"]).run()?
+        } else {
+            // No HEAD: only staged changes have a meaningful shortstat.
+            self.git()
+                .args(&["diff", "--cached", "--shortstat"])
+                .run()?
+        };
 
         fn parse_stat(s: &str) -> (usize, usize) {
             let mut added = 0usize;
@@ -203,34 +217,7 @@ impl GitCommands {
             (added, deleted)
         }
 
-        let (added, deleted) = parse_stat(&result.stdout);
-
-        // Count lines in untracked files (git diff ignores these)
-        let untracked_lines = self.count_untracked_lines().unwrap_or(0);
-
-        Ok((added + untracked_lines, deleted))
-    }
-
-    /// Count total lines across all untracked files.
-    fn count_untracked_lines(&self) -> Result<usize> {
-        let result = self
-            .git()
-            .args(&["ls-files", "--others", "--exclude-standard"])
-            .run()?;
-
-        let mut total = 0;
-        for file in result.stdout.lines() {
-            if file.is_empty() {
-                continue;
-            }
-            let path = self.repo_path().join(file);
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                total += content.lines().count();
-            }
-            // Skip binary files that fail read_to_string
-        }
-
-        Ok(total)
+        Ok(parse_stat(&result.stdout))
     }
 
     /// Get the list of files changed in a commit with their change status.
