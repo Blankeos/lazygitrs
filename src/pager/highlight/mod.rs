@@ -40,6 +40,13 @@ fn get_config_for_file(filename: &str) -> Option<&'static LanguageConfig> {
     CONFIGS.iter().find(|(e, _)| *e == ext).map(|(_, c)| c)
 }
 
+/// Compile the tree-sitter highlight queries (~40-60ms for all languages).
+/// They live in a lazy static, so without this the first diff ever rendered
+/// pays the whole cost on its critical path.
+pub fn warm_configs() {
+    once_cell::sync::Lazy::force(&CONFIGS);
+}
+
 /// Pre-computed highlights for an entire file, organized by line number.
 /// Handles multi-line constructs like JSDoc comments properly.
 #[derive(Default)]
