@@ -22,6 +22,8 @@
 //! is handed back as the keypress it is.
 
 use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -57,18 +59,30 @@ const MAX_BATCH: usize = 512;
 /// Reads terminal events on a dedicated thread and serves them in batches.
 pub struct InputReader {
     rx: Receiver<Event>,
+    /// When true the reader thread stops calling `event::poll`/`read` so another
+    /// process (e.g. `hx`) can own stdin. Crossterm's reader is process-wide.
+    paused: Arc<AtomicBool>,
 }
 
 impl InputReader {
     pub fn spawn() -> Self {
         let (tx, rx) = mpsc::channel();
+        let paused = Arc::new(AtomicBool::new(false));
+        let paused_thread = Arc::clone(&paused);
         thread::Builder::new()
             .name("input-reader".into())
             .spawn(move || {
                 // Exits when the receiver goes away at shutdown.
                 loop {
-                    match next_events(&mut CrosstermSource) {
-                        Ok(events) => {
+                    if paused_thread.load(Ordering::SeqCst) {
+                        thread::sleep(Duration::from_millis(20));
+                        continue;
+                    }
+                    // Short polls so `pause()` can take effect without waiting
+                    // on the old 1-hour `event::poll` (which steals hx's stdin).
+                    match next_events_interruptible(&mut CrosstermSource, &paused_thread) {
+                        Ok(None) => continue, // paused mid-wait or idle tick
+                        Ok(Some(events)) => {
                             for event in events {
                                 if tx.send(event).is_err() {
                                     return;
@@ -80,7 +94,24 @@ impl InputReader {
                 }
             })
             .expect("spawn input reader thread");
-        Self { rx }
+        Self { rx, paused }
+    }
+
+    /// Stop polling the terminal so a subprocess can read stdin.
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+        // Wait for the reader to finish its current short poll (≤50ms).
+        thread::sleep(Duration::from_millis(60));
+    }
+
+    /// Resume polling after a suspended subprocess exits.
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::SeqCst);
+    }
+
+    /// Drop any events that arrived around a suspend/resume boundary.
+    pub fn drain(&self) {
+        while self.rx.try_recv().is_ok() {}
     }
 
     /// Wait up to `timeout` for input, then return it together with everything
@@ -121,6 +152,31 @@ impl EventSource for CrosstermSource {
         }
         Ok(None)
     }
+}
+
+const PAUSE_POLL: Duration = Duration::from_millis(50);
+
+/// Like [`next_events`], but returns `Ok(None)` when `paused` becomes true so
+/// the reader thread can yield the tty to a suspended editor.
+fn next_events_interruptible(
+    source: &mut impl EventSource,
+    paused: &AtomicBool,
+) -> io::Result<Option<Vec<Event>>> {
+    let first = loop {
+        if paused.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        if let Some(event) = source.next(PAUSE_POLL)? {
+            break event;
+        }
+    };
+    let Event::Key(key) = first else {
+        return Ok(Some(vec![first]));
+    };
+    if key.code != KeyCode::Esc || key.kind != KeyEventKind::Press {
+        return Ok(Some(vec![Event::Key(key)]));
+    }
+    resolve_escape(source).map(Some)
 }
 
 /// Blocking read of the next logical event(s).

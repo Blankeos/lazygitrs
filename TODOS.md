@@ -54,7 +54,7 @@
   - Files:
     - [x] In 'Files', the original lazygit has `e` to open file in editor and `o` to open file in default program.
     - [x] In 'Files', the original lazygit has `<c-o>` to copy the diff of the selected file to clipboard (we have this in `y` menu, but the direct shortcut may be missing).
-    - [ ] Full `$EDITOR` integration — committing with `C` (editor mode) currently has a limitation where it can't suspend the TUI to open a real terminal editor.
+    - [x] Full `$EDITOR` integration — `e`/`o` now suspend the TUI for terminal editors (`hx`/`nvim`/`vim` via `editPreset` / `$EDITOR`). Commit-with-`C` (editor mode) still uses the in-app editor path.
   - Remotes:
     - [x] In 'Remotes', pressing `Enter` should drill into remote branches. Then from a remote branch: `<space>` to checkout, `M` to merge, `r` to rebase onto it, `d` to delete remote branch.
   - Submodules:

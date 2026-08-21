@@ -218,11 +218,15 @@ impl Default for MergingConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OsConfig {
+    /// Named editor preset (`helix`, `nvim`, `vim`, `vscode`, `zed`, …).
+    /// Fills empty edit templates; ignored when templates are set explicitly.
+    #[serde(rename = "editPreset")]
+    pub edit_preset: String,
     /// Command template to open a file in the user's editor.
-    /// Uses `{{filename}}` as placeholder. e.g. `"zed {{filename}}"`
+    /// Uses `{{filename}}` as placeholder. e.g. `"hx {{filename}}"`
     pub edit: String,
     /// Command template to open a file at a specific line.
-    /// Uses `{{filename}}` and `{{line}}` as placeholders.
+    /// Uses `{{filename}}`, `{{line}}`, and optionally `{{column}}`.
     #[serde(rename = "editAtLine")]
     pub edit_at_line: String,
     /// Command template to open a file at a specific line and wait for close.
@@ -237,6 +241,11 @@ pub struct OsConfig {
     /// Command to copy text to clipboard (text is piped via stdin).
     #[serde(rename = "copyToClipboardCmd")]
     pub copy_to_clipboard_cmd: String,
+    /// When true, suspend the TUI and wait for the editor (terminal editors).
+    /// When false, spawn and return immediately (GUI editors).
+    /// When unset, inferred from `editPreset` / `$EDITOR`.
+    #[serde(rename = "editInTerminal")]
+    pub edit_in_terminal: Option<bool>,
 }
 
 impl Default for OsConfig {
@@ -250,37 +259,315 @@ impl Default for OsConfig {
         };
 
         Self {
+            edit_preset: String::new(),
             edit: String::new(),
             edit_at_line: String::new(),
             edit_at_line_and_wait: String::new(),
             open: open_cmd.to_string(),
             open_dir_in_editor: String::new(),
             copy_to_clipboard_cmd: copy_cmd.to_string(),
+            edit_in_terminal: None,
         }
     }
 }
 
+/// How an edit/open should be launched from the TUI.
+#[derive(Debug, Clone)]
+pub struct EditorLaunch {
+    pub program: String,
+    pub args: Vec<String>,
+    /// Leave the alternate screen and wait for the process (hx/nvim/vim).
+    pub suspend: bool,
+}
+
+impl EditorLaunch {
+    pub fn display_cmd(&self) -> String {
+        let mut parts = Vec::with_capacity(1 + self.args.len());
+        parts.push(self.program.as_str());
+        parts.extend(self.args.iter().map(String::as_str));
+        parts.join(" ")
+    }
+}
+
+struct EditPreset {
+    edit: &'static str,
+    edit_at_line: &'static str,
+    edit_at_line_and_wait: &'static str,
+    open_dir_in_editor: &'static str,
+    suspend: bool,
+}
+
+fn preset_for(name: &str) -> Option<EditPreset> {
+    // Match Go lazygit's editor_presets.go (subset we care about).
+    match name {
+        "vim" | "nvim" | "vi" => Some(EditPreset {
+            edit: "{editor} -- {{filename}}",
+            edit_at_line: "{editor} +{{line}} -- {{filename}}",
+            edit_at_line_and_wait: "{editor} +{{line}} -- {{filename}}",
+            open_dir_in_editor: "{editor} -- {{dir}}",
+            suspend: true,
+        }),
+        // Homebrew/cargo install the binary as `hx`. Go lazygit also ships a
+        // separate "helix (hx)" preset; we always use `hx` for both names.
+        "helix" | "hx" => Some(EditPreset {
+            edit: "hx -- {{filename}}",
+            edit_at_line: "hx -- {{filename}}:{{line}}:{{column}}",
+            edit_at_line_and_wait: "hx -- {{filename}}:{{line}}:{{column}}",
+            open_dir_in_editor: "hx -- {{dir}}",
+            suspend: true,
+        }),
+        "nano" => Some(EditPreset {
+            edit: "{editor} -- {{filename}}",
+            edit_at_line: "{editor} +{{line}} -- {{filename}}",
+            edit_at_line_and_wait: "{editor} +{{line}} -- {{filename}}",
+            open_dir_in_editor: "{editor} -- {{dir}}",
+            suspend: true,
+        }),
+        "emacs" => Some(EditPreset {
+            edit: "emacsclient --alternate-editor=emacs --no-wait -- {{filename}}",
+            edit_at_line: "emacsclient --alternate-editor=emacs --no-wait +{{line}} -- {{filename}}",
+            edit_at_line_and_wait: "{editor} +{{line}} -- {{filename}}",
+            open_dir_in_editor: "emacsclient --alternate-editor=emacs --no-wait -- {{dir}}",
+            suspend: false,
+        }),
+        "vscode" | "code" => Some(EditPreset {
+            edit: "code --reuse-window -- {{filename}}",
+            edit_at_line: "code --reuse-window --goto -- {{filename}}:{{line}}:{{column}}",
+            edit_at_line_and_wait: "code --reuse-window --goto --wait -- {{filename}}:{{line}}:{{column}}",
+            open_dir_in_editor: "code -- {{dir}}",
+            suspend: false,
+        }),
+        "zed" | "zed.exe" => Some(EditPreset {
+            edit: "zed -- {{filename}}",
+            edit_at_line: "zed -- {{filename}}:{{line}}:{{column}}",
+            edit_at_line_and_wait: "zed --wait -- {{filename}}:{{line}}:{{column}}",
+            open_dir_in_editor: "zed -- {{dir}}",
+            suspend: false,
+        }),
+        _ => None,
+    }
+}
+
+fn guess_editor_name() -> String {
+    for key in ["VISUAL", "EDITOR"] {
+        if let Ok(val) = std::env::var(key) {
+            let trimmed = val.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // Take the first token (ignore flags like `nvim -p`).
+            let first = trimmed.split_whitespace().next().unwrap_or(trimmed);
+            let base = std::path::Path::new(first)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(first);
+            return base.to_string();
+        }
+    }
+    String::new()
+}
+
+fn resolve_preset(os: &OsConfig) -> (EditPreset, String) {
+    let guessed = if os.edit_preset.is_empty() {
+        guess_editor_name()
+    } else {
+        os.edit_preset.clone()
+    };
+    let editor_bin = if guessed.is_empty() {
+        "vim".to_string()
+    } else if guessed == "helix" {
+        // `editPreset: helix` must not exec a non-existent `helix` binary.
+        "hx".to_string()
+    } else {
+        guessed.clone()
+    };
+    let preset_name = if os.edit_preset.is_empty() {
+        editor_bin.as_str()
+    } else {
+        os.edit_preset.as_str()
+    };
+    let preset = preset_for(preset_name).unwrap_or(EditPreset {
+        edit: "{editor} -- {{filename}}",
+        edit_at_line: "{editor} +{{line}} -- {{filename}}",
+        edit_at_line_and_wait: "{editor} +{{line}} -- {{filename}}",
+        open_dir_in_editor: "{editor} -- {{dir}}",
+        suspend: true,
+    });
+    (preset, editor_bin)
+}
+
+fn apply_editor(template: &str, editor: &str) -> String {
+    template.replace("{editor}", editor)
+}
+
+fn expand_placeholders(
+    template: &str,
+    filename: &str,
+    line: Option<usize>,
+    column: Option<usize>,
+) -> String {
+    let mut s = template
+        .replace("{{filename}}", filename)
+        .replace("{{dir}}", filename);
+    if let Some(ln) = line {
+        s = s.replace("{{line}}", &ln.to_string());
+    }
+    if let Some(col) = column {
+        s = s.replace("{{column}}", &col.to_string());
+    } else {
+        s = s.replace("{{column}}", "1");
+    }
+    s
+}
+
+/// Split a command string into argv. Supports simple double-quoted args.
+fn split_command(cmd: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    for ch in cmd.chars() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            c if c.is_whitespace() && !in_quotes => {
+                if !cur.is_empty() {
+                    parts.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        parts.push(cur);
+    }
+    parts
+}
+
 impl OsConfig {
+    fn suspend_for_edit(&self, preset_suspend: bool) -> bool {
+        self.edit_in_terminal.unwrap_or(preset_suspend)
+    }
+
+    fn edit_template(&self) -> (String, bool) {
+        let (preset, editor) = resolve_preset(self);
+        if !self.edit.is_empty() {
+            return (self.edit.clone(), self.suspend_for_edit(preset.suspend));
+        }
+        (
+            apply_editor(preset.edit, &editor),
+            self.suspend_for_edit(preset.suspend),
+        )
+    }
+
+    fn edit_at_line_template(&self) -> (String, bool) {
+        let (preset, editor) = resolve_preset(self);
+        if !self.edit_at_line.is_empty() {
+            return (
+                self.edit_at_line.clone(),
+                self.suspend_for_edit(preset.suspend),
+            );
+        }
+        (
+            apply_editor(preset.edit_at_line, &editor),
+            self.suspend_for_edit(preset.suspend),
+        )
+    }
+
+    fn open_dir_template(&self) -> (String, bool) {
+        let (preset, editor) = resolve_preset(self);
+        if !self.open_dir_in_editor.is_empty() {
+            return (
+                self.open_dir_in_editor.clone(),
+                self.suspend_for_edit(preset.suspend),
+            );
+        }
+        (
+            apply_editor(preset.open_dir_in_editor, &editor),
+            self.suspend_for_edit(preset.suspend),
+        )
+    }
+
+    /// Build a launch plan for editing `filename` (optionally at line/column).
+    pub fn plan_edit(
+        &self,
+        filename: &str,
+        line: Option<usize>,
+        column: Option<usize>,
+    ) -> anyhow::Result<EditorLaunch> {
+        let (template, suspend) = if line.is_some() {
+            self.edit_at_line_template()
+        } else {
+            self.edit_template()
+        };
+        Self::plan_from_template(&template, filename, line, column, suspend)
+    }
+
+    /// Build a launch plan for opening a directory in the editor.
+    pub fn plan_open_dir(&self, dir: &str) -> anyhow::Result<EditorLaunch> {
+        let (template, suspend) = self.open_dir_template();
+        Self::plan_from_template(&template, dir, None, None, suspend)
+    }
+
+    /// Build a launch plan for `os.open` (may be `hx`/`nvim` or a GUI opener).
+    pub fn plan_open(&self, filename: &str) -> anyhow::Result<EditorLaunch> {
+        if self.open.is_empty() {
+            anyhow::bail!("No open command configured");
+        }
+        let template = self.open.clone();
+        // Heuristic: if the open command looks like a terminal editor, suspend.
+        let first = template.split_whitespace().next().unwrap_or("");
+        let base = std::path::Path::new(first)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(first);
+        let looks_terminal = matches!(
+            base,
+            "hx" | "helix" | "nvim" | "vim" | "vi" | "nano" | "emacs" | "kak" | "kakoune"
+        );
+        let suspend = self.edit_in_terminal.unwrap_or(looks_terminal);
+        Self::plan_from_template(&template, filename, None, None, suspend)
+    }
+
+    fn plan_from_template(
+        template: &str,
+        filename: &str,
+        line: Option<usize>,
+        column: Option<usize>,
+        suspend: bool,
+    ) -> anyhow::Result<EditorLaunch> {
+        if template.is_empty() {
+            anyhow::bail!("No command configured");
+        }
+        let cmd_str = expand_placeholders(template, filename, line, column);
+        let parts = split_command(&cmd_str);
+        if parts.is_empty() {
+            anyhow::bail!("Empty command after template expansion");
+        }
+        Ok(EditorLaunch {
+            program: parts[0].clone(),
+            args: parts[1..].to_vec(),
+            suspend,
+        })
+    }
+
     /// Run a command template, replacing `{{filename}}` with the given path.
-    /// If the template is empty, returns an error.
+    /// Spawns without waiting (GUI editors / `open`). Prefer [`plan_edit`] for editors.
     pub fn run_template(template: &str, filename: &str) -> anyhow::Result<()> {
         if template.is_empty() {
             anyhow::bail!("No command configured");
         }
-        let cmd_str = template.replace("{{filename}}", filename);
-        // Split into program + args, respecting the template format
-        let parts: Vec<&str> = cmd_str.split_whitespace().collect();
+        let cmd_str = expand_placeholders(template, filename, None, None);
+        let parts = split_command(&cmd_str);
         if parts.is_empty() {
             anyhow::bail!("Empty command after template expansion");
         }
         crate::os::cmd::log_command(&cmd_str);
-        std::process::Command::new(parts[0])
+        std::process::Command::new(&parts[0])
             .args(&parts[1..])
             .spawn()?;
         Ok(())
     }
 
-    /// Run a command template replacing `{{filename}}`, `{{line}}`, and `{{column}}` with the given values.
+    /// Run a command template replacing `{{filename}}`, `{{line}}`, and `{{column}}`.
     pub fn run_template_at_line(
         template: &str,
         filename: &str,
@@ -290,16 +577,13 @@ impl OsConfig {
         if template.is_empty() {
             anyhow::bail!("No command configured");
         }
-        let cmd_str = template
-            .replace("{{filename}}", filename)
-            .replace("{{line}}", &line.to_string())
-            .replace("{{column}}", &column.to_string());
-        let parts: Vec<&str> = cmd_str.split_whitespace().collect();
+        let cmd_str = expand_placeholders(template, filename, Some(line), Some(column));
+        let parts = split_command(&cmd_str);
         if parts.is_empty() {
             anyhow::bail!("Empty command after template expansion");
         }
         crate::os::cmd::log_command(&cmd_str);
-        std::process::Command::new(parts[0])
+        std::process::Command::new(&parts[0])
             .args(&parts[1..])
             .spawn()?;
         Ok(())

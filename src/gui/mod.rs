@@ -723,6 +723,8 @@ pub struct Gui {
     remote_op_success_at: Option<Instant>,
     /// Branch name from checkout-by-name; used to offer create-on-miss when checkout fails.
     pub(crate) pending_checkout_by_name: Option<String>,
+    /// Editor to run after suspending the TUI (hx/nvim/vim).
+    pending_editor_launch: Option<crate::config::user_config::EditorLaunch>,
     /// Copied commit hashes for cherry-pick paste (newest first).
     pub cherry_pick_clipboard: Vec<String>,
     /// Anchor index for range selection in commits list (None = not in range mode).
@@ -1034,6 +1036,7 @@ impl Gui {
             remote_op_label: None,
             remote_op_success_at: None,
             pending_checkout_by_name: None,
+            pending_editor_launch: None,
             cherry_pick_clipboard: Vec::new(),
             range_select_anchor: None,
             commit_message_history: commit_history,
@@ -1070,13 +1073,105 @@ impl Gui {
         let size = terminal.size()?;
         self.layout.update_size(size.width, size.height);
 
-        let result = self.main_loop(&mut terminal, &input);
+        let mut keyboard_enhanced = keyboard_enhanced;
+        let result = self.main_loop(&mut terminal, &input, &mut keyboard_enhanced);
 
         restore_terminal(&mut terminal, keyboard_enhanced)?;
         result
     }
 
-    fn main_loop(&mut self, terminal: &mut Term, input: &InputReader) -> Result<()> {
+    /// Queue an editor launch. Terminal editors (`suspend: true`) run after the
+    /// current frame via [`Self::run_suspended_editor`]; GUI editors spawn now.
+    pub(crate) fn launch_editor(
+        &mut self,
+        launch: crate::config::user_config::EditorLaunch,
+    ) -> Result<()> {
+        if launch.suspend {
+            self.pending_editor_launch = Some(launch);
+            Ok(())
+        } else {
+            crate::os::cmd::log_command(&launch.display_cmd());
+            std::process::Command::new(&launch.program)
+                .args(&launch.args)
+                .spawn()?;
+            Ok(())
+        }
+    }
+
+    fn run_suspended_editor(
+        &mut self,
+        terminal: &mut Term,
+        input: &InputReader,
+        keyboard_enhanced: &mut bool,
+        launch: crate::config::user_config::EditorLaunch,
+    ) -> Result<()> {
+        use crossterm::terminal::{Clear, ClearType};
+        use std::io::Write as _;
+        use std::process::Stdio;
+
+        // Pause the input thread before leaving the alt screen — crossterm's
+        // event reader is process-wide and would steal hx/nvim's keystrokes.
+        input.pause();
+        input.drain();
+        restore_terminal(terminal, *keyboard_enhanced)?;
+
+        // LeaveAlternateScreen restores the previous buffer; wipe the primary
+        // screen so Helix doesn't paint over leftover lazygit frames.
+        {
+            let mut out = std::io::stdout();
+            execute!(
+                out,
+                Clear(ClearType::All),
+                Clear(ClearType::Purge),
+                cursor::MoveTo(0, 0),
+                cursor::Show
+            )?;
+            out.flush()?;
+        }
+
+        crate::os::cmd::log_command(&launch.display_cmd());
+        let status = std::process::Command::new(&launch.program)
+            .args(&launch.args)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status();
+
+        // Re-enter the TUI regardless of editor exit status.
+        let (new_term, new_enhanced) = setup_terminal()?;
+        *terminal = new_term;
+        *keyboard_enhanced = new_enhanced;
+
+        input.drain();
+        input.resume();
+
+        // Force a full redraw next frame.
+        terminal.clear()?;
+        let size = terminal.size()?;
+        self.layout.update_size(size.width, size.height);
+
+        match status {
+            Ok(st) if st.success() => Ok(()),
+            Ok(st) => {
+                self.show_error(
+                    "Editor failed",
+                    anyhow::anyhow!("exited with status {}", st.code().unwrap_or(-1)),
+                );
+                Ok(())
+            }
+            Err(err) => {
+                self.show_error("Failed to launch editor", err.into());
+                Ok(())
+            }
+        }
+    }
+
+    fn main_loop(
+        &mut self,
+        terminal: &mut Term,
+        input: &InputReader,
+        keyboard_enhanced: &mut bool,
+    ) -> Result<()> {
         loop {
             // Drain any model parts that have arrived from the background load.
             if let Some(rx) = &self.initial_load_rx {
@@ -1432,6 +1527,11 @@ impl Gui {
             };
             let events = input.wait_batch(timeout);
             self.handle_event_batch(events);
+
+            // Terminal editors: leave alt screen, run hx/nvim, restore TUI.
+            if let Some(launch) = self.pending_editor_launch.take() {
+                self.run_suspended_editor(terminal, input, keyboard_enhanced, launch)?;
+            }
 
             if self.should_quit {
                 break;
@@ -3522,22 +3622,15 @@ impl Gui {
                     let abs_path = self.git.repo_path().join(&filename);
                     if !filename.is_empty() && abs_path.exists() {
                         let abs_path = abs_path.to_string_lossy().to_string();
-                        let os = &self.config.user_config.os;
-                        if let Some(ln) =
-                            line.or_else(|| self.diff_view.file_line_number(line_idx, line_panel))
+                        let ln =
+                            line.or_else(|| self.diff_view.file_line_number(line_idx, line_panel));
+                        if let Ok(launch) =
+                            self.config
+                                .user_config
+                                .os
+                                .plan_edit(&abs_path, ln, Some(column))
                         {
-                            let tpl = if !os.edit_at_line.is_empty() {
-                                &os.edit_at_line
-                            } else {
-                                &os.edit
-                            };
-                            let _ = crate::config::user_config::OsConfig::run_template_at_line(
-                                tpl, &abs_path, ln, column,
-                            );
-                        } else {
-                            let _ = crate::config::user_config::OsConfig::run_template(
-                                &os.edit, &abs_path,
-                            );
+                            let _ = self.launch_editor(launch);
                         }
                     }
                     return Ok(());
@@ -3772,7 +3865,6 @@ impl Gui {
             return;
         }
         let abs_path = abs_path_buf.to_string_lossy().to_string();
-        let os = &self.config.user_config.os;
 
         // Pick the hunk currently at the top of the viewport (after `{`/`}`
         // navigation, scroll_offset sits on a hunk start). Fall back to the
@@ -3792,24 +3884,18 @@ impl Gui {
                 .or_else(|| self.diff_view.file_line_number(idx, DiffPanel::Old))
         });
 
-        if let Some(line) = active_hunk_line {
-            let tpl = if !os.edit_at_line.is_empty() {
-                &os.edit_at_line
-            } else {
-                &os.edit
-            };
-            if !tpl.is_empty() {
-                let _ = crate::config::user_config::OsConfig::run_template_at_line(
-                    tpl, &abs_path, line, 1,
-                );
-                return;
+        match self
+            .config
+            .user_config
+            .os
+            .plan_edit(&abs_path, active_hunk_line, Some(1))
+        {
+            Ok(launch) => {
+                let _ = self.launch_editor(launch);
             }
-        }
-
-        if !os.edit.is_empty() {
-            let _ = crate::config::user_config::OsConfig::run_template(&os.edit, &abs_path);
-        } else {
-            let _ = crate::os::platform::Platform::open_file(&abs_path);
+            Err(_) => {
+                let _ = crate::os::platform::Platform::open_file(&abs_path);
+            }
         }
     }
 
@@ -3823,8 +3909,9 @@ impl Gui {
             return;
         }
         let abs_path = abs_path_buf.to_string_lossy().to_string();
-        let open_template = &self.config.user_config.os.open;
-        let _ = crate::config::user_config::OsConfig::run_template(open_template, &abs_path);
+        if let Ok(launch) = self.config.user_config.os.plan_open(&abs_path) {
+            let _ = self.launch_editor(launch);
+        }
     }
 
     fn handle_paste(&mut self, data: String) {

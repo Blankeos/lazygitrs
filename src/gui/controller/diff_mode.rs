@@ -525,21 +525,14 @@ fn handle_diff_exploration_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
                 let abs_path = gui.git.repo_path().join(&filename);
                 if !filename.is_empty() && abs_path.exists() {
                     let abs_path = abs_path.to_string_lossy().to_string();
-                    let os = &gui.config.user_config.os;
-                    if let Some(ln) =
-                        line.or_else(|| gui.diff_view.file_line_number(line_idx, line_panel))
+                    let ln = line.or_else(|| gui.diff_view.file_line_number(line_idx, line_panel));
+                    if let Ok(launch) =
+                        gui.config
+                            .user_config
+                            .os
+                            .plan_edit(&abs_path, ln, Some(column))
                     {
-                        let tpl = if !os.edit_at_line.is_empty() {
-                            &os.edit_at_line
-                        } else {
-                            &os.edit
-                        };
-                        let _ = crate::config::user_config::OsConfig::run_template_at_line(
-                            tpl, &abs_path, ln, column,
-                        );
-                    } else {
-                        let _ =
-                            crate::config::user_config::OsConfig::run_template(&os.edit, &abs_path);
+                        let _ = gui.launch_editor(launch);
                     }
                 }
                 return Ok(());
