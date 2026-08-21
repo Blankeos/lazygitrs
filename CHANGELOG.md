@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.33] - 2026-08-21
+
+### Features
+
+- Add edit and open-file shortcuts to commit files panel by @Blankeos
+- Support suspending TUI for terminal editors (hx/nvim/vim) by @Blankeos
+- Display co-authors in commit details and offer branch creation on checkout miss by @Blankeos
+
 ## [0.0.32] - 2026-08-13
 
 ### Features
