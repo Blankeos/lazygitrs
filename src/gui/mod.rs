@@ -721,6 +721,8 @@ pub struct Gui {
     remote_op_label: Option<String>,
     /// Timestamp when the last remote operation succeeded (for showing a temporary ✓).
     remote_op_success_at: Option<Instant>,
+    /// Branch name from checkout-by-name; used to offer create-on-miss when checkout fails.
+    pub(crate) pending_checkout_by_name: Option<String>,
     /// Copied commit hashes for cherry-pick paste (newest first).
     pub cherry_pick_clipboard: Vec<String>,
     /// Anchor index for range selection in commits list (None = not in range mode).
@@ -764,8 +766,13 @@ pub enum ScreenMode {
     Full,
 }
 
-/// Synthesize a unified diff for a new (untracked) file from its raw content.
-/// This allows untracked files to be included in combined multi-file diffs.
+/// True when a `git checkout <name>` failure means the ref does not exist.
+pub(crate) fn is_checkout_ref_not_found(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("did not match any file(s) known to git")
+        || lower.contains("unknown revision or path not in the working tree")
+        || lower.contains("invalid reference:")
+}
 
 /// Pathspec for a tree-node path: root (".") => empty (whole tree), dirs get a
 /// trailing slash so git matches the directory contents.
@@ -780,6 +787,8 @@ fn pathspec_for_tree_path(path: &str) -> Option<String> {
     }
 }
 
+/// Synthesize a unified diff for a new (untracked) file from its raw content.
+/// This allows untracked files to be included in combined multi-file diffs.
 fn synthesize_new_file_diff(filename: &str, content: &str) -> String {
     let lines: Vec<&str> = content.lines().collect();
     let count = lines.len();
@@ -1024,6 +1033,7 @@ impl Gui {
             spinner_frame: 0,
             remote_op_label: None,
             remote_op_success_at: None,
+            pending_checkout_by_name: None,
             cherry_pick_clipboard: Vec::new(),
             range_select_anchor: None,
             commit_message_history: commit_history,
@@ -2237,15 +2247,37 @@ impl Gui {
             self.remote_op_label = None;
             match result {
                 Ok(()) => {
+                    self.pending_checkout_by_name = None;
                     self.needs_refresh = true;
                     self.remote_op_success_at = Some(Instant::now());
                 }
                 Err(e) => {
-                    self.popup = PopupState::Message {
-                        title: "Error".to_string(),
-                        message: format!("{}", e),
-                        kind: MessageKind::Error,
-                    };
+                    let err = format!("{}", e);
+                    if let Some(name) = self
+                        .pending_checkout_by_name
+                        .take()
+                        .filter(|_| is_checkout_ref_not_found(&err))
+                    {
+                        self.popup = PopupState::Confirm {
+                            title: "Branch not found".to_string(),
+                            message: format!(
+                                "Branch not found. Create a new branch named {}?",
+                                name
+                            ),
+                            on_confirm: Box::new(move |gui| {
+                                gui.git.create_branch(&name)?;
+                                gui.needs_refresh = true;
+                                Ok(())
+                            }),
+                        };
+                    } else {
+                        self.pending_checkout_by_name = None;
+                        self.popup = PopupState::Message {
+                            title: "Error".to_string(),
+                            message: err,
+                            kind: MessageKind::Error,
+                        };
+                    }
                 }
             }
         }

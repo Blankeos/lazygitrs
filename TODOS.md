@@ -312,3 +312,5 @@ Where I observed this behavior: I noticed this for the "Commit Message" and "Des
 - [x] IN filetree view, the "M" or "A" or "??" should be slightly more indented. in Files.. Because currently it's lesser indented than the ▶︎ characters, visually makes u think it's at the root, which is bad UX.
 
 - [x] lazygitrs upgrade
+
+- [x] Be able to fallback w/ confirm alert when "c" checkout a new branch that doesnt exist.

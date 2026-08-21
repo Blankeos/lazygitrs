@@ -8,7 +8,7 @@ use crate::config::Theme;
 use crate::model::commit::{Commit, CommitStat, CommitStatus};
 
 /// Render the read-only commit details panel into `rect`.  The panel is
-/// deliberately non-focusable: it shows short-hash, author, email, date,
+/// deliberately non-focusable: it shows short-hash, author(s), email, date,
 /// ref decorations, the full (wrapped) commit message, and a "N Changed Files
 /// +A -B" summary when `stat` is available.
 ///
@@ -62,6 +62,8 @@ pub fn render_commit_details(
     }
 
     let message = full_message.unwrap_or(&commit.name);
+    let co_authors = parse_co_authors(message);
+    let display_message = strip_co_author_trailers(message);
 
     let mut lines: Vec<Line> = Vec::new();
 
@@ -72,6 +74,16 @@ pub fn render_commit_details(
             Span::styled("  ✉ ", Style::default().fg(theme.text_dimmed)),
             Span::styled(commit.author_email.clone(), Style::default().fg(theme.text)),
         ]));
+    }
+
+    for co in &co_authors {
+        lines.push(co_author_line(co, theme));
+        if !compact && !co.email.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("  ✉ ", Style::default().fg(theme.text_dimmed)),
+                Span::styled(co.email.clone(), Style::default().fg(theme.text)),
+            ]));
+        }
     }
 
     lines.push(Line::from(vec![
@@ -121,7 +133,7 @@ pub fn render_commit_details(
         }
     }
 
-    for segment in message.split('\n') {
+    for segment in display_message.split('\n') {
         lines.push(Line::from(Span::styled(
             segment.to_string(),
             Style::default().fg(theme.text_strong),
@@ -160,6 +172,86 @@ fn hash_style(commit: &Commit, theme: &Theme) -> Style {
     }
 }
 
+struct CoAuthor {
+    name: String,
+    email: String,
+}
+
+fn parse_co_authors(message: &str) -> Vec<CoAuthor> {
+    message.lines().filter_map(parse_co_author_line).collect()
+}
+
+fn parse_co_author_line(line: &str) -> Option<CoAuthor> {
+    let rest = line
+        .trim()
+        .strip_prefix("Co-authored-by:")
+        .or_else(|| line.trim().strip_prefix("Co-Authored-By:"))?
+        .trim();
+    if rest.is_empty() {
+        return None;
+    }
+
+    if let Some((name, email)) = rest.rsplit_once('<') {
+        let email = email.strip_suffix('>').unwrap_or(email).trim();
+        let name = name.trim();
+        if name.is_empty() && email.is_empty() {
+            return None;
+        }
+        Some(CoAuthor {
+            name: if name.is_empty() {
+                email.to_string()
+            } else {
+                name.to_string()
+            },
+            email: email.to_string(),
+        })
+    } else {
+        Some(CoAuthor {
+            name: rest.to_string(),
+            email: String::new(),
+        })
+    }
+}
+
+fn is_co_author_trailer(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.to_ascii_lowercase().starts_with("co-authored-by:")
+}
+
+/// Drop `Co-authored-by` trailers (and a blank separator above them) so they
+/// are shown once in the author block instead of duplicated in the body.
+fn strip_co_author_trailers(message: &str) -> String {
+    let lines: Vec<&str> = message.lines().collect();
+    if !lines.iter().any(|l| is_co_author_trailer(l)) {
+        return message.to_string();
+    }
+
+    let mut out: Vec<&str> = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    while i < lines.len() {
+        if is_co_author_trailer(lines[i]) {
+            i += 1;
+            continue;
+        }
+        // Skip a blank line that only separates body from co-author trailers.
+        if lines[i].trim().is_empty() {
+            let rest_are_trailers_or_blank = lines[i + 1..]
+                .iter()
+                .all(|l| l.trim().is_empty() || is_co_author_trailer(l));
+            if rest_are_trailers_or_blank {
+                break;
+            }
+        }
+        out.push(lines[i]);
+        i += 1;
+    }
+
+    while out.last().is_some_and(|l| l.trim().is_empty()) {
+        out.pop();
+    }
+    out.join("\n")
+}
+
 fn header_line<'a>(commit: &'a Commit, theme: &Theme) -> Line<'a> {
     let initial = commit
         .author_name
@@ -187,6 +279,35 @@ fn header_line<'a>(commit: &'a Commit, theme: &Theme) -> Line<'a> {
         ),
         Span::raw("  "),
         Span::styled(date, Style::default().fg(theme.text_dimmed)),
+    ])
+}
+
+fn co_author_line<'a>(co: &CoAuthor, theme: &Theme) -> Line<'a> {
+    let initial = co
+        .name
+        .chars()
+        .next()
+        .map(|c| c.to_ascii_uppercase())
+        .unwrap_or('?');
+    let avatar_color = avatar_color_for(&co.email, theme);
+
+    Line::from(vec![
+        Span::styled(
+            format!(" {} ", initial),
+            Style::default()
+                .fg(theme.text_strong)
+                .bg(avatar_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            co.name.clone(),
+            Style::default()
+                .fg(theme.text_strong)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled("co-author", Style::default().fg(theme.text_dimmed)),
     ])
 }
 
@@ -279,4 +400,32 @@ fn avatar_color_for(email: &str, theme: &Theme) -> ratatui::style::Color {
     }
     let palette = theme.graph_colors;
     palette[(h as usize) % palette.len()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_co_authored_by_trailers() {
+        let msg = "Subject\n\nBody\n\nCo-authored-by: Ada Lovelace <ada@example.com>\nCo-Authored-By: Grace Hopper <grace@example.com>\n";
+        let authors = parse_co_authors(msg);
+        assert_eq!(authors.len(), 2);
+        assert_eq!(authors[0].name, "Ada Lovelace");
+        assert_eq!(authors[0].email, "ada@example.com");
+        assert_eq!(authors[1].name, "Grace Hopper");
+        assert_eq!(authors[1].email, "grace@example.com");
+    }
+
+    #[test]
+    fn strips_co_author_trailers_from_message() {
+        let msg = "Subject\n\nBody line\n\nCo-authored-by: Ada Lovelace <ada@example.com>\n";
+        assert_eq!(strip_co_author_trailers(msg), "Subject\n\nBody line");
+    }
+
+    #[test]
+    fn leaves_message_without_trailers_unchanged() {
+        let msg = "Subject\n\nBody\n";
+        assert_eq!(strip_co_author_trailers(msg), msg);
+    }
 }

@@ -217,6 +217,7 @@ fn checkout_picker(gui: &mut Gui) -> Result<()> {
 }
 
 fn start_async_checkout(gui: &mut Gui, name: String) {
+    gui.pending_checkout_by_name = Some(name.clone());
     gui.start_remote_op(
         "Checking out",
         &format!("Checking out {}", name),
@@ -236,11 +237,25 @@ fn show_checkout_error_or_refresh(gui: &mut Gui, name: &str) -> Result<()> {
             gui.needs_refresh = true;
         }
         Err(e) => {
-            gui.popup = PopupState::Message {
-                title: "Checkout error".to_string(),
-                message: format!("{}", e),
-                kind: MessageKind::Error,
-            };
+            let err = format!("{}", e);
+            if crate::gui::is_checkout_ref_not_found(&err) {
+                let name = name.to_string();
+                gui.popup = PopupState::Confirm {
+                    title: "Branch not found".to_string(),
+                    message: format!("Branch not found. Create a new branch named {}?", name),
+                    on_confirm: Box::new(move |gui| {
+                        gui.git.create_branch(&name)?;
+                        gui.needs_refresh = true;
+                        Ok(())
+                    }),
+                };
+            } else {
+                gui.popup = PopupState::Message {
+                    title: "Checkout error".to_string(),
+                    message: err,
+                    kind: MessageKind::Error,
+                };
+            }
         }
     }
     Ok(())
