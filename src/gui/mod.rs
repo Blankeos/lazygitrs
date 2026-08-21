@@ -5562,6 +5562,8 @@ impl Gui {
                 entries: vec![
                     CommandEntry::keybinding("<enter>".into(), "Toggle dir / Focus diff".into()),
                     CommandEntry::keybinding("<esc>".into(), "Back to commits".into()),
+                    CommandEntry::keybinding(kb.universal.edit.clone(), "Edit file".into()),
+                    CommandEntry::keybinding(kb.universal.open_file.clone(), "Open file".into()),
                     CommandEntry::keybinding(
                         kb.universal.toggle_diff_view_layout.clone(),
                         "Toggle unified / side-by-side view".into(),

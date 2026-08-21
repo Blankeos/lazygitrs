@@ -78,11 +78,65 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return Ok(());
     }
 
+    // e / o — same as Files tab (works while sidebar is focused; no Enter needed)
+    if matches_key(key, &keybindings.universal.edit) {
+        return open_selected_in_editor(gui);
+    }
+    if matches_key(key, &keybindings.universal.open_file) {
+        return open_selected_in_default_program(gui);
+    }
+
     // Copy to clipboard
     if key.code == KeyCode::Char('y') {
         return copy_to_clipboard_menu(gui);
     }
 
+    Ok(())
+}
+
+fn selected_commit_file_abs_path(gui: &Gui) -> Option<String> {
+    let selected = gui.context_mgr.selected_active();
+    let file_idx = if gui.show_commit_file_tree {
+        gui.commit_file_tree_nodes
+            .get(selected)
+            .and_then(|n| if n.is_dir { None } else { n.file_index })
+    } else {
+        Some(selected)
+    }?;
+
+    let model = gui.model.lock().unwrap();
+    let file = model.commit_files.get(file_idx)?;
+    let rel = file.current_path().to_string();
+    drop(model);
+
+    let abs = gui.git.repo_path().join(&rel);
+    if abs.exists() {
+        Some(abs.to_string_lossy().to_string())
+    } else {
+        // Deleted in this commit / not in working tree — still try the path.
+        Some(abs.to_string_lossy().to_string())
+    }
+}
+
+fn open_selected_in_editor(gui: &mut Gui) -> Result<()> {
+    let Some(abs_path) = selected_commit_file_abs_path(gui) else {
+        return Ok(());
+    };
+    if let Ok(launch) = gui.config.user_config.os.plan_edit(&abs_path, None, None) {
+        gui.launch_editor(launch)?;
+    }
+    Ok(())
+}
+
+fn open_selected_in_default_program(gui: &mut Gui) -> Result<()> {
+    let Some(abs_path) = selected_commit_file_abs_path(gui) else {
+        return Ok(());
+    };
+    if let Ok(launch) = gui.config.user_config.os.plan_open(&abs_path) {
+        gui.launch_editor(launch)?;
+    } else {
+        Platform::open_file(&abs_path)?;
+    }
     Ok(())
 }
 
