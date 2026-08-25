@@ -105,6 +105,79 @@ lazygitrs ships with 30+ built-in color themes (Catppuccin, Dracula, Tokyo Night
 }
 ```
 
+### Editor integrations
+
+<details>
+<summary><strong>Helix</strong> — <code>Ctrl-g</code> to open, <code>e</code>/<code>o</code> to edit back in hx</summary>
+
+**1. Open lazygitrs from Helix** — add to `~/.config/helix/config.toml`:
+
+```toml
+[keys.normal]
+# Open lazygitrs w/ ctrl-g
+"C-g" = [":new", ":insert-output lazygitrs", ":buffer-close!", ":redraw"]
+```
+
+**2. Make `e` / `o` open files in Helix** — add to `~/.config/lazygitrs/config.yml` (or `~/.config/lazygit/config.yml`):
+
+```yaml
+os:
+  # Suspends TUI → hx → restores. editPreset fills edit / editAtLine / etc.
+  editPreset: "helix"
+  open: "hx {{filename}}"
+```
+
+Then inside lazygitrs: `e` edits at line, `o` opens the file.
+
+</details>
+
+<details>
+<summary><strong>Neovim (LazyVim / snacks.nvim)</strong> — <code>&lt;leader&gt;gg</code> to open, <code>e</code>/<code>o</code> to edit back in nvim</summary>
+
+**1. Open lazygitrs from Neovim** — `Snacks.lazygit()` hardcodes `lazygit`, so use `Snacks.terminal` instead.
+
+Create `~/.config/nvim/lua/plugins/snacks-lazygitrs.lua`:
+
+```lua
+return {
+  {
+    "folke/snacks.nvim",
+    opts = {
+      lazygit = {
+        configure = false, -- snacks assumes real lazygit YAML/theme
+      },
+    },
+    keys = {
+      {
+        "<leader>gg",
+        function()
+          Snacks.terminal({ "lazygitrs" }, {
+            cwd = LazyVim.root.git(),
+            win = { style = "lazygit" },
+          })
+        end,
+        desc = "Lazygitrs",
+      },
+    },
+  },
+}
+```
+
+Restart nvim (or `:Lazy reload snacks.nvim`) to pick it up.
+
+**2. Make `e` / `o` open files in Neovim** — add to `~/.config/lazygitrs/config.yml` (or `~/.config/lazygit/config.yml`):
+
+```yaml
+os:
+  # Suspends TUI → nvim → restores. editPreset fills edit / editAtLine / etc.
+  editPreset: "nvim"
+  open: "nvim {{filename}}"
+```
+
+Then inside lazygitrs: `e` edits at line, `o` opens the file.
+
+</details>
+
 <!-- GEN_BENCHMARKS_START -->
 
 ### Benchmarks
