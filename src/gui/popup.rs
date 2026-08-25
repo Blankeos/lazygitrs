@@ -847,6 +847,97 @@ pub fn sync_list_picker_free_entry(core: &mut ListPickerCore, free_entry_categor
     }
 }
 
+/// Whether a list-picker row matches the current search (empty search = all).
+pub fn list_picker_item_matches(item: &ListPickerItem, search_lower: &str) -> bool {
+    if search_lower.is_empty() {
+        return true;
+    }
+    item.label.to_lowercase().contains(search_lower)
+        || item.value.to_lowercase().contains(search_lower)
+}
+
+/// Indices into `items` that match `search` (trimmed, case-insensitive).
+pub fn list_picker_matching_indices(items: &[ListPickerItem], search: &str) -> Vec<usize> {
+    let search_lower = search.trim().to_lowercase();
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| list_picker_item_matches(item, &search_lower))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Display-row index for `sel` among only the matching items (plus category headers).
+pub fn list_picker_filtered_display_idx(
+    items: &[ListPickerItem],
+    matching: &[usize],
+    sel: usize,
+) -> usize {
+    let mut di = 0usize;
+    let mut last_cat = String::new();
+    for &ei in matching {
+        let Some(item) = items.get(ei) else {
+            continue;
+        };
+        if !item.category.is_empty() && item.category != last_cat {
+            di += 1;
+            last_cat = item.category.clone();
+        }
+        if ei == sel {
+            return di;
+        }
+        di += 1;
+    }
+    di
+}
+
+/// Next matching item index after `selected` (wraps within `matching`).
+pub fn list_picker_next_match(matching: &[usize], selected: usize) -> Option<usize> {
+    if matching.is_empty() {
+        return None;
+    }
+    match matching.iter().position(|&i| i == selected) {
+        Some(pos) => Some(matching[(pos + 1).min(matching.len() - 1)]),
+        None => matching
+            .iter()
+            .copied()
+            .find(|&i| i > selected)
+            .or_else(|| matching.first().copied()),
+    }
+}
+
+/// Previous matching item index before `selected` (wraps within `matching`).
+pub fn list_picker_prev_match(matching: &[usize], selected: usize) -> Option<usize> {
+    if matching.is_empty() {
+        return None;
+    }
+    match matching.iter().position(|&i| i == selected) {
+        Some(0) => Some(matching[0]),
+        Some(pos) => Some(matching[pos - 1]),
+        None => matching
+            .iter()
+            .rev()
+            .copied()
+            .find(|&i| i < selected)
+            .or_else(|| matching.last().copied()),
+    }
+}
+
+/// Keep `selected` on a matching row after the search string changes.
+pub fn list_picker_clamp_selection_to_matches(
+    matching: &[usize],
+    selected: usize,
+) -> Option<usize> {
+    if matching.is_empty() {
+        return None;
+    }
+    if matching.contains(&selected) {
+        Some(selected)
+    } else {
+        matching.first().copied()
+    }
+}
+
 /// Resolve the confirm value for a free-entry list picker: the selected item,
 /// or the trimmed search text when nothing is selected but search is non-empty.
 pub fn list_picker_confirm_value(core: &ListPickerCore) -> Option<String> {
@@ -976,6 +1067,36 @@ mod free_entry_tests {
     fn confirm_value_none_when_empty() {
         let core = core_with(vec![], "");
         assert!(list_picker_confirm_value(&core).is_none());
+    }
+
+    #[test]
+    fn matching_indices_filters_case_insensitively() {
+        let items = vec![
+            item("src/main.rs", ""),
+            item("README.md", ""),
+            item("src/gui/mod.rs", ""),
+        ];
+        assert_eq!(list_picker_matching_indices(&items, "gui"), vec![2]);
+        assert_eq!(list_picker_matching_indices(&items, "SRC"), vec![0, 2]);
+        assert_eq!(list_picker_matching_indices(&items, ""), vec![0, 1, 2]);
+        assert!(list_picker_matching_indices(&items, "zzz").is_empty());
+    }
+
+    #[test]
+    fn next_prev_match_stay_within_filtered_set() {
+        let matching = vec![0usize, 3, 7];
+        assert_eq!(list_picker_next_match(&matching, 0), Some(3));
+        assert_eq!(list_picker_next_match(&matching, 7), Some(7));
+        assert_eq!(list_picker_prev_match(&matching, 7), Some(3));
+        assert_eq!(list_picker_prev_match(&matching, 0), Some(0));
+        assert_eq!(
+            list_picker_clamp_selection_to_matches(&matching, 5),
+            Some(0)
+        );
+        assert_eq!(
+            list_picker_clamp_selection_to_matches(&matching, 3),
+            Some(3)
+        );
     }
 }
 

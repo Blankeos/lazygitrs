@@ -19,7 +19,7 @@ use crate::pager::side_by_side::{self, DiffPanel, DiffPanelLayout, DiffViewLayou
 use super::ScreenMode;
 use super::context::{ContextId, ContextManager, SideWindow};
 use super::layout::{self, LayoutState};
-use super::popup::{CommitInputFocus, PopupState};
+use super::popup::{CommitInputFocus, PopupState, list_picker_matching_indices};
 use super::presentation;
 
 pub fn render(
@@ -3674,23 +3674,32 @@ fn render_list_picker(
     hints: &[(&str, &str)],
 ) {
     let search = core.search_textarea.lines().join("");
-    let search_lower = search.to_lowercase();
+    let search_lower = search.trim().to_lowercase();
+    let matching = list_picker_matching_indices(&core.items, &search);
 
-    // Build display rows: interleave category headers with items
-    let has_categories = core.items.iter().any(|i| !i.category.is_empty());
-    let mut display: Vec<(bool, String)> = Vec::new(); // (is_header, label)
+    // Build display rows from matching items only (search filters the list).
+    let has_categories = matching
+        .iter()
+        .any(|&i| core.items.get(i).is_some_and(|it| !it.category.is_empty()));
+    let mut display: Vec<(bool, String, Option<usize>)> = Vec::new(); // (is_header, label, item_idx)
     if has_categories {
         let mut last_cat = String::new();
-        for item in core.items.iter() {
+        for &ei in &matching {
+            let Some(item) = core.items.get(ei) else {
+                continue;
+            };
             if !item.category.is_empty() && item.category != last_cat {
-                display.push((true, item.category.clone()));
+                display.push((true, item.category.clone(), None));
                 last_cat = item.category.clone();
             }
-            display.push((false, item.label.clone()));
+            display.push((false, item.label.clone(), Some(ei)));
         }
     } else {
-        for item in core.items.iter() {
-            display.push((false, item.label.clone()));
+        for &ei in &matching {
+            let Some(item) = core.items.get(ei) else {
+                continue;
+            };
+            display.push((false, item.label.clone(), Some(ei)));
         }
     }
 
@@ -3752,22 +3761,14 @@ fn render_list_picker(
     let max_scroll = display.len().saturating_sub(list_height);
     let effective_scroll = core.scroll_offset.min(max_scroll);
 
-    let visible_display: Vec<&(bool, String)> = display
+    let visible_display: Vec<&(bool, String, Option<usize>)> = display
         .iter()
         .skip(effective_scroll)
         .take(list_height)
         .collect();
 
-    // Count how many non-header items are before the visible window
-    let mut entry_idx = 0usize;
-    for (is_header, _) in display.iter().take(effective_scroll) {
-        if !is_header {
-            entry_idx += 1;
-        }
-    }
-
     let mut list_items: Vec<ListItem> = Vec::new();
-    for (is_header, label) in visible_display {
+    for (is_header, label, item_idx) in visible_display {
         if *is_header {
             let line = Line::from(vec![Span::styled(
                 format!(" {} ", label),
@@ -3777,8 +3778,7 @@ fn render_list_picker(
             )]);
             list_items.push(ListItem::new(line));
         } else {
-            let is_selected = entry_idx == core.selected;
-            entry_idx += 1;
+            let is_selected = *item_idx == Some(core.selected);
 
             let base_fg = if is_selected {
                 theme.text_strong

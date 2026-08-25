@@ -34,6 +34,10 @@ struct Cli {
     /// Enable debug logging
     #[arg(short, long)]
     debug: bool,
+
+    /// Filter commits by path (file or directory), like lazygit -f
+    #[arg(short = 'f', long = "filter", value_name = "PATH")]
+    filter_path: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -89,7 +93,7 @@ fn main() {
         .or(cli.work_tree)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    match app::App::new(repo_path, cli.debug) {
+    match app::App::new(repo_path, cli.debug, cli.filter_path) {
         Ok(app) => {
             if let Err(e) = app.run() {
                 eprintln!("Error: {:#}", e);

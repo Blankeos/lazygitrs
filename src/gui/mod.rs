@@ -10,6 +10,7 @@ pub mod views;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Stdout, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -38,25 +39,11 @@ use self::modes::diff_mode::DiffModeState;
 use self::modes::patch_building::PatchBuildingState;
 use self::modes::rebase_mode::{EntryStatus, RebaseModeState, RebasePhase};
 use self::popup::{CommandAction, CommandEntry, CommandSection};
-use self::popup::{ListPickerItem, MessageKind, PopupState};
-
-/// Compute the display row index for a given item selection,
-/// accounting for category header rows inserted between groups.
-fn list_picker_display_idx(items: &[ListPickerItem], sel: usize) -> usize {
-    let mut di = 0usize;
-    let mut last_cat = String::new();
-    for (ei, item) in items.iter().enumerate() {
-        if !item.category.is_empty() && item.category != last_cat {
-            di += 1; // header row
-            last_cat = item.category.clone();
-        }
-        if ei == sel {
-            return di;
-        }
-        di += 1;
-    }
-    di
-}
+use self::popup::{
+    MessageKind, PopupState, list_picker_clamp_selection_to_matches,
+    list_picker_filtered_display_idx, list_picker_matching_indices, list_picker_next_match,
+    list_picker_prev_match,
+};
 
 /// Compute the visible list height for a list picker popup, given terminal height.
 /// Must match the rendering formula: popup 60% height, minus borders (2), search bar + sep + hint (3).
@@ -76,19 +63,29 @@ fn handle_list_picker_mouse(
 ) {
     use crossterm::event::{MouseButton, MouseEventKind};
 
-    let total = core.items.len();
+    let search = core.search_textarea.lines().join("");
+    let matching = list_picker_matching_indices(&core.items, &search);
     let h = layout_height as usize;
     let lh = list_picker_visible_height(h);
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            core.selected = core.selected.saturating_sub(1);
-            if core.selected < core.scroll_offset {
-                core.scroll_offset = core.selected;
+            if let Some(prev) = list_picker_prev_match(&matching, core.selected) {
+                core.selected = prev;
+            }
+            if matching.first() == Some(&core.selected) {
+                core.scroll_offset = 0;
+            } else {
+                let di = list_picker_filtered_display_idx(&core.items, &matching, core.selected);
+                if di <= core.scroll_offset {
+                    core.scroll_offset = di.saturating_sub(1);
+                }
             }
         }
         MouseEventKind::ScrollDown => {
-            core.selected = (core.selected + 1).min(total.saturating_sub(1));
-            let di = list_picker_display_idx(&core.items, core.selected);
+            if let Some(next) = list_picker_next_match(&matching, core.selected) {
+                core.selected = next;
+            }
+            let di = list_picker_filtered_display_idx(&core.items, &matching, core.selected);
             if di >= core.scroll_offset + lh {
                 core.scroll_offset = di.saturating_sub(lh - 1);
             }
@@ -112,42 +109,36 @@ fn handle_list_picker_mouse(
                 && mouse.column < x + popup_width
             {
                 let row_in_list = (mouse.row - list_start) as usize;
-                // Map display row to entry index, accounting for category headers
-                let has_categories = core.items.iter().any(|i| !i.category.is_empty());
-                let effective_scroll = core.scroll_offset.min(if has_categories {
-                    // display length includes headers
-                    let display_len =
-                        list_picker_display_idx(&core.items, total.saturating_sub(1)) + 1;
-                    display_len.saturating_sub(list_height)
-                } else {
-                    total.saturating_sub(list_height)
-                });
-                let display_idx = effective_scroll + row_in_list;
-
+                // Build filtered display rows (headers + matching items)
+                let has_categories = matching
+                    .iter()
+                    .any(|&i| core.items.get(i).is_some_and(|it| !it.category.is_empty()));
+                let mut display: Vec<(bool, Option<usize>)> = Vec::new();
                 if has_categories {
-                    // Walk through display rows to find which entry was clicked
-                    let mut di = 0usize;
-                    let mut ei = 0usize;
                     let mut last_cat = String::new();
-                    for item in core.items.iter() {
+                    for &ei in &matching {
+                        let Some(item) = core.items.get(ei) else {
+                            continue;
+                        };
                         if !item.category.is_empty() && item.category != last_cat {
-                            if di == display_idx {
-                                break; // clicked on header
-                            }
-                            di += 1;
+                            display.push((true, None));
                             last_cat = item.category.clone();
                         }
-                        if di == display_idx {
-                            core.selected = ei;
-                            break;
-                        }
-                        di += 1;
-                        ei += 1;
+                        display.push((false, Some(ei)));
                     }
                 } else {
-                    let clicked_idx = effective_scroll + row_in_list;
-                    if clicked_idx < total {
-                        core.selected = clicked_idx;
+                    for &ei in &matching {
+                        display.push((false, Some(ei)));
+                    }
+                }
+                let max_scroll = display.len().saturating_sub(list_height);
+                let effective_scroll = core.scroll_offset.min(max_scroll);
+                let display_idx = effective_scroll + row_in_list;
+                if let Some((is_header, item_idx)) = display.get(display_idx) {
+                    if !*is_header {
+                        if let Some(ei) = item_idx {
+                            core.selected = *ei;
+                        }
                     }
                 }
             }
@@ -1062,6 +1053,28 @@ impl Gui {
             .unwrap_or_default()
     }
 
+    /// Apply a startup path filter from `-f/--filter` (lazygit-compatible).
+    /// Commits are reloaded with the filter once the initial model stream finishes.
+    pub fn apply_startup_path_filter(&mut self, path: PathBuf) {
+        let raw = path.to_string_lossy().trim().to_string();
+        if raw.is_empty() {
+            return;
+        }
+        // Prefer a repo-relative path so `git log -- path` matches tracked files.
+        let relative = path
+            .canonicalize()
+            .ok()
+            .and_then(|abs| {
+                abs.strip_prefix(self.git.repo_path())
+                    .ok()
+                    .map(|p| p.to_string_lossy().to_string())
+            })
+            .filter(|p| !p.is_empty())
+            .unwrap_or(raw);
+        self.commit_path_filter = Some(relative);
+        self.context_mgr.set_active(ContextId::Commits);
+    }
+
     pub fn run(&mut self) -> Result<()> {
         let (mut terminal, keyboard_enhanced) = setup_terminal()?;
         // Continuous reader thread: reassembly needs reads between frames
@@ -1259,14 +1272,21 @@ impl Gui {
                 // All parts received — done loading.
                 if self.initial_load_received >= MODEL_PART_COUNT {
                     self.initial_load_rx = None;
-                    if self.refresh_in_progress {
-                        self.refresh_in_progress = false;
-                        // Leave needs_refresh alone: if another mutation arrived
-                        // mid-refresh it will re-queue on the next frame.
-                        self.needs_files_refresh = false;
-                        self.needs_diff_refresh = true;
-                        self.last_refresh_at = Instant::now();
-                        // Re-apply selection-dependent views after stream completes.
+                    let was_refresh = self.refresh_in_progress;
+                    self.refresh_in_progress = false;
+                    // Leave needs_refresh alone: if another mutation arrived
+                    // mid-refresh it will re-queue on the next frame.
+                    self.needs_files_refresh = false;
+                    self.needs_diff_refresh = true;
+                    self.last_refresh_at = Instant::now();
+                    // Re-apply filters / selection-dependent views after stream
+                    // completes (initial load and background refresh). Needed so
+                    // startup `-f/--filter` takes effect once commits arrive.
+                    if was_refresh
+                        || self.commit_path_filter.is_some()
+                        || !self.commit_branch_filter.is_empty()
+                        || !self.commit_author_filter.is_empty()
+                    {
                         if let Err(err) = self.after_model_refresh() {
                             self.show_error("Refresh failed", err);
                         }
@@ -4887,7 +4907,7 @@ impl Gui {
 
         if let PopupState::RefPicker { core, .. } = &mut self.popup {
             let search = core.search_textarea.lines().join("");
-            let total = core.items.len();
+            let matching = list_picker_matching_indices(&core.items, &search);
 
             let h = self.layout.height as usize;
             let list_height = list_picker_visible_height(h);
@@ -4914,20 +4934,24 @@ impl Gui {
                     return Ok(());
                 }
                 KeyCode::Down => {
-                    if total > 0 {
-                        core.selected = (core.selected + 1).min(total.saturating_sub(1));
+                    if let Some(next) = list_picker_next_match(&matching, core.selected) {
+                        core.selected = next;
                     }
-                    let sdi = list_picker_display_idx(&core.items, core.selected);
+                    let sdi =
+                        list_picker_filtered_display_idx(&core.items, &matching, core.selected);
                     if sdi >= core.scroll_offset + list_height {
                         core.scroll_offset = sdi.saturating_sub(list_height - 1);
                     }
                 }
                 KeyCode::Up => {
-                    core.selected = core.selected.saturating_sub(1);
-                    if core.selected == 0 {
+                    if let Some(prev) = list_picker_prev_match(&matching, core.selected) {
+                        core.selected = prev;
+                    }
+                    if matching.first() == Some(&core.selected) {
                         core.scroll_offset = 0;
                     } else {
-                        let sdi = list_picker_display_idx(&core.items, core.selected);
+                        let sdi =
+                            list_picker_filtered_display_idx(&core.items, &matching, core.selected);
                         if sdi <= core.scroll_offset {
                             core.scroll_offset = sdi.saturating_sub(1);
                         }
@@ -4938,9 +4962,21 @@ impl Gui {
                     let new_search = core.search_textarea.lines().join("");
                     if new_search != search {
                         sync_list_picker_free_entry(core, REF_FREE_ENTRY_CATEGORY);
+                        let matching = list_picker_matching_indices(&core.items, &new_search);
+                        if let Some(sel) =
+                            list_picker_clamp_selection_to_matches(&matching, core.selected)
+                        {
+                            core.selected = sel;
+                        }
                         if !new_search.is_empty() {
-                            let sdi = list_picker_display_idx(&core.items, core.selected);
+                            let sdi = list_picker_filtered_display_idx(
+                                &core.items,
+                                &matching,
+                                core.selected,
+                            );
                             core.scroll_offset = sdi.saturating_sub(list_height / 2);
+                        } else {
+                            core.scroll_offset = 0;
                         }
                     }
                 }
@@ -4961,7 +4997,7 @@ impl Gui {
         } = &mut self.popup
         {
             let search = core.search_textarea.lines().join("");
-            let total = core.items.len();
+            let matching = list_picker_matching_indices(&core.items, &search);
             let free_cat = free_entry_category.clone();
 
             let h = self.layout.height as usize;
@@ -4989,20 +5025,24 @@ impl Gui {
                     return Ok(());
                 }
                 KeyCode::Down => {
-                    if total > 0 {
-                        core.selected = (core.selected + 1).min(total.saturating_sub(1));
+                    if let Some(next) = list_picker_next_match(&matching, core.selected) {
+                        core.selected = next;
                     }
-                    let sdi = list_picker_display_idx(&core.items, core.selected);
+                    let sdi =
+                        list_picker_filtered_display_idx(&core.items, &matching, core.selected);
                     if sdi >= core.scroll_offset + list_height {
                         core.scroll_offset = sdi.saturating_sub(list_height - 1);
                     }
                 }
                 KeyCode::Up => {
-                    core.selected = core.selected.saturating_sub(1);
-                    if core.selected == 0 {
+                    if let Some(prev) = list_picker_prev_match(&matching, core.selected) {
+                        core.selected = prev;
+                    }
+                    if matching.first() == Some(&core.selected) {
                         core.scroll_offset = 0;
                     } else {
-                        let sdi = list_picker_display_idx(&core.items, core.selected);
+                        let sdi =
+                            list_picker_filtered_display_idx(&core.items, &matching, core.selected);
                         if sdi <= core.scroll_offset {
                             core.scroll_offset = sdi.saturating_sub(1);
                         }
@@ -5013,9 +5053,21 @@ impl Gui {
                     let new_search = core.search_textarea.lines().join("");
                     if new_search != search {
                         sync_list_picker_prefer_free_entry(core, &free_cat);
+                        let matching = list_picker_matching_indices(&core.items, &new_search);
+                        if let Some(sel) =
+                            list_picker_clamp_selection_to_matches(&matching, core.selected)
+                        {
+                            core.selected = sel;
+                        }
                         if !new_search.is_empty() {
-                            let sdi = list_picker_display_idx(&core.items, core.selected);
+                            let sdi = list_picker_filtered_display_idx(
+                                &core.items,
+                                &matching,
+                                core.selected,
+                            );
                             core.scroll_offset = sdi.saturating_sub(list_height / 2);
+                        } else {
+                            core.scroll_offset = 0;
                         }
                     }
                 }
