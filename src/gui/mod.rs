@@ -9,7 +9,7 @@ pub mod scroll;
 pub mod views;
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{self, Stdout, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -147,7 +147,7 @@ fn handle_list_picker_mouse(
     }
 }
 
-pub type Term = Terminal<CrosstermBackend<Stdout>>;
+pub type Term = Terminal<CrosstermBackend<crate::os::tty::TuiOutput>>;
 const COMMIT_DETAILS_DEBOUNCE: Duration = Duration::from_millis(120);
 const MAX_CONCURRENT_DIFF_JOBS: usize = 2;
 const DIFF_PREVIEW_CACHE_ENTRIES: usize = 24;
@@ -1130,8 +1130,10 @@ impl Gui {
 
         // LeaveAlternateScreen restores the previous buffer; wipe the primary
         // screen so Helix doesn't paint over leftover lazygit frames.
+        // Use the same TUI output handle (/dev/tty when stdout is piped).
         {
-            let mut out = std::io::stdout();
+            let mut out = crate::os::tty::open_tui_output()
+                .context("Failed to open terminal output for editor handoff")?;
             execute!(
                 out,
                 Clear(ClearType::All),
@@ -8351,7 +8353,7 @@ impl Command for EnableMouseCaptureWithoutHover {
     }
 
     #[cfg(windows)]
-    fn execute_winapi(&self) -> io::Result<()> {
+    fn execute_winapi(&self) -> std::io::Result<()> {
         Command::execute_winapi(&crossterm::event::EnableMouseCapture)
     }
 
@@ -8618,23 +8620,36 @@ mod terminal_mouse_tests {
 
 fn setup_terminal() -> Result<(Term, bool)> {
     terminal::enable_raw_mode()?;
-    let mut stdout = io::stdout();
+    // Prefer /dev/tty when stdout is piped (Helix `:insert-output`, etc.).
+    let mut out =
+        crate::os::tty::open_tui_output().context("Failed to open terminal output for TUI")?;
     execute!(
-        stdout,
+        out,
         EnterAlternateScreen,
         EnableMouseCaptureWithoutHover,
         crossterm::event::EnableFocusChange,
         crossterm::event::EnableBracketedPaste,
         cursor::Hide
     )?;
-    let keyboard_enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    // Helix leaves progressive kitty keyboard enhancement enabled across
+    // `:insert-output` and keeps a `/dev/tty` EventStream open. Probing races
+    // that reader (blank hang); instead pop leftover stacks and push our flags
+    // so CSI-u keys parse as KeyEvents.
+    let keyboard_enhanced = if crate::os::tty::nested_tty_launch() {
+        for _ in 0..4 {
+            let _ = execute!(out, crossterm::event::PopKeyboardEnhancementFlags);
+        }
+        true
+    } else {
+        crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false)
+    };
     if keyboard_enhanced {
         execute!(
-            stdout,
+            out,
             crossterm::event::PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
         )?;
     }
-    let backend = CrosstermBackend::new(stdout);
+    let backend = CrosstermBackend::new(out);
     let terminal = Terminal::new(backend)?;
     Ok((terminal, keyboard_enhanced))
 }
@@ -8645,6 +8660,37 @@ fn setup_terminal() -> Result<(Term, bool)> {
 /// process-wide mutex that the input thread holds for the duration of its
 /// blocking read, so any drain from this thread would silently no-op.
 fn restore_terminal(terminal: &mut Term, keyboard_enhanced: bool) -> Result<()> {
+    // Helix `:insert-output` keeps its own alt-screen / raw mode / mouse / focus
+    // / bracketed-paste / kitty stack across the child. If we tear those down
+    // here, Helix resumes drawing into a world that no longer exists and the
+    // user is left staring at the primary-screen `hx` launch line with a dead
+    // TUI. Nested exit must only undo *our* transient state and hand the tty
+    // foreground back.
+    let nested = crate::os::tty::nested_tty_launch();
+    if nested {
+        // Hide our cursor leftovers, pop the kitty flags we pushed, then put
+        // Helix's progressive flags back (DISAMBIGUATE | REPORT_ALTERNATE_KEYS).
+        execute!(terminal.backend_mut(), cursor::Show)?;
+        if keyboard_enhanced {
+            execute!(
+                terminal.backend_mut(),
+                crossterm::event::PopKeyboardEnhancementFlags
+            )?;
+            execute!(
+                terminal.backend_mut(),
+                crossterm::event::PushKeyboardEnhancementFlags(
+                    crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                        | crossterm::event::KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                )
+            )?;
+        }
+        terminal.backend_mut().flush()?;
+        crate::os::tty::restore_foreground_tty();
+        return Ok(());
+    }
+
+    // Standalone / non-nested: full teardown.
+    crate::os::tty::restore_foreground_tty();
     if keyboard_enhanced {
         execute!(
             terminal.backend_mut(),

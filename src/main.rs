@@ -55,20 +55,42 @@ enum Commands {
 fn install_panic_hook() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let mut stdout = std::io::stdout();
-        let _ = crossterm::execute!(
-            stdout,
-            crossterm::event::DisableMouseCapture,
-            crossterm::event::DisableFocusChange,
-            crossterm::cursor::Show,
-            crossterm::terminal::LeaveAlternateScreen,
-        );
-        let _ = crossterm::terminal::disable_raw_mode();
+        // Prefer /dev/tty when stdout is redirected (Helix `:insert-output`).
+        let mut out =
+            crate::os::tty::open_tui_output().unwrap_or_else(|_| Box::new(std::io::stdout()));
+        if crate::os::tty::nested_tty_launch() {
+            // Same contract as restore_terminal: Helix still owns alt-screen /
+            // raw / mouse. Only undo our kitty push and hand the tty back.
+            let _ = crossterm::execute!(out, crossterm::cursor::Show);
+            let _ = crossterm::execute!(
+                out,
+                crossterm::event::PopKeyboardEnhancementFlags,
+                crossterm::event::PushKeyboardEnhancementFlags(
+                    crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                        | crossterm::event::KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                ),
+            );
+            crate::os::tty::restore_foreground_tty();
+        } else {
+            crate::os::tty::restore_foreground_tty();
+            let _ = crossterm::execute!(
+                out,
+                crossterm::event::DisableMouseCapture,
+                crossterm::event::DisableFocusChange,
+                crossterm::cursor::Show,
+                crossterm::terminal::LeaveAlternateScreen,
+            );
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
         prev(info);
     }));
 }
 
 fn main() {
+    // Helix `:insert-output` sets stdin=/dev/null + stdout=pipe while keeping its
+    // EventStream on /dev/tty. Detect that, claim the tty foreground so Helix
+    // can't steal keys, and draw on a separate /dev/tty handle (no stdout dup2).
+    os::tty::reclaim_controlling_tty();
     install_panic_hook();
     let cli = Cli::parse();
 
