@@ -2136,9 +2136,8 @@ impl Gui {
                     };
 
                     // Split AI message into summary (first line) and body (rest).
-                    // The AI usually emits a hard-wrapped body (~72-char lines); strip those
-                    // wrap-induced breaks so they don't read as user paragraph breaks in the
-                    // soft-wrapped editor.
+                    // Preserve AI newlines as logical lines; BodySoftWrap soft-wraps
+                    // for display only (avoids collapsing `- a\n- b` into one line).
                     let (summary, body) = match message.find('\n') {
                         Some(idx) => {
                             let s = message[..idx].to_string();
@@ -4509,8 +4508,7 @@ impl Gui {
                             new_summary.insert_str(&summary);
                             *summary_textarea = new_summary;
                             *body_textarea = popup::make_commit_body_textarea();
-                            // History entries were committed with hard wraps — undo them so
-                            // they don't read as paragraph breaks in the soft-wrapped editor.
+                            // Preserve history newlines; soft-wrap is display-only.
                             body_state.set_text(popup::unwrap_commit_body(&body));
                             body_state.render_into(body_textarea, wrap_width);
                         };
@@ -4568,16 +4566,19 @@ impl Gui {
                                 textarea_input(summary_textarea, key);
                             }
                             popup::CommitInputFocus::Body => {
-                                // Body is driven by body_state (the unwrapped source of truth);
-                                // body_textarea is just a soft-wrapped projection of it. Translate
-                                // each key into a body_state edit, then re-render.
-                                let mut handled = true;
+                                // Body is driven by body_state; body_textarea is a soft-wrapped
+                                // projection. Content edits rebuild the projection; pure cursor
+                                // moves only Jump so the viewport is preserved (Up only scrolls
+                                // when the cursor is already on the first visible row).
+                                let mut content_changed = false;
+                                let mut cursor_moved = false;
                                 let alt = key.modifiers.contains(KeyModifiers::ALT);
                                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                                 let cmd = has_command_modifier(key.modifiers);
                                 match key.code {
                                     KeyCode::Char(c) if !ctrl && !alt && !cmd => {
                                         body_state.insert_char(c);
+                                        content_changed = true;
                                     }
                                     // Cmd+Backspace / Ctrl+U: delete to start of visual line.
                                     // Most macOS terminals (Zed, WezTerm, …) intercept Cmd and
@@ -4585,46 +4586,96 @@ impl Gui {
                                     // the only one that works everywhere.
                                     KeyCode::Backspace if cmd => {
                                         body_state.delete_to_visual_line_start(wrap_width);
+                                        content_changed = true;
                                     }
                                     KeyCode::Char('u') if ctrl => {
                                         body_state.delete_to_visual_line_start(wrap_width);
+                                        content_changed = true;
                                     }
                                     // Opt+Backspace / Ctrl+W: delete previous word.
-                                    KeyCode::Backspace if alt => body_state.delete_word_left(),
-                                    KeyCode::Char('w') if ctrl => body_state.delete_word_left(),
-                                    KeyCode::Backspace => body_state.backspace(),
-                                    KeyCode::Delete => body_state.delete(),
+                                    KeyCode::Backspace if alt => {
+                                        body_state.delete_word_left();
+                                        content_changed = true;
+                                    }
+                                    KeyCode::Char('w') if ctrl => {
+                                        body_state.delete_word_left();
+                                        content_changed = true;
+                                    }
+                                    KeyCode::Backspace => {
+                                        body_state.backspace();
+                                        content_changed = true;
+                                    }
+                                    KeyCode::Delete => {
+                                        body_state.delete();
+                                        content_changed = true;
+                                    }
                                     // Cmd+Left/Right and Ctrl+A/E: jump to start/end of visual
                                     // row. Same reason as Cmd+Backspace — Ctrl is the portable
                                     // binding.
                                     KeyCode::Left if cmd => {
-                                        body_state.move_visual_line_start(wrap_width)
+                                        body_state.move_visual_line_start(wrap_width);
+                                        cursor_moved = true;
                                     }
                                     KeyCode::Right if cmd => {
-                                        body_state.move_visual_line_end(wrap_width)
+                                        body_state.move_visual_line_end(wrap_width);
+                                        cursor_moved = true;
                                     }
                                     KeyCode::Char('a') if ctrl => {
-                                        body_state.move_visual_line_start(wrap_width)
+                                        body_state.move_visual_line_start(wrap_width);
+                                        cursor_moved = true;
                                     }
                                     KeyCode::Char('e') if ctrl => {
-                                        body_state.move_visual_line_end(wrap_width)
+                                        body_state.move_visual_line_end(wrap_width);
+                                        cursor_moved = true;
                                     }
                                     // Opt+Left/Right: jump by word (matches the new-branch input
                                     // and the rest of the readline-style world).
-                                    KeyCode::Left if alt => body_state.move_word_left(),
-                                    KeyCode::Right if alt => body_state.move_word_right(),
-                                    KeyCode::Char('b') if alt => body_state.move_word_left(),
-                                    KeyCode::Char('f') if alt => body_state.move_word_right(),
-                                    KeyCode::Left => body_state.move_left(),
-                                    KeyCode::Right => body_state.move_right(),
-                                    KeyCode::Up => body_state.move_visual_up(wrap_width),
-                                    KeyCode::Down => body_state.move_visual_down(wrap_width),
-                                    KeyCode::Home => body_state.move_home(),
-                                    KeyCode::End => body_state.move_end(),
-                                    _ => handled = false,
+                                    KeyCode::Left if alt => {
+                                        body_state.move_word_left();
+                                        cursor_moved = true;
+                                    }
+                                    KeyCode::Right if alt => {
+                                        body_state.move_word_right();
+                                        cursor_moved = true;
+                                    }
+                                    KeyCode::Char('b') if alt => {
+                                        body_state.move_word_left();
+                                        cursor_moved = true;
+                                    }
+                                    KeyCode::Char('f') if alt => {
+                                        body_state.move_word_right();
+                                        cursor_moved = true;
+                                    }
+                                    KeyCode::Left => {
+                                        body_state.move_left();
+                                        cursor_moved = true;
+                                    }
+                                    KeyCode::Right => {
+                                        body_state.move_right();
+                                        cursor_moved = true;
+                                    }
+                                    KeyCode::Up => {
+                                        body_state.move_visual_up(wrap_width);
+                                        cursor_moved = true;
+                                    }
+                                    KeyCode::Down => {
+                                        body_state.move_visual_down(wrap_width);
+                                        cursor_moved = true;
+                                    }
+                                    KeyCode::Home => {
+                                        body_state.move_home();
+                                        cursor_moved = true;
+                                    }
+                                    KeyCode::End => {
+                                        body_state.move_end();
+                                        cursor_moved = true;
+                                    }
+                                    _ => {}
                                 }
-                                if handled {
+                                if content_changed {
                                     body_state.render_into(body_textarea, wrap_width);
+                                } else if cursor_moved {
+                                    body_state.apply_cursor_into(body_textarea, wrap_width);
                                 }
                             }
                         }
@@ -6017,8 +6068,7 @@ impl Gui {
                                     summary_textarea.select_all();
                                     summary_textarea.cut();
                                     summary_textarea.insert_str(&summary);
-                                    // Clipboard usually holds an existing commit message that
-                                    // was hard-wrapped — unwrap before loading.
+                                    // Preserve pasted newlines; soft-wrap is display-only.
                                     body_state.set_text(popup::unwrap_commit_body(&body));
                                     let wrap = gui.commit_body_wrap_width();
                                     body_state.render_into(body_textarea, wrap);

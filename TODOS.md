@@ -320,3 +320,6 @@ Where I observed this behavior: I noticed this for the "Commit Message" and "Des
 - [x] Unified diff when scrolling, sometimes some of the diff lines get cleared as I scroll
 
 - [x] Interactive rebase 'e' bug. Points to older commit
+
+- [x] Stability of commit message generation and their wrapping, consistent \n- is sometimes cleared in the body. this is definitely a wrapping problem in the UI
+  - Root cause: `unwrap_commit_body` joined consecutive non-blank lines with spaces (`- a\n- b` → `- a - b`). Soft-wrap is now display-only; logical newlines from AI/paste/history are preserved. `WrapLayout` uses unicode display width (crabcode-style).

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use crossterm::event::KeyEvent;
 use tui_textarea::{CursorMove, TextArea};
+use unicode_width::UnicodeWidthChar;
 
 use super::Gui;
 
@@ -17,32 +18,14 @@ pub fn sync_list_picker_prefer_free_entry(core: &mut ListPickerCore, free_entry_
     }
 }
 
-/// Reverse hard-wrapping in an externally-formatted commit body so it can be
-/// loaded into a soft-wrapped editor without spurious mid-paragraph line breaks.
+/// Normalize an externally-sourced commit body for the soft-wrapped editor.
 ///
-/// Convention: blank lines separate paragraphs; consecutive non-blank lines
-/// inside a paragraph are joined back into one logical line. Used when loading
-/// AI-generated messages, clipboard pastes via the menu, and history entries.
+/// Soft-wrap is display-only (`BodySoftWrap` / `WrapLayout`), so logical
+/// newlines from AI output, clipboard pastes, and history must be preserved.
+/// Joining consecutive lines used to collapse bullet lists into one line
+/// (`- a\n- b` → `- a - b`); we only normalize `\r\n` / trailing `\r`.
 pub fn unwrap_commit_body(text: &str) -> String {
-    let mut paragraphs: Vec<String> = Vec::new();
-    let mut current = String::new();
-    for line in text.lines() {
-        if line.trim().is_empty() {
-            if !current.is_empty() {
-                paragraphs.push(std::mem::take(&mut current));
-            }
-            // Multiple blank lines collapse into one paragraph break.
-        } else {
-            if !current.is_empty() {
-                current.push(' ');
-            }
-            current.push_str(line);
-        }
-    }
-    if !current.is_empty() {
-        paragraphs.push(current);
-    }
-    paragraphs.join("\n\n")
+    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 /// Source-of-truth for the commit body when soft-wrap is in effect. The body
@@ -78,6 +61,7 @@ impl WrapLayout {
         let mut para_start = 0usize;
         let paragraphs: Vec<&str> = raw.split('\n').collect();
         let total_paragraphs = paragraphs.len();
+        let wrap_width = wrap_width.max(1);
         for (p_idx, para) in paragraphs.iter().enumerate() {
             let chars: Vec<char> = para.chars().collect();
             if chars.is_empty() {
@@ -86,40 +70,51 @@ impl WrapLayout {
                     raw_start: para_start,
                     char_len: 0,
                 });
-            } else if wrap_width == 0 {
-                lines.push(WrapLine {
-                    text: para.to_string(),
-                    raw_start: para_start,
-                    char_len: chars.len(),
-                });
             } else {
                 let mut start = 0usize;
                 while start < chars.len() {
-                    let remaining = chars.len() - start;
-                    if remaining <= wrap_width {
-                        let text: String = chars[start..].iter().collect();
-                        lines.push(WrapLine {
-                            text,
-                            raw_start: para_start + start,
-                            char_len: remaining,
-                        });
-                        start = chars.len();
-                    } else {
-                        let window = &chars[start..start + wrap_width];
-                        let break_at = window.iter().rposition(|c| *c == ' ');
-                        let (line_end, consumed) = match break_at {
-                            Some(0) | None => (start + wrap_width, 0),
-                            Some(i) => (start + i, 1),
-                        };
-                        let text: String = chars[start..line_end].iter().collect();
-                        let len = line_end - start;
-                        lines.push(WrapLine {
-                            text,
-                            raw_start: para_start + start,
-                            char_len: len,
-                        });
-                        start = line_end + consumed;
+                    // Grow by display width (crabcode-style), not char count,
+                    // so wide glyphs don't force horizontal scroll.
+                    let mut end = start;
+                    let mut width = 0usize;
+                    let mut last_space: Option<usize> = None;
+                    while end < chars.len() {
+                        let ch = chars[end];
+                        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                        if end > start && width + ch_width > wrap_width {
+                            break;
+                        }
+                        if ch == ' ' {
+                            last_space = Some(end);
+                        }
+                        width += ch_width;
+                        end += 1;
+                        if width >= wrap_width {
+                            break;
+                        }
                     }
+                    if end == start {
+                        // Pathological zero-width / over-wide glyph: advance one char.
+                        end = (start + 1).min(chars.len());
+                    }
+
+                    let at_end = end >= chars.len();
+                    let (line_end, consumed) = if at_end {
+                        (end, 0)
+                    } else {
+                        match last_space {
+                            Some(i) if i > start => (i, 1),
+                            _ => (end, 0),
+                        }
+                    };
+                    let text: String = chars[start..line_end].iter().collect();
+                    let len = line_end - start;
+                    lines.push(WrapLine {
+                        text,
+                        raw_start: para_start + start,
+                        char_len: len,
+                    });
+                    start = line_end + consumed;
                 }
             }
             // Advance past this paragraph's chars + the \n separator (except after the last).
@@ -419,13 +414,23 @@ impl BodySoftWrap {
         self.cursor = layout.visual_to_cursor(row, col);
     }
 
+    /// Place the visual cursor on an already-projected `textarea` without
+    /// rebuilding it. Keeps the existing viewport so Up/Down only scroll when
+    /// the cursor would leave the visible area (browser-textarea behavior).
+    pub fn apply_cursor_into(&self, textarea: &mut TextArea<'static>, wrap_width: usize) {
+        let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
+        let (row, col) = layout.cursor_to_visual(self.cursor);
+        textarea.move_cursor(CursorMove::Jump(row as u16, col as u16));
+    }
+
     /// Re-render `textarea` to display the current raw text soft-wrapped at
     /// `wrap_width`, and place the visual cursor where it logically belongs.
     ///
     /// We rebuild the textarea from scratch (rather than mutating in place)
     /// because tui_textarea's internal viewport/scroll state can get stuck
     /// past the end of content after a terminal resize. A fresh TextArea
-    /// always starts with a clean viewport.
+    /// always starts with a clean viewport. Prefer [`Self::apply_cursor_into`]
+    /// for pure cursor moves so scroll is preserved.
     pub fn render_into(&self, textarea: &mut TextArea<'static>, wrap_width: usize) {
         let layout = WrapLayout::build(&self.raw, wrap_width.max(1));
         let lines: Vec<String> = layout.lines.iter().map(|l| l.text.clone()).collect();
@@ -727,6 +732,50 @@ impl CommandEntry {
 
     pub fn is_executable(&self) -> bool {
         self.action != CommandAction::Unavailable
+    }
+}
+
+#[cfg(test)]
+mod commit_body_wrap_tests {
+    use super::{BodySoftWrap, WrapLayout, unwrap_commit_body};
+
+    #[test]
+    fn unwrap_preserves_newlines_and_bullets() {
+        let raw = "- something\n- something 2\n\nparagraph\n";
+        assert_eq!(
+            unwrap_commit_body(raw),
+            "- something\n- something 2\n\nparagraph\n"
+        );
+    }
+
+    #[test]
+    fn unwrap_normalizes_crlf() {
+        assert_eq!(unwrap_commit_body("a\r\nb\rc"), "a\nb\nc");
+    }
+
+    #[test]
+    fn wrap_layout_keeps_logical_newlines_as_rows() {
+        let layout = WrapLayout::build("- something\n- something 2", 80);
+        assert_eq!(layout.line_count(), 2);
+        assert_eq!(layout.as_textarea_text(), "- something\n- something 2");
+    }
+
+    #[test]
+    fn wrap_layout_breaks_on_display_width_not_char_count() {
+        // Two wide chars (width 2 each) should wrap before a third at width 4.
+        let layout = WrapLayout::build("あああ", 4);
+        assert_eq!(layout.line_count(), 2);
+        assert_eq!(layout.as_textarea_text(), "ああ\nあ");
+    }
+
+    #[test]
+    fn soft_wrap_preserves_raw_newlines_while_rendering() {
+        let mut state = BodySoftWrap::new();
+        state.set_text("- something\n- something 2");
+        let mut ta = super::make_commit_body_textarea();
+        state.render_into(&mut ta, 80);
+        assert_eq!(state.raw(), "- something\n- something 2");
+        assert_eq!(ta.lines().join("\n"), "- something\n- something 2");
     }
 }
 

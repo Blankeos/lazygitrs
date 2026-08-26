@@ -51,13 +51,13 @@ lazygitrs upgrade 0.0.32   # specific version
   git:
     commit:
       # Using claude
-      generateCommand: "claude -p 'Generate a conventional commit message for this diff.' --no-session-persistence"
+      generateCommand: "claude -p 'Generate a conventional commit message for this diff. Do not hard-wrap lines; one bullet per line; blank line between paragraphs.' --no-session-persistence"
       # Using opencode
-      generateCommand: "opencode run 'Generate a conventional commit message for this diff.'"
+      generateCommand: "opencode run 'Generate a conventional commit message for this diff. Do not hard-wrap lines; one bullet per line; blank line between paragraphs.'"
       # Using codex
-      generateCommand: "codex exec --ephemeral 'Generate a conventional commit message for this diff.'"
+      generateCommand: "codex exec --ephemeral 'Generate a conventional commit message for this diff. Do not hard-wrap lines; one bullet per line; blank line between paragraphs.'"
       # Using modelcli
-      generateCommand: 'DIFF=$(git diff --cached) && modelcli "Generate a conventional commit message for this diff. Always provide a bulletpoint body. $DIFF"'
+      generateCommand: 'DIFF=$(git diff --cached) && modelcli "Generate a conventional commit message for this diff. Always provide a bulletpoint body. Do not hard-wrap lines; one bullet per line. $DIFF"'
   ```
 
 - [x] **Side-by-side + unified diffs** with syntax highlighting by default and unified as well, no pager hacks needed
