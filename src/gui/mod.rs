@@ -2156,9 +2156,7 @@ impl Gui {
                             ..
                         } = stashed
                         {
-                            summary_textarea.select_all();
-                            summary_textarea.cut();
-                            summary_textarea.insert_str(&summary);
+                            popup::set_commit_summary_text(summary_textarea, &summary);
                             body_state.set_text(body.clone());
                             body_state.render_into(body_textarea, wrap);
                         }
@@ -4504,9 +4502,7 @@ impl Gui {
                                         body_state: &mut popup::BodySoftWrap,
                                         msg: &str| {
                             let (summary, body) = split_commit_message(msg);
-                            let mut new_summary = popup::make_commit_summary_textarea();
-                            new_summary.insert_str(&summary);
-                            *summary_textarea = new_summary;
+                            popup::set_commit_summary_text(summary_textarea, &summary);
                             *body_textarea = popup::make_commit_body_textarea();
                             // Preserve history newlines; soft-wrap is display-only.
                             body_state.set_text(popup::unwrap_commit_body(&body));
@@ -6070,9 +6066,7 @@ impl Gui {
                                         }
                                         None => (text.clone(), String::new()),
                                     };
-                                    summary_textarea.select_all();
-                                    summary_textarea.cut();
-                                    summary_textarea.insert_str(&summary);
+                                    popup::set_commit_summary_text(summary_textarea, &summary);
                                     // Preserve pasted newlines; soft-wrap is display-only.
                                     body_state.set_text(popup::unwrap_commit_body(&body));
                                     let wrap = gui.commit_body_wrap_width();
@@ -6101,8 +6095,7 @@ impl Gui {
                         ..
                     } = editor
                     {
-                        summary_textarea.select_all();
-                        summary_textarea.cut();
+                        popup::set_commit_summary_text(summary_textarea, "");
                         body_state.set_text(String::new());
                         let wrap = gui.commit_body_wrap_width();
                         body_state.render_into(body_textarea, wrap);

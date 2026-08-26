@@ -651,6 +651,24 @@ pub fn make_commit_summary_textarea() -> TextArea<'static> {
     make_textarea("Required")
 }
 
+/// Replace the summary textarea contents with `text`, cursor at end.
+///
+/// Always rebuilds a fresh `TextArea` so horizontal `scroll_top` is reset.
+/// Reusing select_all/cut/insert_str can leave a stale scroll past the new
+/// end (tui-textarea's `next_scroll_top` then clamps to `cursor`, showing
+/// empty space to the right of the text).
+pub fn set_commit_summary_text(textarea: &mut TextArea<'static>, text: &str) {
+    let mut fresh = make_commit_summary_textarea();
+    // Preserve focus/cursor styling from the existing widget.
+    fresh.set_cursor_style(textarea.cursor_style());
+    fresh.set_cursor_line_style(textarea.cursor_line_style());
+    fresh.set_style(textarea.style());
+    if !text.is_empty() {
+        fresh.insert_str(text);
+    }
+    *textarea = fresh;
+}
+
 pub fn make_commit_body_textarea() -> TextArea<'static> {
     let mut ta = make_textarea("Optional");
     // Body starts unfocused — hide cursor
