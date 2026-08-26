@@ -189,56 +189,69 @@ impl RebaseModeState {
         self.total_count = 0;
     }
 
-    /// Set the action on the currently selected entry (Planning phase only).
+    /// Set the action on the currently selected entry.
+    /// In Planning, any entry can be changed. In InProgress, only remaining
+    /// (`Pending`) entries can be changed — already-applied ones are fixed.
     pub fn set_action(&mut self, action: RebaseAction) {
-        if self.phase != RebasePhase::Planning {
-            return;
-        }
         if let Some(entry) = self.entries.get_mut(self.selected) {
+            if self.phase == RebasePhase::InProgress && entry.status != EntryStatus::Pending {
+                return;
+            }
             entry.action = action;
         }
     }
 
-    /// Cycle the selected entry's action forward (Planning phase only).
+    /// Cycle the selected entry's action forward.
     pub fn cycle_action_forward(&mut self) {
-        if self.phase != RebasePhase::Planning {
-            return;
-        }
         if let Some(entry) = self.entries.get_mut(self.selected) {
+            if self.phase == RebasePhase::InProgress && entry.status != EntryStatus::Pending {
+                return;
+            }
             entry.action = entry.action.next();
         }
     }
 
-    /// Cycle the selected entry's action backward (Planning phase only).
+    /// Cycle the selected entry's action backward.
     pub fn cycle_action_backward(&mut self) {
-        if self.phase != RebasePhase::Planning {
-            return;
-        }
         if let Some(entry) = self.entries.get_mut(self.selected) {
+            if self.phase == RebasePhase::InProgress && entry.status != EntryStatus::Pending {
+                return;
+            }
             entry.action = entry.action.prev();
         }
     }
 
-    /// Move the selected entry up (Planning phase only).
+    /// Move the selected entry up (toward newer commits / top of list).
+    /// In InProgress, only Pending entries may be reordered among themselves.
     pub fn move_up(&mut self) {
-        if self.phase != RebasePhase::Planning {
+        if self.selected == 0 {
             return;
         }
-        if self.selected > 0 {
-            self.entries.swap(self.selected, self.selected - 1);
-            self.selected -= 1;
+        if self.phase == RebasePhase::InProgress {
+            let cur = &self.entries[self.selected];
+            let above = &self.entries[self.selected - 1];
+            if cur.status != EntryStatus::Pending || above.status != EntryStatus::Pending {
+                return;
+            }
         }
+        self.entries.swap(self.selected, self.selected - 1);
+        self.selected -= 1;
     }
 
-    /// Move the selected entry down (Planning phase only).
+    /// Move the selected entry down (toward older commits / bottom of list).
     pub fn move_down(&mut self) {
-        if self.phase != RebasePhase::Planning {
+        if self.selected + 1 >= self.entries.len() {
             return;
         }
-        if self.selected + 1 < self.entries.len() {
-            self.entries.swap(self.selected, self.selected + 1);
-            self.selected += 1;
+        if self.phase == RebasePhase::InProgress {
+            let cur = &self.entries[self.selected];
+            let below = &self.entries[self.selected + 1];
+            if cur.status != EntryStatus::Pending || below.status != EntryStatus::Pending {
+                return;
+            }
         }
+        self.entries.swap(self.selected, self.selected + 1);
+        self.selected += 1;
     }
 
     /// Build the actions list for `rebase_interactive_batch`.
@@ -247,6 +260,15 @@ impl RebaseModeState {
         self.entries
             .iter()
             .rev() // display is newest-first, git needs oldest-first
+            .map(|e| (e.hash.clone(), e.action))
+            .collect()
+    }
+
+    /// Pending entries in newest-first display order (for writing the todo).
+    pub fn pending_actions_newest_first(&self) -> Vec<(String, RebaseAction)> {
+        self.entries
+            .iter()
+            .filter(|e| e.status == EntryStatus::Pending)
             .map(|e| (e.hash.clone(), e.action))
             .collect()
     }

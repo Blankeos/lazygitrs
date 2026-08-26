@@ -317,5 +317,6 @@ Where I observed this behavior: I noticed this for the "Commit Message" and "Des
 
 - [ ] Improve filter performance (ctrl-s), more instantaneous, too slow right now
 
-- [ ] Unified diff when scrolling, sometimes some of the diff lines get cleared as I scroll
+- [x] Unified diff when scrolling, sometimes some of the diff lines get cleared as I scroll
 
+- [x] Interactive rebase 'e' bug. Points to older commit

@@ -1,4 +1,6 @@
 use anyhow::Result;
+use std::fs;
+use std::path::PathBuf;
 
 use super::GitCommands;
 
@@ -52,68 +54,66 @@ impl RebaseAction {
 
 impl GitCommands {
     /// Interactive rebase: apply a single action to a specific commit.
-    /// Uses GIT_SEQUENCE_EDITOR to non-interactively modify the todo list.
     pub fn rebase_interactive_action(&self, commit_hash: &str, action: RebaseAction) -> Result<()> {
-        // Find the parent of the target commit for the rebase base
         let parent = self.commit_parent(commit_hash)?;
-
-        // Build a sed command to change "pick <hash>" to "<action> <hash>"
-        let short_hash = &commit_hash[..7.min(commit_hash.len())];
-        let sed_cmd = format!(
-            "sed -i '' 's/^pick {} /{} {} /'",
-            short_hash,
-            action.as_str(),
-            short_hash
-        );
-
-        self.git()
-            .args(&["rebase", "-i", &parent])
-            .env("GIT_SEQUENCE_EDITOR", &sed_cmd)
-            .run_expecting_success()?;
-        Ok(())
+        let range = self.rebase_commit_range(&parent)?;
+        // range is newest-first; convert to oldest-first actions.
+        let mut actions: Vec<(String, RebaseAction)> = range
+            .into_iter()
+            .rev()
+            .map(|hash| {
+                let act = if hash == commit_hash
+                    || hash.starts_with(commit_hash)
+                    || commit_hash.starts_with(&hash)
+                {
+                    action
+                } else {
+                    RebaseAction::Pick
+                };
+                (hash, act)
+            })
+            .collect();
+        if actions.is_empty() {
+            actions.push((commit_hash.to_string(), action));
+        }
+        self.rebase_interactive_batch(&parent, &actions)
     }
 
-    /// Move a commit up in the history (swap with the one above it).
+    /// Move a commit up in the history (swap with its parent = older commit).
+    /// In newest-first UI terms this moves the commit toward HEAD.
     pub fn move_commit_up(&self, commit_hash: &str) -> Result<()> {
         let parent = self.commit_parent(commit_hash)?;
         let grandparent = self.commit_parent(&parent)?;
-
-        let short_hash = &commit_hash[..7.min(commit_hash.len())];
-        let short_parent = &parent[..7.min(parent.len())];
-
-        // Swap the two lines in the todo list
-        let sed_cmd = format!(
-            "sed -i '' '/^pick {}/{{ N; s/^\\(pick {}.*\\)\\n\\(pick {}.*\\)/\\2\\n\\1/ }}'",
-            short_parent, short_parent, short_hash
-        );
-
-        self.git()
-            .args(&["rebase", "-i", &grandparent])
-            .env("GIT_SEQUENCE_EDITOR", &sed_cmd)
-            .run_expecting_success()?;
-        Ok(())
+        let range = self.rebase_commit_range(&grandparent)?; // newest-first
+        let mut oldest_first: Vec<String> = range.into_iter().rev().collect();
+        if let Some(idx) = oldest_first.iter().position(|h| h == commit_hash) {
+            if idx + 1 < oldest_first.len() {
+                oldest_first.swap(idx, idx + 1);
+            }
+        }
+        let actions: Vec<(String, RebaseAction)> = oldest_first
+            .into_iter()
+            .map(|h| (h, RebaseAction::Pick))
+            .collect();
+        self.rebase_interactive_batch(&grandparent, &actions)
     }
 
-    /// Move a commit down in the history (swap with the one below it).
+    /// Move a commit down in the history (swap with its child = newer commit).
     pub fn move_commit_down(&self, commit_hash: &str) -> Result<()> {
-        // Find the commit below (child direction = parent in rebase list)
         let parent = self.commit_parent(commit_hash)?;
         let grandparent = self.commit_parent(&parent)?;
-
-        let short_hash = &commit_hash[..7.min(commit_hash.len())];
-        let short_parent = &parent[..7.min(parent.len())];
-
-        // Swap: move the target commit below the parent
-        let sed_cmd = format!(
-            "sed -i '' '/^pick {}/{{ N; s/^\\(pick {}.*\\)\\n\\(pick {}.*\\)/\\2\\n\\1/ }}'",
-            short_hash, short_hash, short_parent
-        );
-
-        self.git()
-            .args(&["rebase", "-i", &grandparent])
-            .env("GIT_SEQUENCE_EDITOR", &sed_cmd)
-            .run_expecting_success()?;
-        Ok(())
+        let range = self.rebase_commit_range(&grandparent)?;
+        let mut oldest_first: Vec<String> = range.into_iter().rev().collect();
+        if let Some(idx) = oldest_first.iter().position(|h| h == commit_hash) {
+            if idx > 0 {
+                oldest_first.swap(idx, idx - 1);
+            }
+        }
+        let actions: Vec<(String, RebaseAction)> = oldest_first
+            .into_iter()
+            .map(|h| (h, RebaseAction::Pick))
+            .collect();
+        self.rebase_interactive_batch(&grandparent, &actions)
     }
 
     /// Reword a non-HEAD commit via interactive rebase.
@@ -122,22 +122,87 @@ impl GitCommands {
     /// be reworded the same way lazygit does.
     pub fn reword_commit_rebase(&self, commit_hash: &str, new_message: &str) -> Result<()> {
         let parent = self.commit_parent(commit_hash)?;
-        let short_hash = &commit_hash[..7.min(commit_hash.len())];
+        let range = self.rebase_commit_range(&parent)?;
+        let actions: Vec<(String, RebaseAction)> = range
+            .into_iter()
+            .rev()
+            .map(|hash| {
+                let act = if hash == commit_hash
+                    || hash.starts_with(commit_hash)
+                    || commit_hash.starts_with(&hash)
+                {
+                    RebaseAction::Reword
+                } else {
+                    RebaseAction::Pick
+                };
+                (hash, act)
+            })
+            .collect();
 
-        // First, set the action to "reword"
-        let sed_cmd = format!(
-            "sed -i '' 's/^pick {} /reword {} /'",
-            short_hash, short_hash
-        );
+        let todo_content = actions
+            .iter()
+            .map(|(hash, action)| format!("{} {}", action.as_str(), hash))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let (todo_path, script_path) = self.write_todo_editor(&todo_content)?;
 
-        // Use GIT_SEQUENCE_EDITOR for the todo list and EDITOR for the message
-        let echo_cmd = format!("echo '{}' >", new_message.replace('\'', "'\\''"));
+        // Message editor: also needs an executable script (GIT_EDITOR is not
+        // invoked via shell).
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let msg_path = std::env::temp_dir().join(format!(
+            "lazygitrs-reword-msg-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let msg_script_path = std::env::temp_dir().join(format!(
+            "lazygitrs-reword-editor-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        fs::write(&msg_path, format!("{new_message}\n"))?;
+        let escaped_msg = msg_path.display().to_string().replace('\'', "'\\''");
+        fs::write(
+            &msg_script_path,
+            format!("#!/bin/sh\ncp '{escaped_msg}' \"$1\"\n"),
+        )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&msg_script_path)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&msg_script_path, perms)?;
+        }
 
-        self.git()
-            .args(&["rebase", "-i", "--keep-empty", &parent])
-            .env("GIT_SEQUENCE_EDITOR", &sed_cmd)
-            .env("GIT_EDITOR", &echo_cmd)
-            .run_expecting_success()?;
+        let result = self
+            .git()
+            .args(&["rebase", "-i", "--keep-empty", "--autostash", &parent])
+            .env(
+                "GIT_SEQUENCE_EDITOR",
+                script_path.to_str().unwrap_or_default(),
+            )
+            .env("GIT_EDITOR", msg_script_path.to_str().unwrap_or_default())
+            .run()?;
+
+        let _ = fs::remove_file(&todo_path);
+        let _ = fs::remove_file(&script_path);
+        let _ = fs::remove_file(&msg_path);
+        let _ = fs::remove_file(&msg_script_path);
+
+        if !result.success {
+            let git_dir = self.repo_path().join(".git");
+            if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "Reword rebase failed (exit {}): {}",
+                result.exit_code.unwrap_or(-1),
+                result.stderr.trim()
+            );
+        }
         Ok(())
     }
 
@@ -179,33 +244,33 @@ impl GitCommands {
         base_hash: &str,
         actions: &[(String, RebaseAction)],
     ) -> Result<()> {
-        // Build the replacement todo content.
-        // Each line: "<action> <short_hash>"
-        // Git will match the short hash to the full commit in the todo list.
         let mut todo_lines = Vec::new();
         for (hash, action) in actions {
-            let short = &hash[..7.min(hash.len())];
-            todo_lines.push(format!("{} {}", action.as_str(), short));
+            // Prefer the full hash so matching is unambiguous across branches.
+            todo_lines.push(format!("{} {}", action.as_str(), hash));
         }
-        let todo_content = todo_lines.join("\n");
+        let todo_content = todo_lines.join("\n") + "\n";
 
-        // The sequence editor script replaces the todo file with our content.
-        // Using printf for portability (avoids echo -e differences across platforms).
-        let editor_script = format!(
-            "printf '{}\\n' > \"$1\"",
-            todo_content.replace('\'', "'\\''")
-        );
+        // GIT_SEQUENCE_EDITOR is invoked as an executable (not via shell), so
+        // write a tiny script that copies our prepared todo into place.
+        let (todo_path, script_path) = self.write_todo_editor(&todo_content)?;
 
         let result = self
             .git()
             .args(&["rebase", "-i", "--autostash", base_hash])
-            .env("GIT_SEQUENCE_EDITOR", &editor_script)
+            .env(
+                "GIT_SEQUENCE_EDITOR",
+                script_path.to_str().unwrap_or_default(),
+            )
             // Prevent git from opening an interactive editor for reword/edit
             // actions. `true` exits 0 without modifying COMMIT_EDITMSG, so
             // reword keeps the original message (reword message editing is
             // handled in the TUI before execution).
             .env("GIT_EDITOR", "true")
             .run()?;
+
+        let _ = fs::remove_file(&todo_path);
+        let _ = fs::remove_file(&script_path);
 
         if !result.success {
             // Exit code 1 with rebase-merge dir = rebase paused (edit/conflict).
@@ -223,6 +288,79 @@ impl GitCommands {
             );
         }
         Ok(())
+    }
+
+    /// Interactive rebase from the root (no parent base).
+    pub fn rebase_interactive_batch_root(&self, actions: &[(String, RebaseAction)]) -> Result<()> {
+        let mut todo_lines = Vec::new();
+        for (hash, action) in actions {
+            todo_lines.push(format!("{} {}", action.as_str(), hash));
+        }
+        let todo_content = todo_lines.join("\n") + "\n";
+        let (todo_path, script_path) = self.write_todo_editor(&todo_content)?;
+
+        let result = self
+            .git()
+            .args(&["rebase", "-i", "--autostash", "--root"])
+            .env(
+                "GIT_SEQUENCE_EDITOR",
+                script_path.to_str().unwrap_or_default(),
+            )
+            .env("GIT_EDITOR", "true")
+            .run()?;
+
+        let _ = fs::remove_file(&todo_path);
+        let _ = fs::remove_file(&script_path);
+
+        if !result.success {
+            let git_dir = self.repo_path().join(".git");
+            if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "Rebase failed (exit {}): {}",
+                result.exit_code.unwrap_or(-1),
+                result.stderr.trim()
+            );
+        }
+        Ok(())
+    }
+
+    /// Write the prepared todo content and a small executable editor script.
+    /// Returns `(todo_path, script_path)`.
+    fn write_todo_editor(&self, content: &str) -> Result<(PathBuf, PathBuf)> {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let prefix = format!("lazygitrs-rebase-{}-{}", std::process::id(), unique);
+        let todo_path = std::env::temp_dir().join(format!("{prefix}.todo"));
+        let script_path = std::env::temp_dir().join(format!("{prefix}.sh"));
+
+        fs::write(&todo_path, content)?;
+        // Escape single quotes for safe embedding in the shell script.
+        let escaped = todo_path.display().to_string().replace('\'', "'\\''");
+        let script = format!("#!/bin/sh\ncp '{escaped}' \"$1\"\n");
+        fs::write(&script_path, script)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&script_path)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms)?;
+        }
+
+        Ok((todo_path, script_path))
+    }
+
+    /// True when `candidate` is an ancestor of `commit` (or equal).
+    pub fn is_ancestor(&self, candidate: &str, commit: &str) -> bool {
+        self.git()
+            .args(&["merge-base", "--is-ancestor", candidate, commit])
+            .run()
+            .map(|r| r.success)
+            .unwrap_or(false)
     }
 
     /// Get the list of commit hashes that would be rebased when running
@@ -377,6 +515,35 @@ impl GitCommands {
         }
     }
 
+    /// Persist the remaining todo entries for an in-progress rebase.
+    /// Call this after the user reorders or changes actions on remaining
+    /// commits so `git rebase --continue` honors those edits.
+    pub fn write_rebase_todo(&self, entries: &[(String, RebaseAction)]) -> Result<()> {
+        let git_dir = self.repo_path().join(".git");
+        let rebase_dir = if git_dir.join("rebase-merge").exists() {
+            git_dir.join("rebase-merge")
+        } else if git_dir.join("rebase-apply").exists() {
+            git_dir.join("rebase-apply")
+        } else {
+            anyhow::bail!("no rebase in progress");
+        };
+
+        let mut lines = Vec::with_capacity(entries.len());
+        for (hash, action) in entries {
+            // Newest-first UI → oldest-first todo file.
+            lines.push(format!("{} {}", action.as_str(), hash));
+        }
+        // Callers pass newest-first (matching the TUI). Reverse for git.
+        lines.reverse();
+        let content = if lines.is_empty() {
+            String::new()
+        } else {
+            lines.join("\n") + "\n"
+        };
+        fs::write(rebase_dir.join("git-rebase-todo"), content)?;
+        Ok(())
+    }
+
     /// Get the parent hash of a commit.
     fn commit_parent(&self, hash: &str) -> Result<String> {
         let result = self
@@ -457,4 +624,209 @@ fn parse_todo_entries(content: &str) -> Vec<TodoEntry> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(prefix: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "lazygitrs-{prefix}-{unique}-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("mkdir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn git_in(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn init_repo(dir: &Path) {
+        git_in(dir, &["init"]);
+        git_in(dir, &["config", "user.email", "t@t.com"]);
+        git_in(dir, &["config", "user.name", "t"]);
+    }
+
+    fn commit(dir: &Path, msg: &str, content: &str) -> String {
+        std::fs::write(dir.join("f"), content).unwrap();
+        git_in(dir, &["add", "f"]);
+        git_in(dir, &["commit", "-m", msg]);
+        rev_parse(dir, "HEAD")
+    }
+
+    fn rev_parse(dir: &Path, rev: &str) -> String {
+        let out = Command::new("git")
+            .args(["rev-parse", rev])
+            .current_dir(dir)
+            .output()
+            .expect("rev-parse");
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn edit_stops_on_selected_commit_not_parent() {
+        let temp = TempDir::new("rebase-edit-target");
+        let dir = temp.path();
+        init_repo(dir);
+        let _c1 = commit(dir, "c1", "1");
+        let c2 = commit(dir, "c2", "2");
+        let c3 = commit(dir, "c3", "3");
+        let c4 = commit(dir, "c4", "4");
+
+        let git = GitCommands::new(dir).expect("git");
+        // Edit c3: base must be c2 (parent), actions oldest-first.
+        let actions = vec![
+            (c3.clone(), RebaseAction::Edit),
+            (c4.clone(), RebaseAction::Pick),
+        ];
+        git.rebase_interactive_batch(&c2, &actions)
+            .expect("rebase should pause at edit");
+
+        assert!(
+            git.is_rebase_in_progress() || dir.join(".git/rebase-merge").exists(),
+            "rebase should be paused at edit"
+        );
+
+        let stopped = std::fs::read_to_string(dir.join(".git/rebase-merge/stopped-sha"))
+            .expect("stopped-sha")
+            .trim()
+            .to_string();
+        assert_eq!(
+            stopped, c3,
+            "edit must stop ON the selected commit, not its parent"
+        );
+
+        let _ = git.abort_rebase();
+    }
+
+    #[test]
+    fn edit_targets_correct_commit_with_divergent_branches() {
+        // Regression: using commits[idx+1] as base on an `--all` topo list
+        // picks an unrelated branch tip as the parent and rebases the wrong
+        // range. Parent-hash + base..HEAD must keep the edit on the selected
+        // commit even when other branches interleave in the panel.
+        let temp = TempDir::new("rebase-edit-divergent");
+        let dir = temp.path();
+        init_repo(dir);
+        let _c1 = commit(dir, "c1", "1");
+        let c2 = commit(dir, "c2", "2");
+        let c3 = commit(dir, "c3", "3");
+
+        git_in(dir, &["checkout", "-b", "feature"]);
+        let _f1 = commit(dir, "feature1", "x");
+        let _f2 = commit(dir, "feature2", "y");
+
+        // Prefer master/main depending on init default.
+        let main = if Command::new("git")
+            .args(["rev-parse", "--verify", "main"])
+            .current_dir(dir)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            "main"
+        } else {
+            "master"
+        };
+        git_in(dir, &["checkout", main]);
+        let c4 = commit(dir, "c4", "4");
+
+        let git = GitCommands::new(dir).expect("git");
+        // Select c3 on the current branch — real parent is c2, not a feature tip.
+        let actions = vec![
+            (c3.clone(), RebaseAction::Edit),
+            (c4.clone(), RebaseAction::Pick),
+        ];
+        git.rebase_interactive_batch(&c2, &actions)
+            .expect("rebase should pause at edit");
+
+        let stopped = std::fs::read_to_string(dir.join(".git/rebase-merge/stopped-sha"))
+            .expect("stopped-sha")
+            .trim()
+            .to_string();
+        assert_eq!(stopped, c3);
+
+        let _ = git.abort_rebase();
+    }
+
+    #[test]
+    fn reword_updates_selected_commit_message() {
+        let temp = TempDir::new("rebase-reword");
+        let dir = temp.path();
+        init_repo(dir);
+        let _c1 = commit(dir, "c1", "1");
+        let c2 = commit(dir, "c2", "2");
+        let _c3 = commit(dir, "c3", "3");
+
+        let git = GitCommands::new(dir).expect("git");
+        git.reword_commit_rebase(&c2, "c2-rewritten")
+            .expect("reword");
+
+        assert!(!git.is_rebase_in_progress());
+        let msg = git.commit_subject(&rev_parse(dir, "HEAD~1")).unwrap();
+        assert_eq!(msg, "c2-rewritten");
+    }
+
+    #[test]
+    fn write_rebase_todo_persists_pending_actions() {
+        let temp = TempDir::new("rebase-write-todo");
+        let dir = temp.path();
+        init_repo(dir);
+        let _c1 = commit(dir, "c1", "1");
+        let c2 = commit(dir, "c2", "2");
+        let c3 = commit(dir, "c3", "3");
+        let c4 = commit(dir, "c4", "4");
+
+        let git = GitCommands::new(dir).expect("git");
+        let actions = vec![
+            (c3.clone(), RebaseAction::Edit),
+            (c4.clone(), RebaseAction::Pick),
+        ];
+        git.rebase_interactive_batch(&c2, &actions)
+            .expect("pause at edit");
+
+        // After stopping on c3, only c4 remains pending. Change it to drop.
+        git.write_rebase_todo(&[(c4.clone(), RebaseAction::Drop)])
+            .expect("write todo");
+
+        let todo =
+            std::fs::read_to_string(dir.join(".git/rebase-merge/git-rebase-todo")).expect("todo");
+        assert!(
+            todo.contains(&format!("drop {c4}")),
+            "todo should contain drop of remaining commit, got:\n{todo}"
+        );
+
+        let _ = git.abort_rebase();
+    }
 }
