@@ -1,6 +1,7 @@
 {
   "id": "lucent-orng",
   "name": "Lucent Orng",
+  "appearance": "dark",
   "primary": "#EC5B2B",
   "secondary": "#EE7948",
   "accent": "#EC5B2B",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "transparent",
   "diff_add_word": "#NaN6cNaN",
   "diff_remove_word": "#NaN48NaN",
-  "diff_line_number": "#666666",
+  "diff_line_number": "textMuted",
   "syntax_comment": "#808080",
   "syntax_keyword": "#EC5B2B",
   "syntax_string": "#6ba1e6",

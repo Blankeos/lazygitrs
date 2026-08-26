@@ -1,6 +1,7 @@
 {
   "id": "synthwave84",
   "name": "Synthwave84",
+  "appearance": "dark",
   "primary": "#36f9f6",
   "secondary": "#ff7edb",
   "accent": "#36f9f6",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#3a1a2a",
   "diff_add_word": "#6fa99f",
   "diff_remove_word": "#b3494e",
-  "diff_line_number": "#495495",
+  "diff_line_number": "#959bc1",
   "syntax_comment": "#848bbd",
   "syntax_keyword": "#ff7edb",
   "syntax_string": "#fede5d",

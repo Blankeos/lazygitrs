@@ -1,6 +1,7 @@
 {
   "id": "rosepine",
   "name": "Rosepine",
+  "appearance": "dark",
   "primary": "#9ccfd8",
   "secondary": "#c4a7e7",
   "accent": "#9ccfd8",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#3a1f2d",
   "diff_add_word": "#29536a",
   "diff_remove_word": "#a2506c",
-  "diff_line_number": "#6e6a86",
+  "diff_line_number": "#9491a6",
   "syntax_comment": "#6e6a86",
   "syntax_keyword": "#31748f",
   "syntax_string": "#f6c177",

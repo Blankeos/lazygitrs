@@ -1,6 +1,7 @@
 {
   "id": "dracula",
   "name": "Dracula",
+  "appearance": "dark",
   "primary": "#bd93f9",
   "secondary": "#ff79c6",
   "accent": "#bd93f9",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#3a1a1a",
   "diff_add_word": "#42b163",
   "diff_remove_word": "#b4464a",
-  "diff_line_number": "#44475a",
+  "diff_line_number": "#989aa4",
   "syntax_comment": "#6272a4",
   "syntax_keyword": "#ff79c6",
   "syntax_string": "#f1fa8c",

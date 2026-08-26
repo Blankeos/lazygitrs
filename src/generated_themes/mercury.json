@@ -1,6 +1,7 @@
 {
   "id": "mercury",
   "name": "Mercury",
+  "appearance": "dark",
   "primary": "#8da4f5",
   "secondary": "#a7b6f8",
   "accent": "#8da4f5",

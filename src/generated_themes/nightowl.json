@@ -1,6 +1,7 @@
 {
   "id": "nightowl",
   "name": "Nightowl",
+  "appearance": "dark",
   "primary": "#82AAFF",
   "secondary": "#7fdbca",
   "accent": "#82AAFF",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#2d1b1b",
   "diff_add_word": "#809c5c",
   "diff_remove_word": "#9c3e42",
-  "diff_line_number": "#5f7e97",
+  "diff_line_number": "#7791a6",
   "syntax_comment": "#637777",
   "syntax_keyword": "#c792ea",
   "syntax_string": "#ecc48d",

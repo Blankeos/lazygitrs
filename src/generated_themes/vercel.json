@@ -1,6 +1,7 @@
 {
   "id": "vercel",
   "name": "Vercel",
+  "appearance": "dark",
   "primary": "#0070F3",
   "secondary": "#52A8FF",
   "accent": "#0070F3",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#2A1314",
   "diff_add_word": "#407f47",
   "diff_remove_word": "#a63f42",
-  "diff_line_number": "#878787",
+  "diff_line_number": "#8a8a8a",
   "syntax_comment": "#878787",
   "syntax_keyword": "#F75590",
   "syntax_string": "#63C46D",

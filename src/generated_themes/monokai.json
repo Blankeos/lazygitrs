@@ -1,6 +1,7 @@
 {
   "id": "monokai",
   "name": "Monokai",
+  "appearance": "dark",
   "primary": "#66d9ef",
   "secondary": "#ae81ff",
   "accent": "#66d9ef",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#3a1a1a",
   "diff_add_word": "#7aa12a",
   "diff_remove_word": "#b02756",
-  "diff_line_number": "#3e3d32",
+  "diff_line_number": "#9b9b95",
   "syntax_comment": "#75715e",
   "syntax_keyword": "#f92672",
   "syntax_string": "#e6db74",

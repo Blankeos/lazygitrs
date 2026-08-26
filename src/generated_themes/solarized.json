@@ -1,6 +1,7 @@
 {
   "id": "solarized",
   "name": "Solarized",
+  "appearance": "dark",
   "primary": "#268bd2",
   "secondary": "#6c71c4",
   "accent": "#268bd2",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#073642",
   "diff_add_word": "#567313",
   "diff_remove_word": "#8f3031",
-  "diff_line_number": "#586e75",
+  "diff_line_number": "#8b9b9f",
   "syntax_comment": "#586e75",
   "syntax_keyword": "#859900",
   "syntax_string": "#2aa198",

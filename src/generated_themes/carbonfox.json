@@ -1,6 +1,7 @@
 {
   "id": "carbonfox",
   "name": "Carbonfox",
+  "appearance": "dark",
   "primary": "#33b1ff",
   "secondary": "#78a9ff",
   "accent": "#33b1ff",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#2a1216",
   "diff_add_word": "#59ad76",
   "diff_remove_word": "#ad6b6b",
-  "diff_line_number": "#7d848f",
+  "diff_line_number": "#808792",
   "syntax_comment": "#7d848f",
   "syntax_keyword": "#be95ff",
   "syntax_string": "#25be6a",

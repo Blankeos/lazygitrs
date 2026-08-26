@@ -1,6 +1,7 @@
 {
   "id": "palenight",
   "name": "Palenight",
+  "appearance": "dark",
   "primary": "#82aaff",
   "secondary": "#c792ea",
   "accent": "#82aaff",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#3c2b2b",
   "diff_add_word": "#8da771",
   "diff_remove_word": "#aa5964",
-  "diff_line_number": "#444760",
+  "diff_line_number": "#a0a2af",
   "syntax_comment": "#676e95",
   "syntax_keyword": "#c792ea",
   "syntax_string": "#c3e88d",

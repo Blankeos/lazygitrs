@@ -1,6 +1,7 @@
 {
   "id": "ayu",
   "name": "Ayu",
+  "appearance": "dark",
   "primary": "#59C2FF",
   "secondary": "#D2A6FF",
   "accent": "#59C2FF",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#37222c",
   "diff_add_word": "#729238",
   "diff_remove_word": "#a04e55",
-  "diff_line_number": "#6C7380",
+  "diff_line_number": "diffContext",
   "syntax_comment": "#ACB6BF",
   "syntax_keyword": "#FF8F40",
   "syntax_string": "#AAD94C",

@@ -1,6 +1,7 @@
 {
   "id": "one-dark",
   "name": "One Dark",
+  "appearance": "dark",
   "primary": "#61afef",
   "secondary": "#c678dd",
   "accent": "#61afef",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#3a2d2f",
   "diff_add_word": "#7d9967",
   "diff_remove_word": "#a5646d",
-  "diff_line_number": "#495162",
+  "diff_line_number": "#9398a2",
   "syntax_comment": "#5c6370",
   "syntax_keyword": "#c678dd",
   "syntax_string": "#98c379",

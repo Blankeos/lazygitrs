@@ -1,6 +1,7 @@
 {
   "id": "vesper",
   "name": "Vesper",
+  "appearance": "dark",
   "primary": "#FFC799",
   "secondary": "#99FFE4",
   "accent": "#FFC799",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#281a1a",
   "diff_add_word": "#69ab9a",
   "diff_remove_word": "#ab5959",
-  "diff_line_number": "#505050",
+  "diff_line_number": "textMuted",
   "syntax_comment": "#8b8b8b",
   "syntax_keyword": "#A0A0A0",
   "syntax_string": "#99FFE4",

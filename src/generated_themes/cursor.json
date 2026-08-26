@@ -1,6 +1,7 @@
 {
   "id": "cursor",
   "name": "Cursor",
+  "appearance": "dark",
   "primary": "#88c0d0",
   "secondary": "#81a1c1",
   "accent": "#88c0d0",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#b8004933",
   "diff_add_word": "#517d61",
   "diff_remove_word": "#ac4e5e",
-  "diff_line_number": "#e4e4e442",
+  "diff_line_number": "#eeeeee87",
   "syntax_comment": "#e4e4e45e",
   "syntax_keyword": "#82D2CE",
   "syntax_string": "#E394DC",

@@ -5254,6 +5254,7 @@ impl Gui {
                 value: ct.id.to_string(),
                 label: ct.name.to_string(),
                 category: String::new(),
+                description: Some(ct.appearance.as_str().to_string()),
             })
             .collect();
 
@@ -5335,6 +5336,7 @@ impl Gui {
                 value: branch.name.clone(),
                 label: branch.name.clone(),
                 category: "Branches".to_string(),
+                description: None,
             });
         }
 
@@ -5345,6 +5347,7 @@ impl Gui {
                     value: full_name.clone(),
                     label: full_name,
                     category: "Remote Branches".to_string(),
+                    description: None,
                 });
             }
         }
@@ -5354,6 +5357,7 @@ impl Gui {
                 value: tag.name.clone(),
                 label: tag.name.clone(),
                 category: "Tags".to_string(),
+                description: None,
             });
         }
 
@@ -5362,6 +5366,7 @@ impl Gui {
                 value: commit.hash.clone(),
                 label: format!("{} {}", commit.short_hash(), commit.name),
                 category: "Commits".to_string(),
+                description: None,
             });
         }
 

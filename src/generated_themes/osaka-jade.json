@@ -1,6 +1,7 @@
 {
   "id": "osaka-jade",
   "name": "Osaka Jade",
+  "appearance": "dark",
   "primary": "#2DD5B7",
   "secondary": "#D2689C",
   "accent": "#2DD5B7",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#241515",
   "diff_add_word": "#467c58",
   "diff_remove_word": "#94716e",
-  "diff_line_number": "#3d4a44",
+  "diff_line_number": "#828b87",
   "syntax_comment": "#53685B",
   "syntax_keyword": "#2DD5B7",
   "syntax_string": "#63b07a",

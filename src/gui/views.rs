@@ -3681,7 +3681,8 @@ fn render_list_picker(
     let has_categories = matching
         .iter()
         .any(|&i| core.items.get(i).is_some_and(|it| !it.category.is_empty()));
-    let mut display: Vec<(bool, String, Option<usize>)> = Vec::new(); // (is_header, label, item_idx)
+    // (is_header, label, item_idx, description)
+    let mut display: Vec<(bool, String, Option<usize>, Option<String>)> = Vec::new();
     if has_categories {
         let mut last_cat = String::new();
         for &ei in &matching {
@@ -3689,17 +3690,27 @@ fn render_list_picker(
                 continue;
             };
             if !item.category.is_empty() && item.category != last_cat {
-                display.push((true, item.category.clone(), None));
+                display.push((true, item.category.clone(), None, None));
                 last_cat = item.category.clone();
             }
-            display.push((false, item.label.clone(), Some(ei)));
+            display.push((
+                false,
+                item.label.clone(),
+                Some(ei),
+                item.description.clone(),
+            ));
         }
     } else {
         for &ei in &matching {
             let Some(item) = core.items.get(ei) else {
                 continue;
             };
-            display.push((false, item.label.clone(), Some(ei)));
+            display.push((
+                false,
+                item.label.clone(),
+                Some(ei),
+                item.description.clone(),
+            ));
         }
     }
 
@@ -3761,14 +3772,15 @@ fn render_list_picker(
     let max_scroll = display.len().saturating_sub(list_height);
     let effective_scroll = core.scroll_offset.min(max_scroll);
 
-    let visible_display: Vec<&(bool, String, Option<usize>)> = display
+    let visible_display: Vec<&(bool, String, Option<usize>, Option<String>)> = display
         .iter()
         .skip(effective_scroll)
         .take(list_height)
         .collect();
 
+    let content_w = list_area.width as usize;
     let mut list_items: Vec<ListItem> = Vec::new();
-    for (is_header, label, item_idx) in visible_display {
+    for (is_header, label, item_idx, description) in visible_display {
         if *is_header {
             let line = Line::from(vec![Span::styled(
                 format!(" {} ", label),
@@ -3827,6 +3839,22 @@ fn render_list_picker(
                     Style::default().fg(base_fg)
                 };
                 spans.push(Span::styled(label.clone(), style));
+            }
+
+            if let Some(desc) = description.as_deref().filter(|d| !d.is_empty()) {
+                let used: usize = spans
+                    .iter()
+                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum();
+                let desc_w = UnicodeWidthStr::width(desc);
+                let pad = content_w.saturating_sub(used).saturating_sub(desc_w);
+                if pad > 0 {
+                    spans.push(Span::raw(" ".repeat(pad)));
+                }
+                spans.push(Span::styled(
+                    desc.to_string(),
+                    Style::default().fg(theme.text_dimmed),
+                ));
             }
 
             let line = Line::from(spans);

@@ -839,6 +839,8 @@ pub struct ListPickerItem {
     pub label: String,
     /// Section/category header (e.g. "Branches", "Tags"). Empty for flat lists.
     pub category: String,
+    /// Optional right-aligned dimmed label (e.g. "light" / "dark" for themes).
+    pub description: Option<String>,
 }
 
 /// Shared state for searchable list picker popups (RefPicker, ThemePicker, etc.).
@@ -879,6 +881,7 @@ pub fn sync_list_picker_free_entry(core: &mut ListPickerCore, free_entry_categor
                 value: trimmed.clone(),
                 label: trimmed,
                 category: free_entry_category.to_string(),
+                description: None,
             },
         );
 
@@ -1022,6 +1025,7 @@ mod free_entry_tests {
             value: value.to_string(),
             label: value.to_string(),
             category: category.to_string(),
+            description: None,
         }
     }
 

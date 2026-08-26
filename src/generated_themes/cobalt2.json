@@ -1,6 +1,7 @@
 {
   "id": "cobalt2",
   "name": "Cobalt2",
+  "appearance": "dark",
   "primary": "#0088ff",
   "secondary": "#9a5feb",
   "accent": "#0088ff",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#3a1a2a",
   "diff_add_word": "#81b881",
   "diff_remove_word": "#af508e",
-  "diff_line_number": "#2d5a7b",
+  "diff_line_number": "textMuted",
   "syntax_comment": "#0088ff",
   "syntax_keyword": "#ff9d00",
   "syntax_string": "#9eff80",

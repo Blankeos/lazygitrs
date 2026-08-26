@@ -1,6 +1,7 @@
 {
   "id": "nord",
   "name": "Nord",
+  "appearance": "dark",
   "primary": "#88C0D0",
   "secondary": "#81A1C1",
   "accent": "#88C0D0",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#3B4252",
   "diff_add_word": "#7a8e71",
   "diff_remove_word": "#8c515b",
-  "diff_line_number": "#434C5E",
+  "diff_line_number": "#a9aeb6",
   "syntax_comment": "#8B95A7",
   "syntax_keyword": "#81A1C1",
   "syntax_string": "#A3BE8C",

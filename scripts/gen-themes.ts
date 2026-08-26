@@ -23,6 +23,7 @@ type OpenCodeTheme = {
 type LazygitrsTheme = {
   id: string;
   name: string;
+  appearance: "dark" | "light";
 
   // Semantic base colors
   primary: string;
@@ -78,7 +79,7 @@ type LazygitrsTheme = {
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 const OPENCODE_REF = process.env.OPENCODE_REF ?? "production";
-const GITHUB_API_URL = `https://api.github.com/repos/anomalyco/opencode/contents/packages/opencode/src/cli/cmd/tui/context/theme?ref=${encodeURIComponent(OPENCODE_REF)}`;
+const GITHUB_API_URL = `https://api.github.com/repos/anomalyco/opencode/contents/packages/tui/src/theme/assets?ref=${encodeURIComponent(OPENCODE_REF)}`;
 const THEMES_DIR = join(process.cwd(), "src", "generated_themes");
 
 /** Resolve a value that may be a defs key or a hex color. */
@@ -150,6 +151,14 @@ function fileNameToDisplayName(name: string): string {
 
 // ── Transform ───────────────────────────────────────────────────────────
 
+/** Infer light/dark from background luminance. */
+function appearanceFromHex(hex: string): "dark" | "light" {
+  const [r, g, b] = hexToRgb(hex);
+  const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  return lum >= 0.45 ? "light" : "dark";
+}
+
+
 function transformTheme(opencode: OpenCodeTheme, filename: string): LazygitrsTheme {
   const { defs, theme } = opencode;
   const r = (key: string, fallback: string) => resolveColor(defs, theme, key, fallback);
@@ -195,6 +204,7 @@ function transformTheme(opencode: OpenCodeTheme, filename: string): LazygitrsThe
   return {
     id,
     name: fileNameToDisplayName(filename),
+    appearance: appearanceFromHex(background),
 
     primary,
     secondary,

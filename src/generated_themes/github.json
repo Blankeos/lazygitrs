@@ -1,6 +1,7 @@
 {
   "id": "github",
   "name": "Github",
+  "appearance": "dark",
   "primary": "#58a6ff",
   "secondary": "#bc8cff",
   "accent": "#58a6ff",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#67060c",
   "diff_add_word": "#2e7e3c",
   "diff_remove_word": "#a63b38",
-  "diff_line_number": "#484f58",
+  "diff_line_number": "#95999e",
   "syntax_comment": "#8b949e",
   "syntax_keyword": "#ff7b72",
   "syntax_string": "#39c5cf",

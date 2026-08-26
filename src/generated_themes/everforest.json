@@ -1,6 +1,7 @@
 {
   "id": "everforest",
   "name": "Everforest",
+  "appearance": "dark",
   "primary": "#a7c080",
   "secondary": "#7fbbb3",
   "accent": "#a7c080",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#37222c",
   "diff_add_word": "#87a16c",
   "diff_remove_word": "#a35761",
-  "diff_line_number": "#343f44",
+  "diff_line_number": "#a0a5a7",
   "syntax_comment": "#7a8478",
   "syntax_keyword": "#d699b6",
   "syntax_string": "#a7c080",

@@ -1,6 +1,7 @@
 {
   "id": "kanagawa",
   "name": "Kanagawa",
+  "appearance": "dark",
   "primary": "#7E9CD8",
   "secondary": "#957FB8",
   "accent": "#7E9CD8",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#362020",
   "diff_add_word": "#79985b",
   "diff_remove_word": "#a83b3e",
-  "diff_line_number": "#54546D",
+  "diff_line_number": "#9090a0",
   "syntax_comment": "#727169",
   "syntax_keyword": "#957FB8",
   "syntax_string": "#98BB6C",

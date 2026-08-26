@@ -9,7 +9,7 @@ use anyhow::Result;
 
 pub use app_state::AppState;
 pub use keybindings::KeybindingConfig;
-pub use theme::{COLOR_THEMES, ColorTheme, Theme};
+pub use theme::{COLOR_THEMES, ColorTheme, Theme, ThemeAppearance};
 pub use user_config::UserConfig;
 
 pub fn config_dir_candidates() -> Vec<PathBuf> {

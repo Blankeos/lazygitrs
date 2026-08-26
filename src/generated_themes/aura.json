@@ -1,6 +1,7 @@
 {
   "id": "aura",
   "name": "Aura",
+  "appearance": "dark",
   "primary": "#a277ff",
   "secondary": "#f694ff",
   "accent": "#a277ff",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#3f191a",
   "diff_add_word": "#44ab89",
   "diff_remove_word": "#ab4848",
-  "diff_line_number": "#2d2d2d",
+  "diff_line_number": "#898989",
   "syntax_comment": "#6d6d6d",
   "syntax_keyword": "#f694ff",
   "syntax_string": "#61ffca",

@@ -1,6 +1,7 @@
 {
   "id": "tokyonight",
   "name": "Tokyonight",
+  "appearance": "dark",
   "primary": "#82aaff",
   "secondary": "#c099ff",
   "accent": "#82aaff",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#37222c",
   "diff_add_word": "#819865",
   "diff_remove_word": "#9c4e59",
-  "diff_line_number": "#222436",
+  "diff_line_number": "#8f909a",
   "syntax_comment": "#828bb8",
   "syntax_keyword": "#c099ff",
   "syntax_string": "#c3e88d",

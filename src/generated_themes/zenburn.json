@@ -1,6 +1,7 @@
 {
   "id": "zenburn",
   "name": "Zenburn",
+  "appearance": "dark",
   "primary": "#8cd0d3",
   "secondary": "#dc8cc3",
   "accent": "#8cd0d3",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#5f4f4f",
   "diff_add_word": "#738a73",
   "diff_remove_word": "#a58080",
-  "diff_line_number": "#6f6f6f",
+  "diff_line_number": "#d2d2d2",
   "syntax_comment": "#7f9f7f",
   "syntax_keyword": "#f0dfaf",
   "syntax_string": "#cc9393",

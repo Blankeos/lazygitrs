@@ -1,6 +1,7 @@
 {
   "id": "gruvbox",
   "name": "Gruvbox",
+  "appearance": "dark",
   "primary": "#83a598",
   "secondary": "#d3869b",
   "accent": "#83a598",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#322929",
   "diff_add_word": "#868827",
   "diff_remove_word": "#b13d30",
-  "diff_line_number": "#665c54",
+  "diff_line_number": "#a8a29e",
   "syntax_comment": "#928374",
   "syntax_keyword": "#fb4934",
   "syntax_string": "#fabd2f",

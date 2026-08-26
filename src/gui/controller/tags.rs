@@ -151,6 +151,7 @@ fn prompt_remote_tag_delete(
                 value: remote.name.clone(),
                 label,
                 category: "Remotes".to_string(),
+                description: None,
             }
         })
         .collect();

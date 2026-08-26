@@ -1,6 +1,7 @@
 {
   "id": "flexoki",
   "name": "Flexoki",
+  "appearance": "dark",
   "primary": "#DA702C",
   "secondary": "#4385BE",
   "accent": "#DA702C",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#2D1A1A",
   "diff_add_word": "#5d692a",
   "diff_remove_word": "#8d3730",
-  "diff_line_number": "#6F6E69",
+  "diff_line_number": "#888883",
   "syntax_comment": "#6F6E69",
   "syntax_keyword": "#879A39",
   "syntax_string": "#3AA99F",

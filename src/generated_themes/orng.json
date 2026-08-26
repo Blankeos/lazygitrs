@@ -1,6 +1,7 @@
 {
   "id": "orng",
   "name": "Orng",
+  "appearance": "dark",
   "primary": "#EC5B2B",
   "secondary": "#EE7948",
   "accent": "#EC5B2B",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#37222c",
   "diff_add_word": "#496c99",
   "diff_remove_word": "#964850",
-  "diff_line_number": "#1e1e1e",
+  "diff_line_number": "diffContext",
   "syntax_comment": "#808080",
   "syntax_keyword": "#EC5B2B",
   "syntax_string": "#6ba1e6",

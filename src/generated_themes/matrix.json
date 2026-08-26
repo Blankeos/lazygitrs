@@ -1,6 +1,7 @@
 {
   "id": "matrix",
   "name": "Matrix",
+  "appearance": "dark",
   "primary": "#2eff6a",
   "secondary": "#00efff",
   "accent": "#2eff6a",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#261212",
   "diff_add_word": "#51ab75",
   "diff_remove_word": "#a94e4d",
-  "diff_line_number": "#1e2a1b",
+  "diff_line_number": "textMuted",
   "syntax_comment": "#8ca391",
   "syntax_keyword": "#c770ff",
   "syntax_string": "#1cc24b",

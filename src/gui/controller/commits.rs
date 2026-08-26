@@ -1184,6 +1184,7 @@ fn show_path_filter_input(gui: &mut Gui) -> Result<()> {
             value: path.clone(),
             label: path,
             category: String::new(),
+            description: None,
         })
         .collect();
     gui.show_list_picker(

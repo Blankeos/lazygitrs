@@ -1,6 +1,7 @@
 {
   "id": "opencode",
   "name": "Opencode",
+  "appearance": "dark",
   "primary": "#fab283",
   "secondary": "#5c9cf5",
   "accent": "#fab283",
@@ -26,7 +27,7 @@
   "diff_remove_bg": "#37222c",
   "diff_add_word": "#7b925b",
   "diff_remove_word": "#964850",
-  "diff_line_number": "#1e1e1e",
+  "diff_line_number": "#8f8f8f",
   "syntax_comment": "#808080",
   "syntax_keyword": "#9d7cd8",
   "syntax_string": "#7fd88f",

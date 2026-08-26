@@ -150,6 +150,7 @@ fn checkout_picker(gui: &mut Gui) -> Result<()> {
             // "previous branch" and "prev branch" for those search phrases.
             label: format!("[-] Go to previous branch (prev branch) — {}", prev),
             category: "Quick Actions".to_string(),
+            description: None,
         });
     }
 
@@ -161,6 +162,7 @@ fn checkout_picker(gui: &mut Gui) -> Result<()> {
             value: branch.name.clone(),
             label: branch.name.clone(),
             category: "Branches".to_string(),
+            description: None,
         });
     }
 
@@ -171,6 +173,7 @@ fn checkout_picker(gui: &mut Gui) -> Result<()> {
                 value: full_name.clone(),
                 label: full_name,
                 category: "Remote Branches".to_string(),
+                description: None,
             });
         }
     }
@@ -180,6 +183,7 @@ fn checkout_picker(gui: &mut Gui) -> Result<()> {
             value: tag.name.clone(),
             label: tag.name.clone(),
             category: "Tags".to_string(),
+            description: None,
         });
     }
 
@@ -188,6 +192,7 @@ fn checkout_picker(gui: &mut Gui) -> Result<()> {
             value: commit.hash.clone(),
             label: format!("{} {}", commit.short_hash(), commit.name),
             category: "Commits".to_string(),
+            description: None,
         });
     }
 
