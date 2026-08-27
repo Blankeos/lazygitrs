@@ -36,10 +36,9 @@ impl App {
         self.config.app_state.add_recent_repo(&repo_str);
         let _ = self.config.save_state();
 
-        let mut gui = Gui::new(self.config, git)?;
-        if let Some(path) = self.filter_path {
-            gui.apply_startup_path_filter(path);
-        }
+        // Pass `-f` into Gui::new so the initial model stream loads filtered
+        // commits immediately (no wait for full refresh + second git log).
+        let mut gui = Gui::new(self.config, git, self.filter_path)?;
         gui.run()?;
 
         Ok(())

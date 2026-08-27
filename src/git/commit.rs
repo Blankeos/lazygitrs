@@ -82,10 +82,14 @@ impl GitCommands {
 
     /// Load recent commits reachable from any ref.
     pub fn load_commits(&self, limit: usize) -> Result<Vec<Commit>> {
-        self.load_commits_page(limit, 0)
+        let unpushed = self.unpushed_commit_hashes().unwrap_or_default();
+        let mut commits = self.load_commits_page(limit, 0)?;
+        Self::apply_unpushed_status(&mut commits, &unpushed);
+        Ok(commits)
     }
 
     /// Load a page of commits reachable from any ref.
+    /// Status (unpushed) is applied by callers that need it.
     pub fn load_commits_page(&self, limit: usize, skip: usize) -> Result<Vec<Commit>> {
         self.load_filtered_commits_page(&CommitFilter::default(), limit, skip)
     }
@@ -99,6 +103,9 @@ impl GitCommands {
         let format = "%H|%s|%an|%ae|%at|%P|%D";
         let mut cmd = self.git().arg("log");
 
+        // Unfiltered and path-filtered lists both walk all refs (`--all`), matching
+        // our unfiltered commits panel and what lazygit shows for `-f` when the
+        // history for a path lives outside HEAD (e.g. checkpoint refs).
         if filter.branches.is_empty() {
             cmd = cmd.arg("--all");
         } else {
@@ -162,9 +169,8 @@ impl GitCommands {
             return Ok(Vec::new());
         }
 
-        let _head_hash = self.head_hash().unwrap_or_default();
-        let unpushed_hashes = self.unpushed_commit_hashes().unwrap_or_default();
-
+        // Unpushed status is applied by the caller so we don't spawn an extra
+        // `git log @{u}..HEAD` per page parse (filter apply hot path).
         let mut commits = Vec::new();
         for line in result.stdout.lines() {
             let parts: Vec<&str> = line.splitn(7, '|').collect();
@@ -183,16 +189,10 @@ impl GitCommands {
             let tags = extract_tags(decoration);
             let refs = extract_refs(decoration);
 
-            let status = if unpushed_hashes.contains(&hash) {
-                CommitStatus::Unpushed
-            } else {
-                CommitStatus::Pushed
-            };
-
             commits.push(Commit {
                 hash,
                 name,
-                status,
+                status: CommitStatus::Pushed,
                 action: String::new(),
                 tags,
                 refs,
@@ -263,7 +263,9 @@ impl GitCommands {
         Ok(commits)
     }
 
-    fn unpushed_commit_hashes(&self) -> Result<Vec<String>> {
+    /// Hashes of commits ahead of upstream (`@{u}..HEAD`). Cheap enough to call
+    /// once per filter/page load; avoid calling from every `parse_commit_log`.
+    pub fn unpushed_commit_hashes(&self) -> Result<Vec<String>> {
         let result = self
             .git()
             .args(&["log", "@{u}..HEAD", "--format=%H"])
@@ -274,6 +276,19 @@ impl GitCommands {
         }
 
         Ok(result.stdout.lines().map(String::from).collect())
+    }
+
+    pub fn apply_unpushed_status(commits: &mut [Commit], unpushed_hashes: &[String]) {
+        if unpushed_hashes.is_empty() {
+            return;
+        }
+        for commit in commits {
+            commit.status = if unpushed_hashes.contains(&commit.hash) {
+                CommitStatus::Unpushed
+            } else {
+                CommitStatus::Pushed
+            };
+        }
     }
 
     pub fn create_commit(&self, message: &str, sign_off: bool) -> Result<()> {

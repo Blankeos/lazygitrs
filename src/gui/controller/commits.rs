@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use anyhow::Result;
 use crossterm::event::KeyEvent;
@@ -9,7 +10,7 @@ use crate::git::rebase::RebaseAction;
 use crate::gui::Gui;
 use crate::gui::popup::{
     BodySoftWrap, ChecklistItem, CommitInputFocus, CommitInputKind, ListPickerItem, MenuItem,
-    PopupState, make_textarea,
+    MessageKind, PopupState, make_textarea,
 };
 use crate::model::Branch;
 use crate::os::platform::Platform;
@@ -1176,26 +1177,21 @@ pub fn show_filtering_menu(gui: &mut Gui) -> Result<()> {
 }
 
 fn show_path_filter_input(gui: &mut Gui) -> Result<()> {
-    let items = gui
-        .git
-        .load_commit_filter_paths()?
-        .into_iter()
-        .map(|path| ListPickerItem {
-            value: path.clone(),
-            label: path,
-            category: String::new(),
-            description: None,
-        })
-        .collect();
-    gui.show_list_picker(
-        "Filter by path",
-        items,
-        "Path",
-        Box::new(|gui, path| {
-            gui.commit_path_filter = nonempty(path);
-            apply_commit_filters_and_focus(gui)
-        }),
-    );
+    // Don't block the UI on `git ls-files` / log --name-only — load async.
+    if gui.filter_paths_rx.is_some() {
+        return Ok(());
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    gui.filter_paths_rx = Some(rx);
+    gui.popup = PopupState::Message {
+        title: "Filter by path".to_string(),
+        message: "Loading paths…".to_string(),
+        kind: MessageKind::Info,
+    };
+    let git = Arc::clone(&gui.git);
+    std::thread::spawn(move || {
+        let _ = tx.send(git.load_commit_filter_paths());
+    });
     Ok(())
 }
 
@@ -1239,11 +1235,15 @@ fn apply_author_filters(gui: &mut Gui, authors: Vec<String>) -> Result<()> {
     apply_commit_filters_and_focus(gui)
 }
 
-fn apply_commit_filters_and_focus(gui: &mut Gui) -> Result<()> {
+pub(crate) fn apply_commit_filters_and_focus(gui: &mut Gui) -> Result<()> {
     apply_commit_filters(gui)?;
     gui.context_mgr
         .set_active(crate::gui::context::ContextId::Commits);
     Ok(())
+}
+
+pub(crate) fn nonempty_for_filter(value: &str) -> Option<String> {
+    nonempty(value)
 }
 
 fn nonempty(value: &str) -> Option<String> {
@@ -1319,7 +1319,8 @@ fn branch_filter_menu_label(gui: &Gui) -> String {
 }
 
 fn apply_commit_filters(gui: &mut Gui) -> Result<()> {
-    gui.needs_refresh = true;
+    // Scoped async commit reload — matches lazygit (no full model refresh).
+    gui.reload_filtered_commits_async();
     Ok(())
 }
 

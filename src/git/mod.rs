@@ -215,7 +215,14 @@ impl GitCommands {
     /// The caller may set `model.repo_name` (and optionally an initial
     /// `head_hash`) synchronously for the first paint; subsequent refreshes
     /// receive an updated `ModelPart::Head`.
-    pub fn load_model_streaming(self: &Arc<Self>, tx: &mpsc::Sender<ModelPart>) {
+    /// Stream model parts in parallel. When `commit_filter` is set (e.g. `-f`),
+    /// the Commits part loads the filtered page immediately — no unfiltered log
+    /// first, matching lazygit's startup path filter.
+    pub fn load_model_streaming(
+        self: &Arc<Self>,
+        tx: &mpsc::Sender<ModelPart>,
+        commit_filter: Option<crate::git::commit::CommitFilter>,
+    ) {
         macro_rules! spawn_part {
             ($tx:expr, $self:expr, $variant:ident, $expr:expr) => {{
                 let tx = $tx.clone();
@@ -230,8 +237,22 @@ impl GitCommands {
 
         spawn_part!(tx, self, Files, |g: &GitCommands| g.load_files());
         spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
-        spawn_part!(tx, self, Commits, |g: &GitCommands| g
-            .load_commits(DEFAULT_COMMIT_LIMIT));
+        if let Some(filter) = commit_filter {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || {
+                let unpushed = git.unpushed_commit_hashes().unwrap_or_default();
+                if let Ok(mut commits) =
+                    git.load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, 0)
+                {
+                    Self::apply_unpushed_status(&mut commits, &unpushed);
+                    let _ = tx.send(ModelPart::Commits(commits));
+                }
+            });
+        } else {
+            spawn_part!(tx, self, Commits, |g: &GitCommands| g
+                .load_commits(DEFAULT_COMMIT_LIMIT));
+        }
         spawn_part!(tx, self, Stash, |g: &GitCommands| g.load_stash());
         spawn_part!(tx, self, Remotes, |g: &GitCommands| g.load_remotes());
         spawn_part!(tx, self, Tags, |g: &GitCommands| g.load_tags());

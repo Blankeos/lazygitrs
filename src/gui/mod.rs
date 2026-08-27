@@ -545,6 +545,8 @@ enum AiCommitSource {
 
 struct CommitPageResult {
     generation: u64,
+    /// When true, replace the commit list (filter apply). When false, append.
+    replace: bool,
     result: Result<Vec<crate::model::Commit>>,
 }
 
@@ -639,6 +641,8 @@ pub struct Gui {
     /// Async light files refresh (status-only) so Space-spam doesn't freeze.
     files_refresh_rx: Option<mpsc::Receiver<Result<Vec<crate::model::File>>>>,
     files_refresh_in_progress: bool,
+    /// Background `git ls-files` for the path-filter picker (ctrl-s → path).
+    filter_paths_rx: Option<mpsc::Receiver<Result<Vec<String>>>>,
     /// Receiver for silent auto-fetch results. Kept separate from remote_op
     /// so auto-fetch failures don't show error popups or clobber a
     /// user-initiated push/pull.
@@ -874,7 +878,7 @@ impl Gui {
         };
     }
 
-    pub fn new(config: AppConfig, git: GitCommands) -> Result<Self> {
+    pub fn new(config: AppConfig, git: GitCommands, filter_path: Option<PathBuf>) -> Result<Self> {
         let (diff_tx, diff_rx) = mpsc::channel();
         let (diff_scheduler_tx, diff_scheduler_rx) = mpsc::channel();
         let (diff_prefetch_tx, diff_prefetch_rx) = mpsc::channel();
@@ -925,8 +929,35 @@ impl Gui {
         model.head_hash = git.head_hash().unwrap_or_default();
         model.head_branch_name = git.current_branch_name().unwrap_or_default();
 
+        // Normalize `-f` to a repo-relative path before kicking off the stream
+        // so the first Commits part is already filtered (lazygit-style).
+        let startup_path_filter = filter_path.and_then(|p| {
+            let raw = p.to_string_lossy().trim().to_string();
+            if raw.is_empty() {
+                return None;
+            }
+            let relative = p
+                .canonicalize()
+                .ok()
+                .and_then(|abs| {
+                    abs.strip_prefix(git.repo_path())
+                        .ok()
+                        .map(|rel| rel.to_string_lossy().to_string())
+                })
+                .filter(|rel| !rel.is_empty())
+                .unwrap_or(raw);
+            Some(relative)
+        });
+        let startup_commit_filter =
+            startup_path_filter
+                .as_ref()
+                .map(|path| crate::git::commit::CommitFilter {
+                    path: Some(path.clone()),
+                    ..Default::default()
+                });
+
         let (initial_load_tx, initial_load_rx) = mpsc::channel();
-        git.load_model_streaming(&initial_load_tx);
+        git.load_model_streaming(&initial_load_tx, startup_commit_filter);
 
         let commit_history = Self::load_commit_history(&config);
 
@@ -938,6 +969,11 @@ impl Gui {
             .and_then(|id| crate::config::COLOR_THEMES.iter().position(|t| t.id == id))
             .unwrap_or(0);
 
+        let mut context_mgr = ContextManager::new();
+        if startup_path_filter.is_some() {
+            context_mgr.set_active(ContextId::Commits);
+        }
+
         Ok(Self {
             config: Arc::new(config),
             git,
@@ -945,7 +981,7 @@ impl Gui {
             initial_load_rx: Some(initial_load_rx),
             initial_load_received: 0,
             refresh_in_progress: false,
-            context_mgr: ContextManager::new(),
+            context_mgr,
             layout: LayoutState::default(),
             popup: PopupState::None,
             diff_view: {
@@ -996,6 +1032,7 @@ impl Gui {
             remote_op_tx,
             files_refresh_rx: None,
             files_refresh_in_progress: false,
+            filter_paths_rx: None,
             auto_fetch_rx,
             auto_fetch_tx,
             last_auto_fetch_at: None,
@@ -1012,7 +1049,7 @@ impl Gui {
             search_textarea: None,
             last_refresh_at: Instant::now(),
             commit_branch_filter: Vec::new(),
-            commit_path_filter: None,
+            commit_path_filter: startup_path_filter.clone(),
             commit_author_filter: Vec::new(),
             commit_files_hash: String::new(),
             commit_files_message: String::new(),
@@ -1051,28 +1088,6 @@ impl Gui {
             .get(self.current_theme_index)
             .map(|ct| ct.to_theme())
             .unwrap_or_default()
-    }
-
-    /// Apply a startup path filter from `-f/--filter` (lazygit-compatible).
-    /// Commits are reloaded with the filter once the initial model stream finishes.
-    pub fn apply_startup_path_filter(&mut self, path: PathBuf) {
-        let raw = path.to_string_lossy().trim().to_string();
-        if raw.is_empty() {
-            return;
-        }
-        // Prefer a repo-relative path so `git log -- path` matches tracked files.
-        let relative = path
-            .canonicalize()
-            .ok()
-            .and_then(|abs| {
-                abs.strip_prefix(self.git.repo_path())
-                    .ok()
-                    .map(|p| p.to_string_lossy().to_string())
-            })
-            .filter(|p| !p.is_empty())
-            .unwrap_or(raw);
-        self.commit_path_filter = Some(relative);
-        self.context_mgr.set_active(ContextId::Commits);
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -1202,15 +1217,10 @@ impl Gui {
                         }
                         ModelPart::Branches(v) => model.branches = v,
                         ModelPart::Commits(v) => {
-                            // Keep filtered commits visible during streaming refresh;
-                            // after_model_refresh reloads the filtered set when done.
-                            let has_commit_filter = self.commit_path_filter.is_some()
-                                || !self.commit_author_filter.is_empty()
-                                || !self.commit_branch_filter.is_empty();
-                            if !has_commit_filter {
-                                self.commit_history_complete = v.len() < DEFAULT_COMMIT_LIMIT;
-                                model.set_commits(v);
-                            }
+                            // Stream already applies the active filter when one is set
+                            // (`load_model_streaming(commit_filter)`), so always take it.
+                            self.commit_history_complete = v.len() < DEFAULT_COMMIT_LIMIT;
+                            model.set_commits(v);
                         }
                         ModelPart::Stash(v) => model.stash_entries = v,
                         ModelPart::Remotes(v) => model.remotes = v,
@@ -1313,6 +1323,7 @@ impl Gui {
 
             // Check for completed incremental commit page loads
             self.receive_commit_page_results();
+            self.receive_filter_paths();
             self.maybe_request_more_commits();
 
             // Check for completed background remote operations
@@ -2223,6 +2234,51 @@ impl Gui {
         }
     }
 
+    fn receive_filter_paths(&mut self) {
+        let result = {
+            let Some(rx) = self.filter_paths_rx.as_ref() else {
+                return;
+            };
+            match rx.try_recv() {
+                Ok(v) => Some(v),
+                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Disconnected) => None,
+            }
+        };
+        self.filter_paths_rx = None;
+        match result {
+            Some(Ok(paths)) => {
+                let items = paths
+                    .into_iter()
+                    .map(|path| crate::gui::popup::ListPickerItem {
+                        value: path.clone(),
+                        label: path,
+                        category: String::new(),
+                        description: None,
+                    })
+                    .collect();
+                self.show_list_picker(
+                    "Filter by path",
+                    items,
+                    "Path",
+                    Box::new(|gui, path| {
+                        gui.commit_path_filter =
+                            crate::gui::controller::commits::nonempty_for_filter(path);
+                        crate::gui::controller::commits::apply_commit_filters_and_focus(gui)
+                    }),
+                );
+            }
+            Some(Err(e)) => {
+                self.popup = PopupState::Message {
+                    title: "Filter by path".to_string(),
+                    message: format!("Could not list paths: {e}"),
+                    kind: MessageKind::Error,
+                };
+            }
+            None => {}
+        }
+    }
+
     fn receive_commit_page_results(&mut self) {
         while let Ok(result) = self.commit_page_rx.try_recv() {
             if result.generation != self.commit_page_generation {
@@ -2234,28 +2290,75 @@ impl Gui {
                 Ok(commits) => {
                     let page_len = commits.len();
                     let mut model = self.model.lock().unwrap();
-                    let mut seen: HashSet<String> =
-                        model.commits.iter().map(|c| c.hash.clone()).collect();
-                    let new_commits: Vec<_> = commits
-                        .into_iter()
-                        .filter(|c| seen.insert(c.hash.clone()))
-                        .collect();
-                    model.extend_commits(new_commits);
-                    self.commit_history_complete = page_len < DEFAULT_COMMIT_LIMIT;
-                    self.context_mgr.clamp_selections(&model);
+                    if result.replace {
+                        model.set_commits(commits);
+                        drop(model);
+                        self.context_mgr.set_selection_for(ContextId::Commits, 0);
+                        self.range_select_anchor = None;
+                        self.commit_history_complete = page_len < DEFAULT_COMMIT_LIMIT;
+                    } else {
+                        let mut seen: HashSet<String> =
+                            model.commits.iter().map(|c| c.hash.clone()).collect();
+                        let new_commits: Vec<_> = commits
+                            .into_iter()
+                            .filter(|c| seen.insert(c.hash.clone()))
+                            .collect();
+                        model.extend_commits(new_commits);
+                        self.commit_history_complete = page_len < DEFAULT_COMMIT_LIMIT;
+                        self.context_mgr.clamp_selections(&model);
+                    }
                 }
                 Err(e) => {
                     self.commit_history_complete = true;
                     if self.popup == PopupState::None {
                         self.popup = PopupState::Message {
                             title: "Commits".to_string(),
-                            message: format!("Could not load more commits: {}", e),
+                            message: format!("Could not load commits: {}", e),
                             kind: MessageKind::Error,
                         };
                     }
                 }
             }
         }
+    }
+
+    /// Reload first page of commits for current filters (async).
+    /// Used by ctrl-s so we don't block UI or refresh files/branches.
+    pub(crate) fn reload_filtered_commits_async(&mut self) {
+        self.reset_commit_pagination();
+        if let Ok(mut model) = self.model.lock() {
+            model.clear_commits();
+        }
+        self.context_mgr.set_selection_for(ContextId::Commits, 0);
+        self.range_select_anchor = None;
+        self.spawn_commit_page_load(DEFAULT_COMMIT_LIMIT, 0, true);
+    }
+
+    fn spawn_commit_page_load(&mut self, limit: usize, skip: usize, replace: bool) {
+        self.commit_page_loading = true;
+        let generation = self.commit_page_generation;
+        let git = Arc::clone(&self.git);
+        let tx = self.commit_page_tx.clone();
+        let filter = crate::git::commit::CommitFilter {
+            branches: self.commit_branch_filter.clone(),
+            path: self.commit_path_filter.clone(),
+            authors: self.commit_author_filter.clone(),
+        };
+
+        std::thread::spawn(move || {
+            let unpushed = git.unpushed_commit_hashes().unwrap_or_default();
+            let result = git
+                .load_filtered_commits_page(&filter, limit, skip)
+                .map(|mut commits| {
+                    crate::git::GitCommands::apply_unpushed_status(&mut commits, &unpushed);
+                    commits
+                });
+            let _ = tx.send(CommitPageResult {
+                generation,
+                replace,
+                result,
+            });
+        });
     }
 
     fn maybe_request_more_commits(&mut self) {
@@ -2270,6 +2373,9 @@ impl Gui {
             let model = self.model.lock().unwrap();
             model.commits.len()
         };
+        if len == 0 {
+            return;
+        }
         if len < DEFAULT_COMMIT_LIMIT {
             self.commit_history_complete = true;
             return;
@@ -2286,20 +2392,7 @@ impl Gui {
             return;
         }
 
-        self.commit_page_loading = true;
-        let generation = self.commit_page_generation;
-        let git = Arc::clone(&self.git);
-        let tx = self.commit_page_tx.clone();
-        let filter = crate::git::commit::CommitFilter {
-            branches: self.commit_branch_filter.clone(),
-            path: self.commit_path_filter.clone(),
-            authors: self.commit_author_filter.clone(),
-        };
-
-        std::thread::spawn(move || {
-            let result = git.load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, len);
-            let _ = tx.send(CommitPageResult { generation, result });
-        });
+        self.spawn_commit_page_load(DEFAULT_COMMIT_LIMIT, len, false);
     }
 
     fn reset_commit_pagination(&mut self) {
@@ -7868,9 +7961,21 @@ impl Gui {
         self.reset_commit_pagination();
         self.diff_preview_cache.retain_immutable();
         let git = Arc::clone(&self.git);
+        let commit_filter = self.commit_filter_for_load();
         std::thread::spawn(move || {
-            git.load_model_streaming(&tx);
+            git.load_model_streaming(&tx, commit_filter);
         });
+    }
+
+    fn commit_filter_for_load(&self) -> Option<crate::git::commit::CommitFilter> {
+        let has = self.commit_path_filter.is_some()
+            || !self.commit_author_filter.is_empty()
+            || !self.commit_branch_filter.is_empty();
+        has.then(|| crate::git::commit::CommitFilter {
+            branches: self.commit_branch_filter.clone(),
+            path: self.commit_path_filter.clone(),
+            authors: self.commit_author_filter.clone(),
+        })
     }
 
     fn refresh(&mut self) -> Result<()> {
@@ -7887,25 +7992,9 @@ impl Gui {
     /// Re-apply selection-dependent views after the model was reloaded
     /// (blocking `refresh` or background streaming refresh).
     fn after_model_refresh(&mut self) -> Result<()> {
+        // Commits arrive already filtered via load_model_streaming(commit_filter)
+        // or reload_filtered_commits_async — don't re-fetch here.
         let mut model = self.model.lock().unwrap();
-
-        // Re-apply commit filters after refresh replaces the model.
-        if !self.commit_branch_filter.is_empty()
-            || self.commit_path_filter.is_some()
-            || !self.commit_author_filter.is_empty()
-        {
-            let filter = crate::git::commit::CommitFilter {
-                branches: self.commit_branch_filter.clone(),
-                path: self.commit_path_filter.clone(),
-                authors: self.commit_author_filter.clone(),
-            };
-            if let Ok(filtered) =
-                self.git
-                    .load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, 0)
-            {
-                model.set_commits(filtered);
-            }
-        }
         self.commit_history_complete = model.commits.len() < DEFAULT_COMMIT_LIMIT;
 
         // Rebuild file tree inline to avoid borrow issues

@@ -308,6 +308,10 @@ impl ContextManager {
         self.viewport_manually_scrolled = false;
     }
 
+    pub fn set_selection_for(&mut self, ctx: ContextId, idx: usize) {
+        self.selections.insert(ctx, idx);
+    }
+
     pub fn scroll_offset(&self, ctx: ContextId) -> usize {
         self.scroll_offsets.get(&ctx).copied().unwrap_or(0)
     }

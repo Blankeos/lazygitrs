@@ -107,6 +107,13 @@ impl Model {
         self.commits_revision = self.commits_revision.wrapping_add(1);
     }
 
+    pub fn clear_commits(&mut self) {
+        if !self.commits.is_empty() {
+            self.commits.clear();
+            self.commits_revision = self.commits_revision.wrapping_add(1);
+        }
+    }
+
     pub fn extend_commits(&mut self, commits: impl IntoIterator<Item = Commit>) {
         let commits = commits.into_iter().collect::<Vec<_>>();
         self.remember_commit_authors(&commits);
