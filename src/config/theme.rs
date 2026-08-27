@@ -853,9 +853,16 @@ pub fn load_color_themes() -> Vec<ColorTheme> {
         }
     }
 
-    // Sort non-default themes alphabetically by name
+    // Dark themes first, then light — alphabetical within each group.
+    // Default stays at index 0.
     if themes.len() > 1 {
-        themes[1..].sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        themes[1..].sort_by(|a, b| {
+            let a_light = matches!(a.appearance, ThemeAppearance::Light);
+            let b_light = matches!(b.appearance, ThemeAppearance::Light);
+            a_light
+                .cmp(&b_light)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
     }
 
     themes

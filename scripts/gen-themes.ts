@@ -88,17 +88,45 @@ function resolveDef(defs: Record<string, string>, value: string): string {
   return defs[value] ?? value;
 }
 
-/** Pick the dark-mode value from a theme entry and resolve it. */
+type ThemeMode = "dark" | "light";
+
+/** Pick a mode-specific value from a theme entry and resolve it. */
 function resolveColor(
   defs: Record<string, string>,
   theme: Record<string, DarkLight | string>,
   key: string,
-  fallback: string
+  fallback: string,
+  mode: ThemeMode = "dark"
 ): string {
   const entry = theme[key];
   if (!entry) return fallback;
   if (typeof entry === "string") return resolveDef(defs, entry);
-  return resolveDef(defs, entry.dark);
+  const preferred = mode === "light" ? entry.light ?? entry.dark : entry.dark ?? entry.light;
+  if (!preferred) return fallback;
+  return resolveDef(defs, preferred);
+}
+
+/** True when theme.background exposes a distinct light Mode hex. */
+function hasLightMode(theme: Record<string, DarkLight | string>): boolean {
+  const background = theme.background;
+  return (
+    !!background &&
+    typeof background === "object" &&
+    typeof background.light === "string"
+  );
+}
+
+/**
+ * Some OpenCode themes declare `{ dark, light }` Mode objects but use the same
+ * values for both. Emitting a *-light sibling would be a duplicate — skip those.
+ */
+function hasDistinctLightPalette(theme: Record<string, DarkLight | string>): boolean {
+  for (const value of Object.values(theme)) {
+    if (!value || typeof value !== "object") continue;
+    if (typeof value.dark !== "string" || typeof value.light !== "string") continue;
+    if (value.dark !== value.light) return true;
+  }
+  return false;
 }
 
 /** Parse a hex color to [r, g, b]. */
@@ -159,31 +187,35 @@ function appearanceFromHex(hex: string): "dark" | "light" {
 }
 
 
-function transformTheme(opencode: OpenCodeTheme, filename: string): LazygitrsTheme {
+function transformTheme(
+  opencode: OpenCodeTheme,
+  filename: string,
+  mode: ThemeMode = "dark"
+): LazygitrsTheme {
   const { defs, theme } = opencode;
-  const r = (key: string, fallback: string) => resolveColor(defs, theme, key, fallback);
+  const r = (key: string, fallback: string) => resolveColor(defs, theme, key, fallback, mode);
 
   // Base semantic colors
-  const primary = r("primary", "#88c0d0");
-  const secondary = r("secondary", "#b48ead");
-  const success = r("success", "#a3be8c");
-  const error = r("error", "#bf616a");
-  const warning = r("warning", "#ebcb8b");
-  const info = r("info", "#81a1c1");
-  const text = r("text", "#d8dee9");
-  const textMuted = r("textMuted", "#4c566a");
-  const background = r("background", "#2e3440");
-  const backgroundPanel = r("backgroundPanel", "#3b4252");
-  const backgroundElement = r("backgroundElement", "#434c5e");
-  const border = r("border", "#4c566a");
+  const primary = r("primary", mode === "light" ? "#007acc" : "#88c0d0");
+  const secondary = r("secondary", mode === "light" ? "#6f42c1" : "#b48ead");
+  const success = r("success", mode === "light" ? "#22863a" : "#a3be8c");
+  const error = r("error", mode === "light" ? "#cb2431" : "#bf616a");
+  const warning = r("warning", mode === "light" ? "#b08800" : "#ebcb8b");
+  const info = r("info", mode === "light" ? "#0366d6" : "#81a1c1");
+  const text = r("text", mode === "light" ? "#24292e" : "#d8dee9");
+  const textMuted = r("textMuted", mode === "light" ? "#6a737d" : "#4c566a");
+  const background = r("background", mode === "light" ? "#ffffff" : "#2e3440");
+  const backgroundPanel = r("backgroundPanel", mode === "light" ? "#f6f8fa" : "#3b4252");
+  const backgroundElement = r("backgroundElement", mode === "light" ? "#e1e4e8" : "#434c5e");
+  const border = r("border", mode === "light" ? "#d1d5da" : "#4c566a");
   const borderActive = r("borderActive", primary);
 
   // Diff colors (OpenCode provides these directly)
   const diffAdded = r("diffAdded", success);
   const diffRemoved = r("diffRemoved", error);
   const diffContext = r("diffContext", textMuted);
-  const diffAddedBg = r("diffAddedBg", darken(success, 0.8));
-  const diffRemovedBg = r("diffRemovedBg", darken(error, 0.8));
+  const diffAddedBg = r("diffAddedBg", mode === "light" ? mix(success, background, 0.85) : darken(success, 0.8));
+  const diffRemovedBg = r("diffRemovedBg", mode === "light" ? mix(error, background, 0.85) : darken(error, 0.8));
   const diffHighlightAdded = r("diffHighlightAdded", success);
   const diffHighlightRemoved = r("diffHighlightRemoved", error);
   const diffLineNumber = r("diffLineNumber", backgroundElement);
@@ -199,12 +231,17 @@ function transformTheme(opencode: OpenCodeTheme, filename: string): LazygitrsThe
   const syntaxPunctuation = r("syntaxPunctuation", text);
   const syntaxVariable = r("syntaxVariable", error);
 
-  const id = filename.replace(".json", "");
+  const baseId = filename.replace(".json", "");
+  const id = mode === "light" ? `${baseId}-light` : baseId;
+  const name =
+    mode === "light"
+      ? `${fileNameToDisplayName(filename)} Light`
+      : fileNameToDisplayName(filename);
 
   return {
     id,
-    name: fileNameToDisplayName(filename),
-    appearance: appearanceFromHex(background),
+    name,
+    appearance: mode,
 
     primary,
     secondary,
@@ -233,8 +270,8 @@ function transformTheme(opencode: OpenCodeTheme, filename: string): LazygitrsThe
     diff_context: diffContext,
     diff_add_bg: diffAddedBg,
     diff_remove_bg: diffRemovedBg,
-    diff_add_word: mix(diffHighlightAdded, background, 0.35),
-    diff_remove_word: mix(diffHighlightRemoved, background, 0.35),
+    diff_add_word: mix(diffHighlightAdded, background, mode === "light" ? 0.55 : 0.35),
+    diff_remove_word: mix(diffHighlightRemoved, background, mode === "light" ? 0.55 : 0.35),
     diff_line_number: diffLineNumber,
 
     syntax_comment: syntaxComment,
@@ -283,11 +320,19 @@ async function main() {
       continue;
     }
 
-    const lazygitrsTheme = transformTheme(opencode, file.name);
+    const lazygitrsTheme = transformTheme(opencode, file.name, "dark");
     const outPath = join(THEMES_DIR, file.name);
     writeFileSync(outPath, JSON.stringify(lazygitrsTheme, null, 2) + "\n");
     console.log(`  -> ${file.name}`);
     count++;
+
+    if (hasLightMode(opencode.theme) && hasDistinctLightPalette(opencode.theme)) {
+      const lightTheme = transformTheme(opencode, file.name, "light");
+      const lightName = `${lightTheme.id}.json`;
+      writeFileSync(join(THEMES_DIR, lightName), JSON.stringify(lightTheme, null, 2) + "\n");
+      console.log(`  -> ${lightName}`);
+      count++;
+    }
   }
 
   console.log(`\nDone! ${count} themes saved to src/generated_themes/`);
