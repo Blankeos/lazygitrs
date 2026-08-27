@@ -5251,8 +5251,8 @@ impl Gui {
             original_theme_index,
         } = &mut self.popup
         {
-            let total = core.items.len();
             let search = core.search_textarea.lines().join("");
+            let matching = list_picker_matching_indices(&core.items, &search);
 
             let h = self.layout.height as usize;
             let list_height = list_picker_visible_height(h);
@@ -5275,49 +5275,49 @@ impl Gui {
                     return;
                 }
                 KeyCode::Down => {
-                    if total > 0 {
-                        core.selected = (core.selected + 1) % total;
+                    if let Some(next) = list_picker_next_match(&matching, core.selected) {
+                        core.selected = next;
                     }
                     self.current_theme_index = core.selected;
-                    if core.selected >= core.scroll_offset + list_height {
-                        core.scroll_offset = core.selected.saturating_sub(list_height - 1);
-                    }
-                    if core.selected == 0 {
-                        core.scroll_offset = 0;
+                    let sdi =
+                        list_picker_filtered_display_idx(&core.items, &matching, core.selected);
+                    if sdi >= core.scroll_offset + list_height {
+                        core.scroll_offset = sdi.saturating_sub(list_height - 1);
                     }
                 }
                 KeyCode::Up => {
-                    if total > 0 {
-                        core.selected = if core.selected == 0 {
-                            total - 1
-                        } else {
-                            core.selected - 1
-                        };
+                    if let Some(prev) = list_picker_prev_match(&matching, core.selected) {
+                        core.selected = prev;
                     }
                     self.current_theme_index = core.selected;
-                    if core.selected < core.scroll_offset {
-                        core.scroll_offset = core.selected;
-                    }
-                    if core.selected == total - 1 {
-                        core.scroll_offset = total.saturating_sub(list_height);
+                    if matching.first() == Some(&core.selected) {
+                        core.scroll_offset = 0;
+                    } else {
+                        let sdi =
+                            list_picker_filtered_display_idx(&core.items, &matching, core.selected);
+                        if sdi <= core.scroll_offset {
+                            core.scroll_offset = sdi.saturating_sub(1);
+                        }
                     }
                 }
                 _ => {
-                    // Search/filter — jump to matching theme
+                    // Search/filter — keep selection within matching themes
                     textarea_input(&mut core.search_textarea, key);
                     let new_search = core.search_textarea.lines().join("");
                     if new_search != search {
-                        let new_lower = new_search.to_lowercase();
-                        if !new_lower.is_empty() {
-                            if let Some(idx) = core
-                                .items
-                                .iter()
-                                .position(|i| i.label.to_lowercase().contains(&new_lower))
+                        let matching = list_picker_matching_indices(&core.items, &new_search);
+                        if !new_search.trim().is_empty() {
+                            if let Some(sel) =
+                                list_picker_clamp_selection_to_matches(&matching, core.selected)
                             {
-                                core.selected = idx;
-                                self.current_theme_index = idx;
-                                // Center the match in the viewport
-                                core.scroll_offset = idx.saturating_sub(list_height / 2);
+                                core.selected = sel;
+                                self.current_theme_index = sel;
+                                let sdi = list_picker_filtered_display_idx(
+                                    &core.items,
+                                    &matching,
+                                    core.selected,
+                                );
+                                core.scroll_offset = sdi.saturating_sub(list_height / 2);
                             }
                         } else {
                             core.selected = *original_theme_index;
@@ -6820,57 +6820,14 @@ impl Gui {
             return;
         }
 
-        // ThemePicker popup intercepts mouse scroll and click
-        if let PopupState::ThemePicker { core, .. } = &mut self.popup {
-            let total = core.items.len();
-            let h = self.layout.height as usize;
-            let lh = list_picker_visible_height(h);
-            match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    core.selected = core.selected.saturating_sub(1);
-                    self.current_theme_index = core.selected;
-                    if core.selected < core.scroll_offset {
-                        core.scroll_offset = core.selected;
-                    }
-                }
-                MouseEventKind::ScrollDown => {
-                    core.selected = (core.selected + 1).min(total.saturating_sub(1));
-                    self.current_theme_index = core.selected;
-                    if core.selected >= core.scroll_offset + lh {
-                        core.scroll_offset = core.selected.saturating_sub(lh - 1);
-                    }
-                }
-                MouseEventKind::Down(MouseButton::Left) => {
-                    // Click to select a theme
-                    let area =
-                        ratatui::layout::Rect::new(0, 0, self.layout.width, self.layout.height);
-                    let popup_width = (area.width * 60 / 100).min(60).max(30);
-                    let max_popup = (area.height * 60 / 100).max(10);
-                    let popup_height = max_popup.min(area.height.saturating_sub(4));
-                    let x = (area.width.saturating_sub(popup_width)) / 2;
-                    let y = (area.height.saturating_sub(popup_height)) / 2;
-                    let inner_y = y + 1;
-                    let list_start = inner_y + 2;
-                    let inner_height = popup_height.saturating_sub(2);
-                    let list_height = inner_height.saturating_sub(3) as usize;
-
-                    if mouse.row >= list_start
-                        && mouse.row < list_start + list_height as u16
-                        && mouse.column >= x
-                        && mouse.column < x + popup_width
-                    {
-                        let row_in_list = (mouse.row - list_start) as usize;
-                        let effective_scroll =
-                            core.scroll_offset.min(total.saturating_sub(list_height));
-                        let clicked_idx = effective_scroll + row_in_list;
-                        if clicked_idx < total {
-                            core.selected = clicked_idx;
-                            self.current_theme_index = clicked_idx;
-                        }
-                    }
-                }
-                _ => {}
-            }
+        // ThemePicker popup intercepts mouse scroll and click (respects search filter)
+        if matches!(self.popup, PopupState::ThemePicker { .. }) {
+            let (w, h) = (self.layout.width, self.layout.height);
+            let PopupState::ThemePicker { core, .. } = &mut self.popup else {
+                unreachable!();
+            };
+            handle_list_picker_mouse(core, mouse, w, h);
+            self.current_theme_index = core.selected;
             return;
         }
 
