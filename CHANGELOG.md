@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.34] - 2026-08-27
+
+### Bug Fixes
+
+- Cycle list picker selection and deduplicate scroll-after-navigation logic by @Blankeos
+- Theme picker filter and up/down by @Blankeos
+- Reset scroll position when replacing commit summary text by @Blankeos
+- Preserve logical newlines in commit body soft-wrap editor by @Blankeos
+- Replace sed-based GIT_SEQUENCE_EDITOR with temp-file scripts by @Blankeos
+- Make TUI work under Helix `:insert-output` by claiming `/dev/tty` by @Blankeos
+
+### Features
+
+- Generate light-mode themes from OpenCode source data by @Blankeos
+- Apply commit filters at stream time instead of re-fetching after load by @Blankeos
+- Add theme appearance tracking and update generated theme colors by @Blankeos
+- Add startup path filter (-f/--filter) and fix list picker search filtering by @Blankeos
+
+### Doc
+
+- Document how to do editor integrations by @Blankeos
+
 ## [0.0.33] - 2026-08-21
 
 ### Features
