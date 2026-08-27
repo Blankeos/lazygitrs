@@ -54,6 +54,29 @@ fn list_picker_visible_height(terminal_height: usize) -> usize {
     popup_h.saturating_sub(2).saturating_sub(3)
 }
 
+/// Keep the selection in view after Up/Down (including wrap last↔first).
+fn list_picker_scroll_after_nav(
+    core: &mut crate::gui::popup::ListPickerCore,
+    matching: &[usize],
+    list_height: usize,
+    moved_down: bool,
+) {
+    let sdi = list_picker_filtered_display_idx(&core.items, matching, core.selected);
+    if moved_down {
+        if matching.first() == Some(&core.selected) {
+            core.scroll_offset = 0;
+        } else if sdi >= core.scroll_offset + list_height {
+            core.scroll_offset = sdi.saturating_sub(list_height - 1);
+        }
+    } else if matching.last() == Some(&core.selected) {
+        core.scroll_offset = sdi.saturating_sub(list_height.saturating_sub(1));
+    } else if matching.first() == Some(&core.selected) {
+        core.scroll_offset = 0;
+    } else if sdi <= core.scroll_offset {
+        core.scroll_offset = sdi.saturating_sub(1);
+    }
+}
+
 /// Shared mouse scroll/click handling for free-entry list pickers (RefPicker, ListPicker).
 fn handle_list_picker_mouse(
     core: &mut crate::gui::popup::ListPickerCore,
@@ -72,23 +95,13 @@ fn handle_list_picker_mouse(
             if let Some(prev) = list_picker_prev_match(&matching, core.selected) {
                 core.selected = prev;
             }
-            if matching.first() == Some(&core.selected) {
-                core.scroll_offset = 0;
-            } else {
-                let di = list_picker_filtered_display_idx(&core.items, &matching, core.selected);
-                if di <= core.scroll_offset {
-                    core.scroll_offset = di.saturating_sub(1);
-                }
-            }
+            list_picker_scroll_after_nav(core, &matching, lh, false);
         }
         MouseEventKind::ScrollDown => {
             if let Some(next) = list_picker_next_match(&matching, core.selected) {
                 core.selected = next;
             }
-            let di = list_picker_filtered_display_idx(&core.items, &matching, core.selected);
-            if di >= core.scroll_offset + lh {
-                core.scroll_offset = di.saturating_sub(lh - 1);
-            }
+            list_picker_scroll_after_nav(core, &matching, lh, true);
         }
         MouseEventKind::Down(MouseButton::Left) => {
             // Click to select an item in the list picker
@@ -5079,25 +5092,13 @@ impl Gui {
                     if let Some(next) = list_picker_next_match(&matching, core.selected) {
                         core.selected = next;
                     }
-                    let sdi =
-                        list_picker_filtered_display_idx(&core.items, &matching, core.selected);
-                    if sdi >= core.scroll_offset + list_height {
-                        core.scroll_offset = sdi.saturating_sub(list_height - 1);
-                    }
+                    list_picker_scroll_after_nav(core, &matching, list_height, true);
                 }
                 KeyCode::Up => {
                     if let Some(prev) = list_picker_prev_match(&matching, core.selected) {
                         core.selected = prev;
                     }
-                    if matching.first() == Some(&core.selected) {
-                        core.scroll_offset = 0;
-                    } else {
-                        let sdi =
-                            list_picker_filtered_display_idx(&core.items, &matching, core.selected);
-                        if sdi <= core.scroll_offset {
-                            core.scroll_offset = sdi.saturating_sub(1);
-                        }
-                    }
+                    list_picker_scroll_after_nav(core, &matching, list_height, false);
                 }
                 _ => {
                     textarea_input(&mut core.search_textarea, key);
@@ -5170,25 +5171,13 @@ impl Gui {
                     if let Some(next) = list_picker_next_match(&matching, core.selected) {
                         core.selected = next;
                     }
-                    let sdi =
-                        list_picker_filtered_display_idx(&core.items, &matching, core.selected);
-                    if sdi >= core.scroll_offset + list_height {
-                        core.scroll_offset = sdi.saturating_sub(list_height - 1);
-                    }
+                    list_picker_scroll_after_nav(core, &matching, list_height, true);
                 }
                 KeyCode::Up => {
                     if let Some(prev) = list_picker_prev_match(&matching, core.selected) {
                         core.selected = prev;
                     }
-                    if matching.first() == Some(&core.selected) {
-                        core.scroll_offset = 0;
-                    } else {
-                        let sdi =
-                            list_picker_filtered_display_idx(&core.items, &matching, core.selected);
-                        if sdi <= core.scroll_offset {
-                            core.scroll_offset = sdi.saturating_sub(1);
-                        }
-                    }
+                    list_picker_scroll_after_nav(core, &matching, list_height, false);
                 }
                 _ => {
                     textarea_input(&mut core.search_textarea, key);
@@ -5279,26 +5268,14 @@ impl Gui {
                         core.selected = next;
                     }
                     self.current_theme_index = core.selected;
-                    let sdi =
-                        list_picker_filtered_display_idx(&core.items, &matching, core.selected);
-                    if sdi >= core.scroll_offset + list_height {
-                        core.scroll_offset = sdi.saturating_sub(list_height - 1);
-                    }
+                    list_picker_scroll_after_nav(core, &matching, list_height, true);
                 }
                 KeyCode::Up => {
                     if let Some(prev) = list_picker_prev_match(&matching, core.selected) {
                         core.selected = prev;
                     }
                     self.current_theme_index = core.selected;
-                    if matching.first() == Some(&core.selected) {
-                        core.scroll_offset = 0;
-                    } else {
-                        let sdi =
-                            list_picker_filtered_display_idx(&core.items, &matching, core.selected);
-                        if sdi <= core.scroll_offset {
-                            core.scroll_offset = sdi.saturating_sub(1);
-                        }
-                    }
+                    list_picker_scroll_after_nav(core, &matching, list_height, false);
                 }
                 _ => {
                     // Search/filter — keep selection within matching themes

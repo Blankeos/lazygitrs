@@ -961,13 +961,13 @@ pub fn list_picker_filtered_display_idx(
     di
 }
 
-/// Next matching item index after `selected` (wraps within `matching`).
+/// Next matching item index after `selected` (cycles within `matching`).
 pub fn list_picker_next_match(matching: &[usize], selected: usize) -> Option<usize> {
     if matching.is_empty() {
         return None;
     }
     match matching.iter().position(|&i| i == selected) {
-        Some(pos) => Some(matching[(pos + 1).min(matching.len() - 1)]),
+        Some(pos) => Some(matching[(pos + 1) % matching.len()]),
         None => matching
             .iter()
             .copied()
@@ -976,13 +976,13 @@ pub fn list_picker_next_match(matching: &[usize], selected: usize) -> Option<usi
     }
 }
 
-/// Previous matching item index before `selected` (wraps within `matching`).
+/// Previous matching item index before `selected` (cycles within `matching`).
 pub fn list_picker_prev_match(matching: &[usize], selected: usize) -> Option<usize> {
     if matching.is_empty() {
         return None;
     }
     match matching.iter().position(|&i| i == selected) {
-        Some(0) => Some(matching[0]),
+        Some(0) => Some(matching[matching.len() - 1]),
         Some(pos) => Some(matching[pos - 1]),
         None => matching
             .iter()
@@ -1154,12 +1154,12 @@ mod free_entry_tests {
     }
 
     #[test]
-    fn next_prev_match_stay_within_filtered_set() {
+    fn next_prev_match_cycle_within_filtered_set() {
         let matching = vec![0usize, 3, 7];
         assert_eq!(list_picker_next_match(&matching, 0), Some(3));
-        assert_eq!(list_picker_next_match(&matching, 7), Some(7));
+        assert_eq!(list_picker_next_match(&matching, 7), Some(0));
         assert_eq!(list_picker_prev_match(&matching, 7), Some(3));
-        assert_eq!(list_picker_prev_match(&matching, 0), Some(0));
+        assert_eq!(list_picker_prev_match(&matching, 0), Some(7));
         assert_eq!(
             list_picker_clamp_selection_to_matches(&matching, 5),
             Some(0)
