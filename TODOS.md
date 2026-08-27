@@ -315,7 +315,7 @@ Where I observed this behavior: I noticed this for the "Commit Message" and "Des
 
 - [x] Be able to fallback w/ confirm alert when "c" checkout a new branch that doesnt exist.
 
-- [ ] Improve filter performance (ctrl-s), more instantaneous, too slow right now
+- [x] Improve filter performance (ctrl-s), more instantaneous, too slow right now
 
 - [x] Unified diff when scrolling, sometimes some of the diff lines get cleared as I scroll
 
