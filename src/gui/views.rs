@@ -3000,7 +3000,10 @@ pub fn render_popup(
         } => {
             // Two-field commit editor: summary (1 line) + body (multi-line)
             // Layout: border, summary label, summary input, body label, body textarea, hint, border
-            let ta_height = 16u16;
+            let ta_height = 16u16.min(area.height);
+            if ta_height < 3 || popup_width < 3 {
+                return;
+            }
             let ta_y = (area.height.saturating_sub(ta_height)) / 2;
             let ta_rect = Rect::new(x, ta_y, popup_width, ta_height);
             frame.render_widget(Clear, ta_rect);
