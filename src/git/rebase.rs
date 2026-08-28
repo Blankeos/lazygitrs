@@ -239,9 +239,37 @@ impl GitCommands {
     /// Interactive rebase with a full todo list: apply multiple actions in one shot.
     /// `actions` must be in rebase-todo order (oldest commit first, newest last).
     /// Each entry is (commit_hash, action).
+    ///
+    /// If the first kept (non-drop) action is squash/fixup, the todo is rewritten
+    /// to `pick` `base_hash` and then the original actions, rebasing onto the
+    /// parent of `base_hash` (or `--root` when `base_hash` is a root commit).
+    /// Git cannot start a todo with squash/fixup, but the planner treats the
+    /// onto commit as the squash target, so this is the equivalent operation.
     pub fn rebase_interactive_batch(
         &self,
         base_hash: &str,
+        actions: &[(String, RebaseAction)],
+    ) -> Result<()> {
+        if first_kept_is_squash_or_fixup(actions) {
+            let mut folded = Vec::with_capacity(actions.len() + 1);
+            folded.push((base_hash.to_string(), RebaseAction::Pick));
+            folded.extend_from_slice(actions);
+            return match self.try_commit_parent(base_hash)? {
+                Some(parent) => self.run_interactive_rebase(&[&parent], &folded),
+                None => self.run_interactive_rebase(&["--root"], &folded),
+            };
+        }
+        self.run_interactive_rebase(&[base_hash], actions)
+    }
+
+    /// Interactive rebase from the root (no parent base).
+    pub fn rebase_interactive_batch_root(&self, actions: &[(String, RebaseAction)]) -> Result<()> {
+        self.run_interactive_rebase(&["--root"], actions)
+    }
+
+    fn run_interactive_rebase(
+        &self,
+        onto_args: &[&str],
         actions: &[(String, RebaseAction)],
     ) -> Result<()> {
         let mut todo_lines = Vec::new();
@@ -255,17 +283,21 @@ impl GitCommands {
         // write a tiny script that copies our prepared todo into place.
         let (todo_path, script_path) = self.write_todo_editor(&todo_content)?;
 
+        let mut args = vec!["rebase", "-i", "--autostash"];
+        args.extend_from_slice(onto_args);
+
         let result = self
             .git()
-            .args(&["rebase", "-i", "--autostash", base_hash])
+            .args(&args)
             .env(
                 "GIT_SEQUENCE_EDITOR",
                 script_path.to_str().unwrap_or_default(),
             )
             // Prevent git from opening an interactive editor for reword/edit
-            // actions. `true` exits 0 without modifying COMMIT_EDITMSG, so
-            // reword keeps the original message (reword message editing is
-            // handled in the TUI before execution).
+            // actions and squash-message confirmation. `true` exits 0 without
+            // modifying COMMIT_EDITMSG, so reword keeps the original message
+            // (reword message editing is handled in the TUI before execution)
+            // and squash keeps git's concatenated default.
             .env("GIT_EDITOR", "true")
             .run()?;
 
@@ -281,42 +313,6 @@ impl GitCommands {
                 return Ok(());
             }
             // Real failure
-            anyhow::bail!(
-                "Rebase failed (exit {}): {}",
-                result.exit_code.unwrap_or(-1),
-                result.stderr.trim()
-            );
-        }
-        Ok(())
-    }
-
-    /// Interactive rebase from the root (no parent base).
-    pub fn rebase_interactive_batch_root(&self, actions: &[(String, RebaseAction)]) -> Result<()> {
-        let mut todo_lines = Vec::new();
-        for (hash, action) in actions {
-            todo_lines.push(format!("{} {}", action.as_str(), hash));
-        }
-        let todo_content = todo_lines.join("\n") + "\n";
-        let (todo_path, script_path) = self.write_todo_editor(&todo_content)?;
-
-        let result = self
-            .git()
-            .args(&["rebase", "-i", "--autostash", "--root"])
-            .env(
-                "GIT_SEQUENCE_EDITOR",
-                script_path.to_str().unwrap_or_default(),
-            )
-            .env("GIT_EDITOR", "true")
-            .run()?;
-
-        let _ = fs::remove_file(&todo_path);
-        let _ = fs::remove_file(&script_path);
-
-        if !result.success {
-            let git_dir = self.repo_path().join(".git");
-            if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
-                return Ok(());
-            }
             anyhow::bail!(
                 "Rebase failed (exit {}): {}",
                 result.exit_code.unwrap_or(-1),
@@ -546,12 +542,32 @@ impl GitCommands {
 
     /// Get the parent hash of a commit.
     fn commit_parent(&self, hash: &str) -> Result<String> {
+        match self.try_commit_parent(hash)? {
+            Some(parent) => Ok(parent),
+            None => anyhow::bail!("commit {hash} has no parent"),
+        }
+    }
+
+    /// First parent of `hash`, or `None` if `hash` is a root commit.
+    fn try_commit_parent(&self, hash: &str) -> Result<Option<String>> {
         let result = self
             .git()
-            .args(&["rev-parse", &format!("{}^", hash)])
+            .args(&["log", "-1", "--format=%P", hash])
             .run_expecting_success()?;
-        Ok(result.stdout_trimmed().to_string())
+        Ok(result
+            .stdout_trimmed()
+            .split_whitespace()
+            .next()
+            .map(str::to_string))
     }
+}
+
+fn first_kept_is_squash_or_fixup(actions: &[(String, RebaseAction)]) -> bool {
+    actions
+        .iter()
+        .map(|(_, action)| *action)
+        .find(|action| *action != RebaseAction::Drop)
+        .is_some_and(|action| matches!(action, RebaseAction::Squash | RebaseAction::Fixup))
 }
 
 /// Represents the state of a rebase in progress.
@@ -828,5 +844,154 @@ mod tests {
         );
 
         let _ = git.abort_rebase();
+    }
+
+    fn log_oneline(dir: &Path) -> Vec<String> {
+        let out = Command::new("git")
+            .args(["log", "--format=%s"])
+            .current_dir(dir)
+            .output()
+            .expect("log");
+        assert!(out.status.success());
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn blob_at(dir: &Path, path: &str) -> String {
+        std::fs::read_to_string(dir.join(path)).unwrap()
+    }
+
+    #[test]
+    fn squash_first_todo_folds_into_onto_commit() {
+        let temp = TempDir::new("rebase-squash-into-onto");
+        let dir = temp.path();
+        init_repo(dir);
+        let c1 = commit(dir, "c1", "1");
+        let c2 = commit(dir, "c2", "2");
+        let c3 = commit(dir, "c3", "3");
+        let c4 = commit(dir, "c4", "4");
+
+        let git = GitCommands::new(dir).expect("git");
+        git.rebase_interactive_batch(
+            &c2,
+            &[
+                (c3.clone(), RebaseAction::Squash),
+                (c4.clone(), RebaseAction::Squash),
+            ],
+        )
+        .expect("squash into onto");
+
+        assert!(!git.is_rebase_in_progress());
+        assert_eq!(blob_at(dir, "f"), "4");
+        let subjects = log_oneline(dir);
+        assert_eq!(
+            subjects.len(),
+            2,
+            "c2+c3+c4 should collapse onto c1: {subjects:?}"
+        );
+        assert_eq!(subjects[1], "c1");
+        assert_eq!(rev_parse(dir, "HEAD^"), c1);
+        let head_msg = {
+            let out = Command::new("git")
+                .args(["log", "-1", "--format=%B"])
+                .current_dir(dir)
+                .output()
+                .expect("log %B");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        assert!(
+            head_msg.contains("c2"),
+            "squash keeps onto subject: {head_msg}"
+        );
+        assert!(head_msg.contains("c3"), "squash concatenates: {head_msg}");
+        assert!(head_msg.contains("c4"), "squash concatenates: {head_msg}");
+    }
+
+    #[test]
+    fn fixup_first_todo_keeps_onto_message() {
+        let temp = TempDir::new("rebase-fixup-into-onto");
+        let dir = temp.path();
+        init_repo(dir);
+        let _c1 = commit(dir, "c1", "1");
+        let c2 = commit(dir, "c2", "2");
+        let c3 = commit(dir, "c3", "3");
+        let c4 = commit(dir, "c4", "4");
+
+        let git = GitCommands::new(dir).expect("git");
+        git.rebase_interactive_batch(
+            &c2,
+            &[
+                (c3.clone(), RebaseAction::Fixup),
+                (c4.clone(), RebaseAction::Fixup),
+            ],
+        )
+        .expect("fixup into onto");
+
+        assert!(!git.is_rebase_in_progress());
+        assert_eq!(blob_at(dir, "f"), "4");
+        assert_eq!(log_oneline(dir), vec!["c2".to_string(), "c1".to_string()]);
+    }
+
+    #[test]
+    fn squash_into_root_onto_commit() {
+        let temp = TempDir::new("rebase-squash-into-root");
+        let dir = temp.path();
+        init_repo(dir);
+        let c1 = commit(dir, "c1", "1");
+        let c2 = commit(dir, "c2", "2");
+        let c3 = commit(dir, "c3", "3");
+
+        let git = GitCommands::new(dir).expect("git");
+        git.rebase_interactive_batch(
+            &c1,
+            &[
+                (c2.clone(), RebaseAction::Squash),
+                (c3.clone(), RebaseAction::Squash),
+            ],
+        )
+        .expect("squash into root");
+
+        assert!(!git.is_rebase_in_progress());
+        assert_eq!(blob_at(dir, "f"), "3");
+        let subjects = log_oneline(dir);
+        assert_eq!(
+            subjects.len(),
+            1,
+            "everything should fold into the root: {subjects:?}"
+        );
+        assert!(subjects[0].contains("c1"));
+    }
+
+    #[test]
+    fn drop_then_squash_still_folds_into_onto() {
+        let temp = TempDir::new("rebase-drop-then-squash-into-onto");
+        let dir = temp.path();
+        init_repo(dir);
+        let _c1 = commit(dir, "c1", "1");
+        let c2 = commit(dir, "c2", "2");
+        // Unrelated file so dropping this commit does not conflict with the squash.
+        std::fs::write(dir.join("g"), "x").unwrap();
+        git_in(dir, &["add", "g"]);
+        git_in(dir, &["commit", "-m", "c3"]);
+        let c3 = rev_parse(dir, "HEAD");
+        let c4 = commit(dir, "c4", "4");
+
+        let git = GitCommands::new(dir).expect("git");
+        git.rebase_interactive_batch(
+            &c2,
+            &[
+                (c3.clone(), RebaseAction::Drop),
+                (c4.clone(), RebaseAction::Fixup),
+            ],
+        )
+        .expect("drop then squash into onto");
+
+        assert!(!git.is_rebase_in_progress());
+        assert_eq!(blob_at(dir, "f"), "4");
+        assert!(!dir.join("g").exists());
+        assert_eq!(log_oneline(dir), vec!["c2".to_string(), "c1".to_string()]);
     }
 }

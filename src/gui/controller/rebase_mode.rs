@@ -399,24 +399,11 @@ fn execute_rebase(gui: &mut Gui) -> Result<()> {
     let actions = gui.rebase_mode.build_actions();
     let base_hash = gui.rebase_mode.base_hash.clone();
 
-    // Validate: squash/fixup cannot be the first action
-    if let Some((_, first_action)) = actions.first() {
-        if *first_action == RebaseAction::Squash || *first_action == RebaseAction::Fixup {
-            gui.popup = PopupState::Message {
-                title: "Invalid rebase".to_string(),
-                message: format!(
-                    "Cannot {} the first commit — there is nothing to {} into.",
-                    first_action.as_str(),
-                    first_action.as_str(),
-                ),
-                kind: MessageKind::Error,
-            };
-            return Ok(());
-        }
-    }
-
     // Switch to InProgress phase so refresh() can detect completion
     // and show the success popup (or re-enter InProgress if paused).
+    // Squash/fixup of the oldest todo is allowed: git cannot start a todo
+    // with those actions, so rebase_interactive_batch picks the onto commit
+    // and rebases onto its parent instead.
     gui.rebase_mode.phase = crate::gui::modes::rebase_mode::RebasePhase::InProgress;
 
     match gui.git.rebase_interactive_batch(&base_hash, &actions) {

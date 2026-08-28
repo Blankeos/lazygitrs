@@ -218,7 +218,7 @@
 
 - [x] Add a ✦ symbol as a button somewhere inside the 'Commit Message' dialog. This will be the special clickable button that will represent the 'Generate commit message' shortcut. Make it 'hoverable' with the mouse, show a tooltip when I hover on it 'c-g Generate w/ AI'.
 
-- [ ] multiselect commits in 'Commits' list ('4 Commits'). I wanna be able to 'squash'. In the original lazygit, I have these options when I'm focused on a commit item or range selected via `v`: squash, fixup, drop, edit, cherrypick, dismiss range select.
+- [x] multiselect commits in 'Commits' list ('4 Commits'). I wanna be able to 'squash'. In the original lazygit, I have these options when I'm focused on a commit item or range selected via `v`: squash, fixup, drop, edit, cherrypick, dismiss range select.
   - I think the current implementation is wayyy to unusable. Because why does it say 'Fixup commit <> into its parent?' that's very unclear. I think just do the following behavior...
     - The new s,f,d,e behavior (even when 1 or multirange select) in the '4 Commits' tab.
       The original lazygit behavior was for example... Press 's' to squash down - when I press it it shows a 'Are you sure you want to squash the selected commit(s) into the commit below?
