@@ -60,6 +60,18 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+          fetch-depth: 0
+      - name: Require release tags to be on main
+        if: ${{ !github.event.pull_request }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          release_commit="$(git rev-parse HEAD)"
+          if ! git merge-base --is-ancestor "$release_commit" origin/main; then
+            echo "Release tag ${GITHUB_REF_NAME} points to a commit that is not on main"
+            exit 1
+          fi
       - name: Install dist
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
