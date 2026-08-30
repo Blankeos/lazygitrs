@@ -734,24 +734,19 @@ fn discard_file(gui: &mut Gui) -> Result<()> {
             if node.is_dir {
                 let child_indices = node.child_file_indices.clone();
                 let model = gui.model.lock().unwrap();
-                let files_info: Vec<(String, bool)> = child_indices
+                let files: Vec<_> = child_indices
                     .iter()
-                    .filter_map(|&i| {
-                        model
-                            .files
-                            .get(i)
-                            .map(|f| (f.current_path().to_string(), f.added))
-                    })
+                    .filter_map(|&i| model.files.get(i).cloned())
                     .collect();
                 let dir_name = node.name.clone();
                 drop(model);
 
-                if files_info.is_empty() {
+                if files.is_empty() {
                     return Ok(());
                 }
 
                 if !gui.config.user_config.gui.skip_discard_change_warning {
-                    let files_info_clone = files_info.clone();
+                    let files_clone = files.clone();
                     gui.popup = PopupState::Menu {
                         title: format!("Discard all changes in '{}'?", dir_name),
                         items: vec![
@@ -760,9 +755,7 @@ fn discard_file(gui: &mut Gui) -> Result<()> {
                                 description: "discard all changes".to_string(),
                                 key: Some("d".to_string()),
                                 action: Some(Box::new(move |gui| {
-                                    for (name, added) in &files_info_clone {
-                                        gui.git.discard_file(name, *added)?;
-                                    }
+                                    gui.git.discard_files(&files_clone)?;
                                     gui.needs_refresh = true;
                                     Ok(())
                                 })),
@@ -778,9 +771,7 @@ fn discard_file(gui: &mut Gui) -> Result<()> {
                         loading_index: None,
                     };
                 } else {
-                    for (name, added) in &files_info {
-                        gui.git.discard_file(name, *added)?;
-                    }
+                    gui.git.discard_files(&files)?;
                     gui.needs_refresh = true;
                 }
                 return Ok(());
