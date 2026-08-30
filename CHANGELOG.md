@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.35] - 2026-08-30
+
+### Bug Fixes
+
+- Allow squash/fixup as first rebase action by rebasing onto parent by @Blankeos
+- Commit message dialog hardcoded height crash by @Blankeos
+
+### Chores
+
+- Refuse tagging unless on main by @Blankeos
+
+### Features
+
+- Discard performance #25 (#26) by @Blankeos in [#26](https://github.com/Blankeos/lazygitrs/pull/26)
+
 ## [0.0.34] - 2026-08-27
 
 ### Bug Fixes
