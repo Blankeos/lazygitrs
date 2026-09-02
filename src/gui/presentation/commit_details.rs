@@ -165,6 +165,16 @@ pub fn render_commit_details(
         .wrap(Wrap { trim: false })
         .scroll((*scroll, 0));
     frame.render_widget(para, inner);
+
+    crate::gui::scroll::render_scrollbar(
+        frame.buffer_mut(),
+        rect,
+        total_rows,
+        inner.height as usize,
+        *scroll as usize,
+        false,
+        theme.inactive_border,
+    );
 }
 
 fn hash_style(commit: &Commit, theme: &Theme) -> Style {
