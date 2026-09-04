@@ -2960,9 +2960,9 @@ impl Gui {
                     self.queue_diff_job(generation, diff_key, move || {
                         let path_refs: Vec<&str> = diff_paths.iter().map(String::as_str).collect();
                         // Both sides present: one buffer with unstaged
-                        // hunks on top, a `Staged changes` separator, then
-                        // staged hunks. Falls back to the single-side view
-                        // when a side is unavailable.
+                        // hunks under `name (Unstaged)`, then staged hunks
+                        // under `name (Staged)`. Falls back to the
+                        // single-side view when a side is unavailable.
                         if has_unstaged && has_staged {
                             let exists = git.repo_path().join(&current_path).exists();
                             match (
@@ -3069,10 +3069,10 @@ impl Gui {
                                     Some(p) => vec![p],
                                     None => Vec::new(),
                                 };
-                                // Directory hover: unstaged multi-file diff on
-                                // top, a `Staged changes` separator, then the
-                                // staged multi-file diff — same stacking as
-                                // the single-file view. Untracked children
+                                // Directory hover: per-file grouping with
+                                // `name (Unstaged)` immediately followed by
+                                // `name (Staged)` — same grouping as the
+                                // single-file view. Untracked children
                                 // only exist unstaged. Hunk actions stay
                                 // Cancel-only here (no single file to act on).
                                 let mut unstaged_combined =

@@ -353,6 +353,22 @@ pub struct DiffViewState {
     pub revert_undo_high_water: usize,
 }
 
+/// Suffix a file header with its index side so unstaged/staged hunks stay
+/// distinguishable when both are shown in one buffer:
+/// `README.md (Unstaged)` / `README.md (Staged)`.
+fn staged_file_header(name: &str, staged: bool) -> String {
+    format!("{} ({})", name, if staged { "Staged" } else { "Unstaged" })
+}
+
+/// Strip a ` (Staged)` / ` (Unstaged)` suffix back to the plain path so
+/// header text can still resolve to a file on disk.
+fn strip_staged_suffix(header: &str) -> &str {
+    header
+        .strip_suffix(" (Staged)")
+        .or_else(|| header.strip_suffix(" (Unstaged)"))
+        .unwrap_or(header)
+}
+
 impl Default for DiffViewState {
     fn default() -> Self {
         Self {
@@ -450,7 +466,7 @@ impl DiffViewState {
     pub fn file_at_line(&self, line_idx: usize) -> &str {
         for i in (0..=line_idx).rev() {
             if let Some(ref header) = self.lines.get(i).and_then(|l| l.file_header.as_ref()) {
-                return header;
+                return strip_staged_suffix(header);
             }
         }
         &self.filename
@@ -590,11 +606,12 @@ impl DiffViewState {
     }
 
     /// Parse a single file's unstaged + staged diffs into one scrollable
-    /// buffer: unstaged hunks first, then a `Staged changes` separator and
-    /// the staged hunks. `hunk_staged` records which section each hunk came
-    /// from so the hunk menu can offer Stage vs Unstage per hunk. Either
-    /// side may be empty (all-staged / all-unstaged file); the separator
-    /// only appears when both sides have content.
+    /// buffer: unstaged hunks under a `name (Unstaged)` header, then the
+    /// staged hunks under `name (Staged)`. `hunk_staged` records which
+    /// section each hunk came from so the hunk menu can offer Stage vs
+    /// Unstage per hunk. Either side may be empty (all-staged /
+    /// all-unstaged file); the per-side headers only appear when both
+    /// sides have content.
     pub fn parse_combined_file_diff(
         filename: &str,
         unstaged_diff: &str,
@@ -615,51 +632,124 @@ impl DiffViewState {
         let (unstaged_old, unstaged_new) = parse_unified_diff(unstaged_diff);
         let (staged_old, staged_new) = parse_unified_diff(staged_diff);
 
-        let mut lines = diff_lines_from_unified_or_rename_only(unstaged_diff, tab_width);
-        let mut hunk_starts = super::diff_algo::find_hunk_starts(&lines);
-        let mut hunk_staged = vec![false; hunk_starts.len()];
-        let hunks_u = parse_hunk_headers(unstaged_diff);
-        let mut hunk_line_offsets = build_hunk_line_offsets(&hunks_u, &lines, 0);
-        let mut sections = vec![FileSection {
-            old_highlighter: FileHighlighter::new(&unstaged_old, &actual_name),
-            new_highlighter: FileHighlighter::new(&unstaged_new, &actual_name),
-        }];
+        let unstaged_lines = diff_lines_from_unified_or_rename_only(unstaged_diff, tab_width);
+        let staged_lines = if staged_diff.trim().is_empty() {
+            Vec::new()
+        } else {
+            diff_lines_from_unified_or_rename_only(staged_diff, tab_width)
+        };
 
-        if !staged_diff.trim().is_empty() {
-            let mut staged_lines = diff_lines_from_unified_or_rename_only(staged_diff, tab_width);
-            if !staged_lines.is_empty() {
-                if !lines.is_empty() {
-                    lines.push(DiffLine {
-                        old_line: None,
-                        new_line: None,
-                        change_type: ChangeType::Equal,
-                        old_segments: None,
-                        new_segments: None,
-                        file_header: Some("Staged changes".to_string()),
-                        section_index: 1,
-                    });
-                }
-                let section_start = lines.len();
+        // Single-side fast path: keep the previous headerless buffer.
+        if unstaged_lines.is_empty() || staged_lines.is_empty() {
+            let mut lines = unstaged_lines;
+            let mut hunk_starts = super::diff_algo::find_hunk_starts(&lines);
+            let mut hunk_staged = vec![false; hunk_starts.len()];
+            let hunks_u = parse_hunk_headers(unstaged_diff);
+            let mut hunk_line_offsets = build_hunk_line_offsets(&hunks_u, &lines, 0);
+            let mut sections = vec![FileSection {
+                old_highlighter: FileHighlighter::new(&unstaged_old, &actual_name),
+                new_highlighter: FileHighlighter::new(&unstaged_new, &actual_name),
+            }];
+            if lines.is_empty() {
+                let mut staged_lines = staged_lines;
                 for line in &mut staged_lines {
                     line.section_index = 1;
                 }
                 let staged_starts = super::diff_algo::find_hunk_starts(&staged_lines);
                 for s in staged_starts {
-                    hunk_starts.push(section_start + s);
+                    hunk_starts.push(s);
                     hunk_staged.push(true);
                 }
-                lines.append(&mut staged_lines);
+                lines = staged_lines;
                 let hunks_s = parse_hunk_headers(staged_diff);
-                let staged_offsets = build_hunk_line_offsets(&hunks_s, &lines[section_start..], 0);
-                for (idx, old_off, new_off) in staged_offsets {
-                    hunk_line_offsets.push((section_start + idx, old_off, new_off));
-                }
+                hunk_line_offsets = build_hunk_line_offsets(&hunks_s, &lines, 0);
                 sections.push(FileSection {
                     old_highlighter: FileHighlighter::new(&staged_old, &actual_name),
                     new_highlighter: FileHighlighter::new(&staged_new, &actual_name),
                 });
+                sections.remove(0);
+            }
+            // Left leans HEAD-ish (staged old), right leans worktree
+            // (unstaged new), falling back to whichever side exists.
+            let old_content = if staged_old.is_empty() {
+                unstaged_old
+            } else {
+                staged_old
+            };
+            let new_content = if unstaged_new.is_empty() {
+                staged_new
+            } else {
+                unstaged_new
+            };
+            return ParsedDiff {
+                filename: actual_name,
+                old_content,
+                new_content,
+                lines,
+                hunk_starts,
+                hunk_staged,
+                hunk_line_offsets,
+                sections,
+                file_exists_on_disk,
+            };
+        }
+
+        fn header_line(name: &str, staged: bool, section_index: usize) -> DiffLine {
+            DiffLine {
+                old_line: None,
+                new_line: None,
+                change_type: ChangeType::Equal,
+                old_segments: None,
+                new_segments: None,
+                file_header: Some(staged_file_header(name, staged)),
+                section_index,
             }
         }
+
+        let mut lines = Vec::with_capacity(unstaged_lines.len() + staged_lines.len() + 2);
+        lines.push(header_line(&actual_name, false, 0));
+        let unstaged_start = lines.len();
+        lines.extend(unstaged_lines);
+        lines.push(header_line(&actual_name, true, 1));
+        let staged_start = lines.len();
+        let mut staged_lines = staged_lines;
+        for line in &mut staged_lines {
+            line.section_index = 1;
+        }
+        lines.extend(staged_lines);
+
+        let hunks_u = parse_hunk_headers(unstaged_diff);
+        let hunks_s = parse_hunk_headers(staged_diff);
+        let mut hunk_starts = Vec::new();
+        let mut hunk_staged = Vec::new();
+        let mut hunk_line_offsets = Vec::new();
+        for (idx, old_off, new_off) in
+            build_hunk_line_offsets(&hunks_u, &lines[unstaged_start..staged_start - 1], 0)
+        {
+            hunk_line_offsets.push((unstaged_start + idx, old_off, new_off));
+        }
+        for s in super::diff_algo::find_hunk_starts(&lines[unstaged_start..staged_start - 1]) {
+            hunk_starts.push(unstaged_start + s);
+            hunk_staged.push(false);
+        }
+        for (idx, old_off, new_off) in build_hunk_line_offsets(&hunks_s, &lines[staged_start..], 0)
+        {
+            hunk_line_offsets.push((staged_start + idx, old_off, new_off));
+        }
+        for s in super::diff_algo::find_hunk_starts(&lines[staged_start..]) {
+            hunk_starts.push(staged_start + s);
+            hunk_staged.push(true);
+        }
+        let sections = vec![
+            FileSection {
+                old_highlighter: FileHighlighter::new(&unstaged_old, &actual_name),
+                new_highlighter: FileHighlighter::new(&unstaged_new, &actual_name),
+            },
+            FileSection {
+                old_highlighter: FileHighlighter::new(&staged_old, &actual_name),
+                new_highlighter: FileHighlighter::new(&staged_new, &actual_name),
+            },
+        ];
 
         // Left leans HEAD-ish (staged old), right leans worktree
         // (unstaged new), falling back to whichever side exists.
@@ -687,46 +777,221 @@ impl DiffViewState {
         }
     }
 
-    /// Stack two already-parsed diffs (e.g. multi-file directory hovers)
-    /// with a `Staged changes` separator between them. Hunk starts and
-    /// line-offset indices of the second half are rebased past the first
-    /// half + separator, and its section indices are bumped past the
-    /// first half's sections. The separator is omitted when either half
-    /// is empty. Callers set each half's `hunk_staged` before combining.
-    pub fn combine_parsed_with_separator(
-        mut first: ParsedDiff,
-        mut second: ParsedDiff,
-    ) -> ParsedDiff {
+    /// Group two already-parsed diffs (e.g. multi-file directory hovers) by
+    /// file: each file's unstaged hunks appear under `name (Unstaged)`
+    /// immediately followed by its staged hunks under `name (Staged)`, so a
+    /// staged file never reads as a second copy of the buffer. Files only
+    /// on one side keep a single suffixed header. Returns either half
+    /// unchanged (plain headers, no suffix) when the other half is empty.
+    /// Callers set each half's `hunk_staged` before combining.
+    pub fn combine_parsed_with_separator(first: ParsedDiff, second: ParsedDiff) -> ParsedDiff {
         if second.lines.is_empty() {
             return first;
         }
         if first.lines.is_empty() {
             return second;
         }
-        let section_base = first.sections.len();
-        let base = first.lines.len() + 1;
-        first.lines.push(DiffLine {
-            old_line: None,
-            new_line: None,
-            change_type: ChangeType::Equal,
-            old_segments: None,
-            new_segments: None,
-            file_header: Some("Staged changes".to_string()),
-            section_index: section_base,
-        });
-        for line in &mut second.lines {
-            line.section_index += section_base;
+
+        struct Chunk {
+            name: String,
+            lines: Vec<DiffLine>,
+            section_idx: usize,
+            hunks: Vec<(usize, bool)>,
+            offsets: Vec<(usize, usize, usize)>,
         }
-        first.lines.append(&mut second.lines);
-        for s in second.hunk_starts {
-            first.hunk_starts.push(base + s);
+
+        // Split a parsed half into per-file chunks, keyed by plain filename.
+        // Hunk starts/offsets are rebased to content-relative indices.
+        // Repeat headers for one file stay as separate chunks so original
+        // indices always map exactly; emission merges them per filename.
+        fn split(parsed: &ParsedDiff) -> Vec<Chunk> {
+            let mut chunks: Vec<Chunk> = Vec::new();
+            // (chunk_idx, content_start, content_end) for hunk attribution.
+            let mut spans: Vec<(usize, usize, usize)> = Vec::new();
+            let mut open_name: Option<String> = None;
+            let mut open_section: usize = 0;
+            let mut open_start: usize = 0;
+            let mut open_lines: Vec<DiffLine> = Vec::new();
+
+            let flush = |chunks: &mut Vec<Chunk>,
+                         spans: &mut Vec<(usize, usize, usize)>,
+                         name: &mut Option<String>,
+                         lines: &mut Vec<DiffLine>,
+                         section: usize,
+                         start: usize| {
+                if let Some(n) = name.take() {
+                    let idx = chunks.len();
+                    spans.push((idx, start, start + lines.len()));
+                    chunks.push(Chunk {
+                        name: n,
+                        lines: std::mem::take(lines),
+                        section_idx: section,
+                        hunks: Vec::new(),
+                        offsets: Vec::new(),
+                    });
+                }
+            };
+
+            for (idx, line) in parsed.lines.iter().enumerate() {
+                if let Some(ref header) = line.file_header {
+                    flush(
+                        &mut chunks,
+                        &mut spans,
+                        &mut open_name,
+                        &mut open_lines,
+                        open_section,
+                        open_start,
+                    );
+                    open_name = Some(strip_staged_suffix(header).to_string());
+                    open_section = line.section_index;
+                    open_start = idx + 1;
+                } else {
+                    if open_name.is_none() {
+                        // Headerless (single-file) half: synthesize the name.
+                        open_name = Some(strip_staged_suffix(&parsed.filename).to_string());
+                        open_section = line.section_index;
+                        open_start = idx;
+                    }
+                    open_lines.push(line.clone());
+                }
+            }
+            flush(
+                &mut chunks,
+                &mut spans,
+                &mut open_name,
+                &mut open_lines,
+                open_section,
+                open_start,
+            );
+
+            // Attribute hunks/offsets to the chunk whose original span holds them.
+            for (hi, &s) in parsed.hunk_starts.iter().enumerate() {
+                let staged = parsed.hunk_staged.get(hi).copied().unwrap_or(false);
+                if let Some((ci, start, _)) =
+                    spans.iter().find(|(_, start, end)| s >= *start && s < *end)
+                {
+                    chunks[*ci].hunks.push((s - start, staged));
+                }
+            }
+            for (idx, old_off, new_off) in parsed.hunk_line_offsets.iter().copied() {
+                if let Some((ci, start, _)) = spans
+                    .iter()
+                    .find(|(_, start, end)| idx >= *start && idx < *end)
+                {
+                    chunks[*ci].offsets.push((idx - start, old_off, new_off));
+                }
+            }
+            chunks
         }
-        first.hunk_staged.append(&mut second.hunk_staged);
-        for (idx, old_off, new_off) in second.hunk_line_offsets {
-            first.hunk_line_offsets.push((base + idx, old_off, new_off));
+
+        let first_chunks = split(&first);
+        let second_chunks = split(&second);
+        if first_chunks.is_empty() && second_chunks.is_empty() {
+            return first;
         }
-        first.sections.append(&mut second.sections);
-        first
+
+        // Emission order: unstaged file order, then staged-only files.
+        let mut order: Vec<String> = Vec::new();
+        for c in &first_chunks {
+            if !order.contains(&c.name) {
+                order.push(c.name.clone());
+            }
+        }
+        for c in &second_chunks {
+            if !order.contains(&c.name) {
+                order.push(c.name.clone());
+            }
+        }
+
+        let mut first_sections: Vec<Option<FileSection>> =
+            first.sections.into_iter().map(Some).collect();
+        let mut second_sections: Vec<Option<FileSection>> =
+            second.sections.into_iter().map(Some).collect();
+        let take_section =
+            |sections: &mut Vec<Option<FileSection>>, idx: usize, fallback_name: &str| {
+                sections
+                    .get_mut(idx)
+                    .and_then(|s| s.take())
+                    .unwrap_or_else(|| FileSection {
+                        old_highlighter: FileHighlighter::new("", fallback_name),
+                        new_highlighter: FileHighlighter::new("", fallback_name),
+                    })
+            };
+
+        fn header_line(name: &str, staged: bool, section_index: usize) -> DiffLine {
+            DiffLine {
+                old_line: None,
+                new_line: None,
+                change_type: ChangeType::Equal,
+                old_segments: None,
+                new_segments: None,
+                file_header: Some(staged_file_header(name, staged)),
+                section_index,
+            }
+        }
+
+        let first_name = first.filename.clone();
+        let first_old = first.old_content.clone();
+        let first_new = first.new_content.clone();
+        let first_exists = first.file_exists_on_disk;
+        let mut lines: Vec<DiffLine> = Vec::new();
+        let mut sections: Vec<FileSection> = Vec::new();
+        let mut hunk_starts: Vec<usize> = Vec::new();
+        let mut hunk_staged: Vec<bool> = Vec::new();
+        let mut hunk_line_offsets: Vec<(usize, usize, usize)> = Vec::new();
+
+        // Emit one suffixed header + content block per chunk so repeat
+        // headers for a file each keep their own section/highlighter.
+        let mut emit =
+            |chunk: &Chunk, staged: bool, take: &mut dyn FnMut(usize, &str) -> FileSection| {
+                let section = take(chunk.section_idx, &chunk.name);
+                let section_index = sections.len();
+                lines.push(header_line(&chunk.name, staged, section_index));
+                let content_start = lines.len();
+                for mut line in chunk.lines.clone() {
+                    line.section_index = section_index;
+                    lines.push(line);
+                }
+                for (rel, s) in &chunk.hunks {
+                    hunk_starts.push(content_start + rel);
+                    hunk_staged.push(*s);
+                }
+                for (rel, old_off, new_off) in &chunk.offsets {
+                    hunk_line_offsets.push((content_start + rel, *old_off, *new_off));
+                }
+                sections.push(section);
+            };
+
+        for name in &order {
+            for chunk in first_chunks.iter().filter(|c| &c.name == name) {
+                let mut take =
+                    |idx: usize, fallback: &str| take_section(&mut first_sections, idx, fallback);
+                emit(chunk, false, &mut take);
+            }
+            for chunk in second_chunks.iter().filter(|c| &c.name == name) {
+                let mut take =
+                    |idx: usize, fallback: &str| take_section(&mut second_sections, idx, fallback);
+                emit(chunk, true, &mut take);
+            }
+        }
+
+        // Keep hunk indices ascending in emission order.
+        let mut hunk_order: Vec<usize> = (0..hunk_starts.len()).collect();
+        hunk_order.sort_by_key(|&i| hunk_starts[i]);
+        let hunk_starts = hunk_order.iter().map(|&i| hunk_starts[i]).collect();
+        let hunk_staged = hunk_order.iter().map(|&i| hunk_staged[i]).collect();
+
+        ParsedDiff {
+            filename: first_name,
+            old_content: first_old,
+            new_content: first_new,
+            lines,
+            hunk_starts,
+            hunk_staged,
+            hunk_line_offsets,
+            sections,
+            file_exists_on_disk: first_exists,
+        }
     }
 
     /// Parse raw diff output into a ParsedDiff on any thread (no &self needed).
@@ -2411,8 +2676,8 @@ fn unified_line_number_text(num: Option<usize>, chunk_idx: usize) -> String {
     }
 }
 
-/// Glyph + foreground for a hunk marker. Sections are split by a
-/// `Staged changes` separator, so every marker uses the same `󰧛` glyph:
+/// Glyph + foreground for a hunk marker. Sections carry `(Unstaged)` /
+/// `(Staged)` headers, so every marker uses the same `󰧛` glyph:
 /// blue when focused, dim otherwise. No hover color — hover only shows
 /// the tooltip, selection alone drives the highlight.
 fn hunk_marker_glyph_and_fg(
@@ -3435,13 +3700,13 @@ mod tests {
         let parsed = DiffViewState::parse_combined_file_diff("f.txt", unstaged, staged, 4, true);
         assert_eq!(parsed.hunk_starts.len(), 2);
         assert_eq!(parsed.hunk_staged, vec![false, true]);
-        // A `Staged changes` separator sits between the two sections.
-        assert!(
-            parsed
-                .lines
-                .iter()
-                .any(|l| l.file_header.as_deref() == Some("Staged changes"))
-        );
+        // Per-side headers label each section; no global separator.
+        let headers: Vec<&str> = parsed
+            .lines
+            .iter()
+            .filter_map(|l| l.file_header.as_deref())
+            .collect();
+        assert_eq!(headers, vec!["f.txt (Unstaged)", "f.txt (Staged)"]);
         // Each section keeps its own side's file numbers, which is what
         // stage/unstage sub-patch slicing consumes directly.
         let mut state = DiffViewState::new();
@@ -3492,14 +3757,46 @@ mod tests {
         let combined = DiffViewState::combine_parsed_with_separator(a, b);
         assert_eq!(combined.hunk_starts.len(), 2);
         assert_eq!(combined.hunk_staged, vec![false, true]);
-        assert!(
-            combined
-                .lines
-                .iter()
-                .any(|l| l.file_header.as_deref() == Some("Staged changes"))
-        );
-        // The staged hunk moved past the first half + separator.
+        // Distinct files keep their own suffixed headers, unstaged order first.
+        let headers: Vec<&str> = combined
+            .lines
+            .iter()
+            .filter_map(|l| l.file_header.as_deref())
+            .collect();
+        assert_eq!(headers, vec!["a.txt (Unstaged)", "c.txt (Staged)"]);
+        // The staged hunk moved past the first half + header.
         assert!(combined.hunk_starts[1] > combined.hunk_starts[0]);
+    }
+
+    #[test]
+    fn combine_parsed_groups_same_file_staged_below_unstaged() {
+        let a = DiffViewState::parse_diff_output(
+            "dir",
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n a\n-b\n+B\n",
+            4,
+            true,
+        );
+        let b = DiffViewState::parse_diff_output(
+            "dir",
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -5,2 +5,2 @@\n x\n-y\n+Y\n",
+            4,
+            true,
+        );
+        let mut b = b;
+        b.hunk_staged = vec![true; b.hunk_starts.len()];
+        let combined = DiffViewState::combine_parsed_with_separator(a, b);
+        assert_eq!(combined.hunk_staged, vec![false, true]);
+        let headers: Vec<&str> = combined
+            .lines
+            .iter()
+            .filter_map(|l| l.file_header.as_deref())
+            .collect();
+        assert_eq!(headers, vec!["a.txt (Unstaged)", "a.txt (Staged)"]);
+        // Plain filenames still resolve for editor navigation.
+        let mut state = DiffViewState::new();
+        state.apply_parsed(combined);
+        assert_eq!(state.file_at_line(1), "a.txt");
+        assert_eq!(state.file_at_line(state.hunk_starts[1]), "a.txt");
     }
 
     #[test]
