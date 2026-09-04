@@ -2959,49 +2959,84 @@ impl Gui {
                     self.diff_loading_since = Some(Instant::now());
                     self.queue_diff_job(generation, diff_key, move || {
                         let path_refs: Vec<&str> = diff_paths.iter().map(String::as_str).collect();
-                        let diff_result = if has_unstaged {
-                            git.diff_file_paths(&path_refs)
-                        } else if has_staged {
-                            git.diff_file_staged_paths(&path_refs)
-                        } else {
-                            Ok(String::new())
-                        };
-
-                        let exists = git.repo_path().join(&current_path).exists();
-                        match diff_result {
-                            Ok(diff) if diff.is_empty() && !tracked => {
-                                if git.is_binary_path(&current_path) {
-                                    DiffPayload::Parsed(DiffViewState::parse_diff_output(
-                                        &current_path,
-                                        &synthesize_binary_file_diff(&current_path),
-                                        4,
-                                        exists,
-                                    ))
-                                } else {
-                                    match git.file_content(&current_path) {
-                                        Ok(content) if !content.is_empty() => {
-                                            DiffPayload::Parsed(DiffViewState::parse_content(
-                                                &current_path,
-                                                "",
-                                                &content,
-                                                4,
-                                                exists,
-                                            ))
-                                        }
-                                        _ => DiffPayload::Empty,
+                        // Both sides present: one buffer with unstaged
+                        // hunks under `name (Unstaged)`, then staged hunks
+                        // under `name (Staged)`. Falls back to the
+                        // single-side view when a side is unavailable.
+                        if has_unstaged && has_staged {
+                            let exists = git.repo_path().join(&current_path).exists();
+                            match (
+                                git.diff_file_paths(&path_refs),
+                                git.diff_file_staged_paths(&path_refs),
+                            ) {
+                                (Ok(unstaged), Ok(staged)) => {
+                                    let parsed = DiffViewState::parse_combined_file_diff(
+                                        &name, &unstaged, &staged, 4, exists,
+                                    );
+                                    if parsed.lines.is_empty() {
+                                        DiffPayload::Empty
+                                    } else {
+                                        DiffPayload::Parsed(parsed)
                                     }
                                 }
+                                _ => DiffPayload::Empty,
                             }
-                            Ok(diff) if diff.is_empty() => DiffPayload::Empty,
-                            Ok(diff) => parse_file_diff_payload(
-                                &git,
-                                &name,
-                                &current_path,
-                                &diff,
-                                exists,
-                                has_staged && !has_unstaged,
-                            ),
-                            Err(_) => DiffPayload::Empty,
+                        } else {
+                            let diff_result = if has_unstaged {
+                                git.diff_file_paths(&path_refs)
+                            } else if has_staged {
+                                git.diff_file_staged_paths(&path_refs)
+                            } else {
+                                Ok(String::new())
+                            };
+
+                            let exists = git.repo_path().join(&current_path).exists();
+                            match diff_result {
+                                Ok(diff) if diff.is_empty() && !tracked => {
+                                    if git.is_binary_path(&current_path) {
+                                        DiffPayload::Parsed(DiffViewState::parse_diff_output(
+                                            &current_path,
+                                            &synthesize_binary_file_diff(&current_path),
+                                            4,
+                                            exists,
+                                        ))
+                                    } else {
+                                        match git.file_content(&current_path) {
+                                            Ok(content) if !content.is_empty() => {
+                                                DiffPayload::Parsed(DiffViewState::parse_content(
+                                                    &current_path,
+                                                    "",
+                                                    &content,
+                                                    4,
+                                                    exists,
+                                                ))
+                                            }
+                                            _ => DiffPayload::Empty,
+                                        }
+                                    }
+                                }
+                                Ok(diff) if diff.is_empty() => DiffPayload::Empty,
+                                Ok(diff) => {
+                                    let mut payload = parse_file_diff_payload(
+                                        &git,
+                                        &name,
+                                        &current_path,
+                                        &diff,
+                                        exists,
+                                        has_staged && !has_unstaged,
+                                    );
+                                    // Staged-only view: every visible hunk is
+                                    // staged, so tint + menu must reflect that.
+                                    if has_staged && !has_unstaged {
+                                        if let DiffPayload::Parsed(ref mut parsed) = payload {
+                                            parsed.hunk_staged =
+                                                vec![true; parsed.hunk_starts.len()];
+                                        }
+                                    }
+                                    payload
+                                }
+                                Err(_) => DiffPayload::Empty,
+                            }
                         }
                     });
                 } else if self.show_file_tree {
@@ -3034,8 +3069,16 @@ impl Gui {
                                     Some(p) => vec![p],
                                     None => Vec::new(),
                                 };
-                                let mut combined_diff =
-                                    git.diff_paths_vs_head(&paths).unwrap_or_default();
+                                // Directory hover: per-file grouping with
+                                // `name (Unstaged)` immediately followed by
+                                // `name (Staged)` — same grouping as the
+                                // single-file view. Untracked children
+                                // only exist unstaged. Hunk actions stay
+                                // Cancel-only here (no single file to act on).
+                                let mut unstaged_combined =
+                                    git.diff_file_paths(&paths).unwrap_or_default();
+                                let staged_combined =
+                                    git.diff_staged_paths(&paths).unwrap_or_default();
                                 for path in &untracked {
                                     if gen_counter.load(Ordering::Relaxed) != generation {
                                         return DiffPayload::Empty;
@@ -3049,21 +3092,43 @@ impl Gui {
                                         }
                                         synthesize_new_file_diff(path, &content)
                                     };
-                                    if !combined_diff.is_empty() {
-                                        combined_diff.push('\n');
+                                    if !unstaged_combined.is_empty() {
+                                        unstaged_combined.push('\n');
                                     }
-                                    combined_diff.push_str(&synth);
+                                    unstaged_combined.push_str(&synth);
                                 }
 
-                                if combined_diff.is_empty() {
+                                if unstaged_combined.trim().is_empty()
+                                    && staged_combined.trim().is_empty()
+                                {
                                     DiffPayload::Empty
                                 } else {
-                                    DiffPayload::Parsed(DiffViewState::parse_diff_output(
+                                    use crate::pager::side_by_side::DiffViewState as DVS;
+                                    let mut unstaged_parsed = DVS::parse_diff_output(
                                         &dir_name,
-                                        &combined_diff,
+                                        &unstaged_combined,
                                         4,
                                         true,
-                                    ))
+                                    );
+                                    unstaged_parsed.hunk_staged =
+                                        vec![false; unstaged_parsed.hunk_starts.len()];
+                                    let mut staged_parsed = DVS::parse_diff_output(
+                                        &dir_name,
+                                        &staged_combined,
+                                        4,
+                                        true,
+                                    );
+                                    staged_parsed.hunk_staged =
+                                        vec![true; staged_parsed.hunk_starts.len()];
+                                    let parsed = DVS::combine_parsed_with_separator(
+                                        unstaged_parsed,
+                                        staged_parsed,
+                                    );
+                                    if parsed.lines.is_empty() {
+                                        DiffPayload::Empty
+                                    } else {
+                                        DiffPayload::Parsed(parsed)
+                                    }
                                 }
                             });
                         } else {
@@ -7674,13 +7739,7 @@ impl Gui {
             return false;
         };
         self.diff_view.selected_revert_hunk = Some(hunk_idx);
-        if let Err(err) = self.revert_selected_file_hunk(hunk_idx) {
-            self.popup = PopupState::Message {
-                title: "Revert block failed".to_string(),
-                message: format!("{}", err),
-                kind: MessageKind::Error,
-            };
-        }
+        self.show_hunk_context_menu(hunk_idx);
         true
     }
 
@@ -7688,21 +7747,42 @@ impl Gui {
     /// or hovered revert hunk). Cancel is focused first so an accidental
     /// Enter doesn't revert anything.
     fn show_hunk_context_menu(&mut self, hunk_idx: usize) {
-        let items = vec![
-            popup::MenuItem {
-                label: "Cancel".to_string(),
+        // Directory hovers have no single file to act on — Cancel only.
+        let has_file = self.selected_file_index().is_some();
+        // The Files pane shows unstaged + staged hunks in one buffer. Offer
+        // the action matching the hunk the menu was opened on so the index
+        // can't be applied to the wrong side of the index.
+        let hunk_is_staged = has_file && self.diff_view.is_staged_hunk(hunk_idx);
+        let mut items = vec![popup::MenuItem {
+            label: "Cancel".to_string(),
+            description: String::new(),
+            key: None,
+            // No-op: execute_menu_action already drops the menu popup
+            // before invoking the action, so returning Ok leaves the
+            // menu closed. Esc also closes the menu via the universal
+            // menu Esc handler.
+            action: Some(Box::new(|_gui| Ok(()))),
+        }];
+        if has_file && !hunk_is_staged {
+            items.push(popup::MenuItem {
+                label: "Stage hunk".to_string(),
                 description: String::new(),
-                key: None,
-                // No-op: execute_menu_action already drops the menu popup
-                // before invoking the action, so returning Ok leaves the
-                // menu closed. Esc also closes the menu via the universal
-                // menu Esc handler.
-                action: Some(Box::new(|_gui| Ok(()))),
-            },
-            popup::MenuItem {
+                key: Some("s".to_string()),
+                action: Some(Box::new(move |gui| {
+                    if let Err(err) = gui.stage_selected_file_hunk(hunk_idx) {
+                        gui.popup = PopupState::Message {
+                            title: "Stage hunk failed".to_string(),
+                            message: format!("{}", err),
+                            kind: MessageKind::Error,
+                        };
+                    }
+                    Ok(())
+                })),
+            });
+            items.push(popup::MenuItem {
                 label: "Revert hunk".to_string(),
                 description: String::new(),
-                key: None,
+                key: Some("r".to_string()),
                 action: Some(Box::new(move |gui| {
                     if let Err(err) = gui.revert_selected_file_hunk(hunk_idx) {
                         gui.popup = PopupState::Message {
@@ -7713,8 +7793,25 @@ impl Gui {
                     }
                     Ok(())
                 })),
-            },
-        ];
+            });
+        }
+        if hunk_is_staged {
+            items.push(popup::MenuItem {
+                label: "Unstage hunk".to_string(),
+                description: String::new(),
+                key: Some("u".to_string()),
+                action: Some(Box::new(move |gui| {
+                    if let Err(err) = gui.unstage_selected_file_hunk(hunk_idx) {
+                        gui.popup = PopupState::Message {
+                            title: "Unstage hunk failed".to_string(),
+                            message: format!("{}", err),
+                            kind: MessageKind::Error,
+                        };
+                    }
+                    Ok(())
+                })),
+            });
+        }
 
         self.popup = PopupState::Menu {
             title: "Hunk".to_string(),
@@ -7722,6 +7819,79 @@ impl Gui {
             selected: 0,
             loading_index: None,
         };
+    }
+
+    fn stage_selected_file_hunk(&mut self, hunk_idx: usize) -> Result<()> {
+        let Some(file_idx) = self.selected_file_index() else {
+            return Ok(());
+        };
+        let model = self.model.lock().unwrap();
+        let Some(file) = model.files.get(file_idx).cloned() else {
+            return Ok(());
+        };
+        drop(model);
+
+        // Each stacked section keeps its own side's line numbers, so the
+        // viewed hunk's ranges slice the unstaged diff directly.
+        let Some((want_old, want_new)) = self.diff_view.visual_block_line_ranges(hunk_idx) else {
+            return Ok(());
+        };
+        if want_old.is_none() && want_new.is_none() {
+            return Ok(());
+        }
+
+        let path_refs: Vec<String> = file.diff_paths().into_iter().map(str::to_string).collect();
+        let refs: Vec<&str> = path_refs.iter().map(String::as_str).collect();
+        let diff = self.git.diff_file_paths(&refs)?;
+        if diff.is_empty() {
+            // Untracked / synthesized diffs have no unified diff to slice —
+            // fall back to staging the whole file.
+            if !file.tracked {
+                self.git.stage_file(file.current_path())?;
+                self.needs_files_refresh = true;
+                self.needs_diff_refresh = true;
+            }
+            return Ok(());
+        }
+
+        self.git
+            .stage_visual_block(file.current_path(), &diff, want_old, want_new)?;
+        self.needs_files_refresh = true;
+        self.needs_diff_refresh = true;
+        Ok(())
+    }
+
+    fn unstage_selected_file_hunk(&mut self, hunk_idx: usize) -> Result<()> {
+        let Some(file_idx) = self.selected_file_index() else {
+            return Ok(());
+        };
+        let model = self.model.lock().unwrap();
+        let Some(file) = model.files.get(file_idx).cloned() else {
+            return Ok(());
+        };
+        drop(model);
+
+        // The staged section keeps staged line numbers, so the viewed
+        // hunk's ranges slice the staged diff directly.
+        let Some((want_old, want_new)) = self.diff_view.visual_block_line_ranges(hunk_idx) else {
+            return Ok(());
+        };
+        if want_old.is_none() && want_new.is_none() {
+            return Ok(());
+        }
+
+        let path_refs: Vec<String> = file.diff_paths().into_iter().map(str::to_string).collect();
+        let refs: Vec<&str> = path_refs.iter().map(String::as_str).collect();
+        let diff = self.git.diff_file_staged_paths(&refs)?;
+        if diff.is_empty() {
+            return Ok(());
+        }
+
+        self.git
+            .unstage_visual_block(file.current_path(), &diff, want_old, want_new)?;
+        self.needs_files_refresh = true;
+        self.needs_diff_refresh = true;
+        Ok(())
     }
 
     fn revert_selected_file_hunk(&mut self, hunk_idx: usize) -> Result<()> {
@@ -7746,6 +7916,8 @@ impl Gui {
         let file_name = file.name.clone();
         drop(model);
 
+        // Revert is only offered on unstaged hunks, whose ranges slice the
+        // unstaged diff directly.
         let Some((want_old, want_new)) = self.diff_view.visual_block_line_ranges(hunk_idx) else {
             return Ok(());
         };
