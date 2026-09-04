@@ -203,5 +203,3 @@ Summary
 MIT
 
 Feel free to fork and give it your own spin.
-
-Hunk2 
