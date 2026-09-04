@@ -589,135 +589,144 @@ impl DiffViewState {
         }
     }
 
-    /// Parse a `git diff HEAD` buffer for a file that has both staged and
-    /// unstaged changes, classifying each hunk via `unstaged_diff`.
-    ///
-    /// This is a true single buffer: one coherent set of line numbers (no
-    /// separator, no duplicated context). Both diffs share worktree
-    /// (new-side) numbering, so a HEAD hunk that overlaps no unstaged hunk
-    /// must be fully staged; anything touching unstaged work counts as
-    /// unstaged — including regions where staged and unstaged edits overlap.
-    pub fn parse_head_with_staged(
+    /// Parse a single file's unstaged + staged diffs into one scrollable
+    /// buffer: unstaged hunks first, then a `Staged changes` separator and
+    /// the staged hunks. `hunk_staged` records which section each hunk came
+    /// from so the hunk menu can offer Stage vs Unstage per hunk. Either
+    /// side may be empty (all-staged / all-unstaged file); the separator
+    /// only appears when both sides have content.
+    pub fn parse_combined_file_diff(
         filename: &str,
-        head_diff: &str,
         unstaged_diff: &str,
+        staged_diff: &str,
         tab_width: usize,
         file_exists_on_disk: bool,
     ) -> ParsedDiff {
-        let mut parsed =
-            Self::parse_diff_output(filename, head_diff, tab_width, file_exists_on_disk);
-        parsed.hunk_staged = head_block_staged_flags(head_diff, unstaged_diff, tab_width);
-        // Defensive: block classification and the parsed view count blocks
-        // with the same walk, but never let the flags drift out of step.
-        if parsed.hunk_staged.len() != parsed.hunk_starts.len() {
-            parsed.hunk_staged = vec![false; parsed.hunk_starts.len()];
+        let actual_name = parse_multi_file_diff(unstaged_diff)
+            .first()
+            .map(|(name, _)| name.clone())
+            .or_else(|| {
+                parse_multi_file_diff(staged_diff)
+                    .first()
+                    .map(|(name, _)| name.clone())
+            })
+            .unwrap_or_else(|| filename.to_string());
+
+        let (unstaged_old, unstaged_new) = parse_unified_diff(unstaged_diff);
+        let (staged_old, staged_new) = parse_unified_diff(staged_diff);
+
+        let mut lines = diff_lines_from_unified_or_rename_only(unstaged_diff, tab_width);
+        let mut hunk_starts = super::diff_algo::find_hunk_starts(&lines);
+        let mut hunk_staged = vec![false; hunk_starts.len()];
+        let hunks_u = parse_hunk_headers(unstaged_diff);
+        let mut hunk_line_offsets = build_hunk_line_offsets(&hunks_u, &lines, 0);
+        let mut sections = vec![FileSection {
+            old_highlighter: FileHighlighter::new(&unstaged_old, &actual_name),
+            new_highlighter: FileHighlighter::new(&unstaged_new, &actual_name),
+        }];
+
+        if !staged_diff.trim().is_empty() {
+            let mut staged_lines = diff_lines_from_unified_or_rename_only(staged_diff, tab_width);
+            if !staged_lines.is_empty() {
+                if !lines.is_empty() {
+                    lines.push(DiffLine {
+                        old_line: None,
+                        new_line: None,
+                        change_type: ChangeType::Equal,
+                        old_segments: None,
+                        new_segments: None,
+                        file_header: Some("Staged changes".to_string()),
+                        section_index: 1,
+                    });
+                }
+                let section_start = lines.len();
+                for line in &mut staged_lines {
+                    line.section_index = 1;
+                }
+                let staged_starts = super::diff_algo::find_hunk_starts(&staged_lines);
+                for s in staged_starts {
+                    hunk_starts.push(section_start + s);
+                    hunk_staged.push(true);
+                }
+                lines.append(&mut staged_lines);
+                let hunks_s = parse_hunk_headers(staged_diff);
+                let staged_offsets = build_hunk_line_offsets(&hunks_s, &lines[section_start..], 0);
+                for (idx, old_off, new_off) in staged_offsets {
+                    hunk_line_offsets.push((section_start + idx, old_off, new_off));
+                }
+                sections.push(FileSection {
+                    old_highlighter: FileHighlighter::new(&staged_old, &actual_name),
+                    new_highlighter: FileHighlighter::new(&staged_new, &actual_name),
+                });
+            }
         }
-        parsed
+
+        // Left leans HEAD-ish (staged old), right leans worktree
+        // (unstaged new), falling back to whichever side exists.
+        let old_content = if staged_old.is_empty() {
+            unstaged_old
+        } else {
+            staged_old
+        };
+        let new_content = if unstaged_new.is_empty() {
+            staged_new
+        } else {
+            unstaged_new
+        };
+
+        ParsedDiff {
+            filename: actual_name,
+            old_content,
+            new_content,
+            lines,
+            hunk_starts,
+            hunk_staged,
+            hunk_line_offsets,
+            sections,
+            file_exists_on_disk,
+        }
     }
 
-    /// File-relative (old, new) line spans for every visual change block of
-    /// a raw unified diff, without tree-sitter highlighting. Used to map a
-    /// hunk the user acts on in the HEAD buffer onto the matching block(s)
-    /// of the staged/unstaged diff that patch slicing consumes.
-    pub fn block_spans_for_diff(diff_text: &str, tab_width: usize) -> Vec<BlockSpan> {
-        let lines = diff_lines_from_unified_or_rename_only(diff_text, tab_width);
-        let hunks = parse_hunk_headers(diff_text);
-        let file_header_count = lines.iter().take_while(|l| l.file_header.is_some()).count();
-        let offsets = build_hunk_line_offsets(&hunks, &lines, file_header_count);
-        Self::block_spans(&lines, &offsets)
-    }
-
-    /// File-relative spans for visual change blocks from already-parsed
-    /// lines. `old`/`new` are `None` for pure insertions/deletions; the
-    /// `*_point` gap positions still allow matching those blocks across
-    /// diffs that share a side (worktree for unstaged, HEAD for staged).
-    pub fn block_spans(
-        lines: &[DiffLine],
-        hunk_line_offsets: &[(usize, usize, usize)],
-    ) -> Vec<BlockSpan> {
-        let offsets_at = |idx: usize| {
-            let mut offsets = (0usize, 0usize);
-            for &(start_idx, old_off, new_off) in hunk_line_offsets {
-                if start_idx <= idx {
-                    offsets = (old_off, new_off);
-                } else {
-                    break;
-                }
-            }
-            offsets
-        };
-        let file_num = |idx: usize, new_side: bool| -> Option<usize> {
-            let (old_off, new_off) = offsets_at(idx);
-            let line = lines.get(idx)?;
-            if new_side {
-                line.new_line.as_ref().map(|(n, _)| *n + new_off)
-            } else {
-                line.old_line.as_ref().map(|(n, _)| *n + old_off)
-            }
-        };
-
-        let mut spans = Vec::new();
-        let mut start = 0usize;
-        while start < lines.len() {
-            if lines[start].file_header.is_some()
-                || matches!(lines[start].change_type, ChangeType::Equal)
-            {
-                start += 1;
-                continue;
-            }
-            let mut end = start;
-            while end < lines.len()
-                && lines[end].file_header.is_none()
-                && !matches!(lines[end].change_type, ChangeType::Equal)
-            {
-                end += 1;
-            }
-            let mut old_range: Option<(usize, usize)> = None;
-            let mut new_range: Option<(usize, usize)> = None;
-            for idx in start..end {
-                let line = &lines[idx];
-                if matches!(line.change_type, ChangeType::Delete | ChangeType::Modified) {
-                    if let Some(n) = file_num(idx, false) {
-                        old_range = Some(match old_range {
-                            None => (n, n),
-                            Some((lo, hi)) => (lo.min(n), hi.max(n)),
-                        });
-                    }
-                }
-                if matches!(line.change_type, ChangeType::Insert | ChangeType::Modified) {
-                    if let Some(n) = file_num(idx, true) {
-                        new_range = Some(match new_range {
-                            None => (n, n),
-                            Some((lo, hi)) => (lo.min(n), hi.max(n)),
-                        });
-                    }
-                }
-            }
-            // Gap position for pure insertions/deletions: just after the
-            // previous surviving line (0 when the block starts the file).
-            // Both parses of the same edit compute the same point because
-            // they share that side's content.
-            let gap_point = |new_side: bool| -> usize {
-                for idx in (0..start).rev() {
-                    if let Some(n) = file_num(idx, new_side) {
-                        return n + 1;
-                    }
-                }
-                0
-            };
-            spans.push(BlockSpan {
-                old: old_range,
-                new: new_range,
-                old_point: old_range
-                    .map(|(lo, _)| lo)
-                    .unwrap_or_else(|| gap_point(false)),
-                new_point: new_range
-                    .map(|(lo, _)| lo)
-                    .unwrap_or_else(|| gap_point(true)),
-            });
-            start = end;
+    /// Stack two already-parsed diffs (e.g. multi-file directory hovers)
+    /// with a `Staged changes` separator between them. Hunk starts and
+    /// line-offset indices of the second half are rebased past the first
+    /// half + separator, and its section indices are bumped past the
+    /// first half's sections. The separator is omitted when either half
+    /// is empty. Callers set each half's `hunk_staged` before combining.
+    pub fn combine_parsed_with_separator(
+        mut first: ParsedDiff,
+        mut second: ParsedDiff,
+    ) -> ParsedDiff {
+        if second.lines.is_empty() {
+            return first;
         }
-        spans
+        if first.lines.is_empty() {
+            return second;
+        }
+        let section_base = first.sections.len();
+        let base = first.lines.len() + 1;
+        first.lines.push(DiffLine {
+            old_line: None,
+            new_line: None,
+            change_type: ChangeType::Equal,
+            old_segments: None,
+            new_segments: None,
+            file_header: Some("Staged changes".to_string()),
+            section_index: section_base,
+        });
+        for line in &mut second.lines {
+            line.section_index += section_base;
+        }
+        first.lines.append(&mut second.lines);
+        for s in second.hunk_starts {
+            first.hunk_starts.push(base + s);
+        }
+        first.hunk_staged.append(&mut second.hunk_staged);
+        for (idx, old_off, new_off) in second.hunk_line_offsets {
+            first.hunk_line_offsets.push((base + idx, old_off, new_off));
+        }
+        first.sections.append(&mut second.sections);
+        first
     }
 
     /// Parse raw diff output into a ParsedDiff on any thread (no &self needed).
@@ -2402,9 +2411,10 @@ fn unified_line_number_text(num: Option<usize>, chunk_idx: usize) -> String {
     }
 }
 
-/// Glyph + foreground for a hunk marker: blue `󰧛` for the focused
-/// (unstaged) hunk, green `✓` for staged hunks. No hover color — hover only
-/// shows the tooltip, selection alone drives the highlight.
+/// Glyph + foreground for a hunk marker. Sections are split by a
+/// `Staged changes` separator, so every marker uses the same `󰧛` glyph:
+/// blue when focused, dim otherwise. No hover color — hover only shows
+/// the tooltip, selection alone drives the highlight.
 fn hunk_marker_glyph_and_fg(
     state: &DiffViewState,
     hunk_idx: usize,
@@ -2413,17 +2423,10 @@ fn hunk_marker_glyph_and_fg(
     let is_selected = Some(hunk_idx) == state.selected_revert_hunk;
     let fg = if is_selected {
         theme.accent
-    } else if state.is_staged_hunk(hunk_idx) {
-        theme.file_staged.fg.unwrap_or(Color::Green)
     } else {
         theme.separator
     };
-    let glyph = if state.is_staged_hunk(hunk_idx) {
-        "✓"
-    } else {
-        "󰧛"
-    };
-    (glyph, fg)
+    ("󰧛", fg)
 }
 
 fn render_revert_tooltip(
@@ -3312,37 +3315,6 @@ fn rename_only_lines(old_path: &str, new_path: &str, tab_width: usize) -> Vec<Di
     }]
 }
 
-/// File-relative line spans for one visual change block. `old`/`new` are
-/// the inclusive ranges on each side (`None` for pure insertions/deletions);
-/// `old_point`/`new_point` are the gap positions of those pure blocks so
-/// they can still be matched across diffs that share the side.
-#[derive(Debug, Clone, Copy)]
-pub struct BlockSpan {
-    pub old: Option<(usize, usize)>,
-    pub new: Option<(usize, usize)>,
-    pub old_point: usize,
-    pub new_point: usize,
-}
-
-impl BlockSpan {
-    /// Effective inclusive span on one side, using the gap point for pure
-    /// insertions (`old`) and pure deletions (`new`).
-    pub fn eff(&self, new_side: bool) -> (usize, usize) {
-        if new_side {
-            self.new.unwrap_or((self.new_point, self.new_point))
-        } else {
-            self.old.unwrap_or((self.old_point, self.old_point))
-        }
-    }
-
-    /// True when both spans touch on the given side.
-    pub fn overlaps(&self, other: &BlockSpan, new_side: bool) -> bool {
-        let (lo1, hi1) = self.eff(new_side);
-        let (lo2, hi2) = other.eff(new_side);
-        lo1 <= hi2 && lo2 <= hi1
-    }
-}
-
 /// Parse hunk headers from a unified diff, returning
 /// `(old_start, new_start, old_count, new_count)` for each hunk.
 fn parse_hunk_headers(diff: &str) -> Vec<(usize, usize, usize, usize)> {
@@ -3376,46 +3348,6 @@ fn parse_hunk_headers(diff: &str) -> Vec<(usize, usize, usize, usize)> {
         hunks.push((old_start, new_start, old_count, new_count));
     }
     hunks
-}
-
-/// One `staged` flag per visual change block of a `git diff HEAD` buffer,
-/// in block order. Both diffs share worktree (new-side) numbering, so a
-/// HEAD block that overlaps no unstaged block must be fully staged;
-/// anything touching unstaged work counts as unstaged — including regions
-/// where staged and unstaged edits overlap. Handles multi-file buffers by
-/// matching sections on filename; files missing from the unstaged diff are
-/// fully staged. Falls back to single-diff parsing for header-less input.
-pub fn head_block_staged_flags(
-    head_diff: &str,
-    unstaged_diff: &str,
-    tab_width: usize,
-) -> Vec<bool> {
-    let head_sections = parse_multi_file_diff(head_diff);
-    if head_sections.is_empty() {
-        return head_blocks_staged_flags(head_diff, unstaged_diff, tab_width);
-    }
-    let unstaged_sections = parse_multi_file_diff(unstaged_diff);
-    let mut flags = Vec::new();
-    for (name, body) in &head_sections {
-        let peer = unstaged_sections
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, b)| *b)
-            .unwrap_or("");
-        flags.extend(head_blocks_staged_flags(body, peer, tab_width));
-    }
-    flags
-}
-
-/// One `staged` flag per visual change block of a single-file
-/// `git diff HEAD` buffer.
-fn head_blocks_staged_flags(head_diff: &str, unstaged_diff: &str, tab_width: usize) -> Vec<bool> {
-    let head_spans = DiffViewState::block_spans_for_diff(head_diff, tab_width);
-    let unstaged_spans = DiffViewState::block_spans_for_diff(unstaged_diff, tab_width);
-    head_spans
-        .iter()
-        .map(|h| !unstaged_spans.iter().any(|u| h.overlaps(u, true)))
-        .collect()
 }
 
 /// Build the hunk line offset table from parsed hunk headers and
@@ -3497,59 +3429,77 @@ mod tests {
     }
 
     #[test]
-    fn head_buffer_classifies_staged_hunks_without_separator() {
-        // Real `git diff HEAD` output: staged edit at line 2, unstaged edit
-        // at line 9, merged into a single `@@` by git. Block-level overlap
-        // still tells them apart.
-        let head = "diff --git a/f.txt b/f.txt\nindex f00c965..edee7ac 100644\n--- a/f.txt\n+++ b/f.txt\n@@ -1,10 +1,10 @@\n 1\n-2\n+TWO\n 3\n 4\n 5\n 6\n 7\n 8\n-9\n+NINE\n 10\n";
-        let unstaged = "diff --git a/f.txt b/f.txt\nindex 9935360..edee7ac 100644\n--- a/f.txt\n+++ b/f.txt\n@@ -6,5 +6,5 @@ TWO\n 6\n 7\n 8\n-9\n+NINE\n 10\n";
-        let parsed = DiffViewState::parse_head_with_staged("f.txt", head, unstaged, 4, true);
+    fn combined_file_diff_stacks_sections_with_separator() {
+        let unstaged = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n";
+        let staged = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -5,3 +5,3 @@\n x\n-y\n+Y\n z\n";
+        let parsed = DiffViewState::parse_combined_file_diff("f.txt", unstaged, staged, 4, true);
         assert_eq!(parsed.hunk_starts.len(), 2);
-        assert_eq!(parsed.hunk_staged, vec![true, false]);
-        // No separator: a single coherent buffer.
+        assert_eq!(parsed.hunk_staged, vec![false, true]);
+        // A `Staged changes` separator sits between the two sections.
         assert!(
-            parsed.lines.iter().all(|l| l.file_header.is_none()),
-            "single buffer must not contain section separators"
+            parsed
+                .lines
+                .iter()
+                .any(|l| l.file_header.as_deref() == Some("Staged changes"))
         );
-        // The staged hunk keeps its HEAD line numbers.
+        // Each section keeps its own side's file numbers, which is what
+        // stage/unstage sub-patch slicing consumes directly.
         let mut state = DiffViewState::new();
         state.apply_parsed(parsed);
         assert_eq!(
             state.visual_block_line_ranges(0),
             Some((Some((2, 2)), Some((2, 2))))
         );
-        assert!(state.is_staged_hunk(0));
-        assert!(!state.is_staged_hunk(1));
+        assert_eq!(
+            state.visual_block_line_ranges(1),
+            Some((Some((6, 6)), Some((6, 6))))
+        );
+        assert!(!state.is_staged_hunk(0));
+        assert!(state.is_staged_hunk(1));
     }
 
     #[test]
-    fn staged_deletion_classifies_as_staged() {
-        // Staged deletion of line 2; unstaged edit of line 9.
-        let head = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1,4 +1,3 @@\n 1\n-2\n 3\n 4\n@@ -7,4 +6,4 @@\n 7\n 8\n-9\n+NINE\n";
-        let unstaged = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -5,5 +5,5 @@\n 6\n 7\n 8\n-9\n+NINE\n 10\n";
-        // Note: in worktree coordinates the edit sits at line 8 (line 2 was
-        // already deleted by the staged hunk); the HEAD hunk covers it, so
-        // the second HEAD hunk must still read as unstaged.
-        let parsed = DiffViewState::parse_head_with_staged("f.txt", head, unstaged, 4, true);
-        assert_eq!(parsed.hunk_staged, vec![true, false]);
-        // The deletion-only staged block exposes a worktree gap point, and
-        // the unstaged block overlaps the second HEAD block on that side.
-        let head_spans = DiffViewState::block_spans(&parsed.lines, &parsed.hunk_line_offsets);
-        let unst_spans = DiffViewState::block_spans_for_diff(unstaged, 4);
-        assert_eq!(head_spans.len(), 2);
-        assert_eq!(head_spans[0].new, None);
-        assert!(head_spans[1].overlaps(&unst_spans[0], true));
-        assert!(!head_spans[0].overlaps(&unst_spans[0], true));
-    }
-
-    #[test]
-    fn overlapping_edits_count_as_unstaged() {
-        // Same line edited in index and worktree: HEAD hunk overlaps the
-        // unstaged hunk, so it must not offer Unstage alone.
-        let head = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n a\n-b\nW\n c\n";
-        let unstaged = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n a\n-S\nW\n c\n";
-        let parsed = DiffViewState::parse_head_with_staged("f.txt", head, unstaged, 4, true);
+    fn combined_file_diff_omits_separator_for_single_side() {
+        let unstaged = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n";
+        let parsed = DiffViewState::parse_combined_file_diff("f.txt", unstaged, "", 4, true);
         assert_eq!(parsed.hunk_staged, vec![false]);
+        assert!(parsed.lines.iter().all(|l| l.file_header.is_none()));
+
+        let staged = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -5,3 +5,3 @@\n x\n-y\n+Y\n z\n";
+        let parsed = DiffViewState::parse_combined_file_diff("f.txt", "", staged, 4, true);
+        assert_eq!(parsed.hunk_staged, vec![true]);
+        assert!(parsed.lines.iter().all(|l| l.file_header.is_none()));
+    }
+
+    #[test]
+    fn combine_parsed_with_separator_rebases_second_half() {
+        let a = DiffViewState::parse_diff_output(
+            "dir",
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n a\n-b\n+B\n",
+            4,
+            true,
+        );
+        let b = DiffViewState::parse_diff_output(
+            "dir",
+            "diff --git a/c.txt b/c.txt\n--- a/c.txt\n+++ b/c.txt\n@@ -1,2 +1,2 @@\n x\n-y\n+Y\n",
+            4,
+            true,
+        );
+        assert_eq!(a.hunk_starts.len(), 1);
+        assert_eq!(b.hunk_starts.len(), 1);
+        let mut b = b;
+        b.hunk_staged = vec![true; b.hunk_starts.len()];
+        let combined = DiffViewState::combine_parsed_with_separator(a, b);
+        assert_eq!(combined.hunk_starts.len(), 2);
+        assert_eq!(combined.hunk_staged, vec![false, true]);
+        assert!(
+            combined
+                .lines
+                .iter()
+                .any(|l| l.file_header.as_deref() == Some("Staged changes"))
+        );
+        // The staged hunk moved past the first half + separator.
+        assert!(combined.hunk_starts[1] > combined.hunk_starts[0]);
     }
 
     #[test]

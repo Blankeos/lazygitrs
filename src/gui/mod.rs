@@ -2959,20 +2959,19 @@ impl Gui {
                     self.diff_loading_since = Some(Instant::now());
                     self.queue_diff_job(generation, diff_key, move || {
                         let path_refs: Vec<&str> = diff_paths.iter().map(String::as_str).collect();
-                        // Both sides staged: one HEAD buffer with coherent
-                        // line numbers; hunks are tinted staged/unstaged via
-                        // overlap with the unstaged diff. Falls back to the
-                        // unstaged-only view when HEAD is unavailable
-                        // (e.g. unborn HEAD).
+                        // Both sides present: one buffer with unstaged
+                        // hunks on top, a `Staged changes` separator, then
+                        // staged hunks. Falls back to the single-side view
+                        // when a side is unavailable.
                         if has_unstaged && has_staged {
                             let exists = git.repo_path().join(&current_path).exists();
                             match (
-                                git.diff_paths_vs_head(&path_refs),
                                 git.diff_file_paths(&path_refs),
+                                git.diff_file_staged_paths(&path_refs),
                             ) {
-                                (Ok(head), Ok(unstaged)) => {
-                                    let parsed = DiffViewState::parse_head_with_staged(
-                                        &name, &head, &unstaged, 4, exists,
+                                (Ok(unstaged), Ok(staged)) => {
+                                    let parsed = DiffViewState::parse_combined_file_diff(
+                                        &name, &unstaged, &staged, 4, exists,
                                     );
                                     if parsed.lines.is_empty() {
                                         DiffPayload::Empty
@@ -3070,10 +3069,16 @@ impl Gui {
                                     Some(p) => vec![p],
                                     None => Vec::new(),
                                 };
-                                let mut combined_diff =
-                                    git.diff_paths_vs_head(&paths).unwrap_or_default();
+                                // Directory hover: unstaged multi-file diff on
+                                // top, a `Staged changes` separator, then the
+                                // staged multi-file diff — same stacking as
+                                // the single-file view. Untracked children
+                                // only exist unstaged. Hunk actions stay
+                                // Cancel-only here (no single file to act on).
                                 let mut unstaged_combined =
                                     git.diff_file_paths(&paths).unwrap_or_default();
+                                let staged_combined =
+                                    git.diff_staged_paths(&paths).unwrap_or_default();
                                 for path in &untracked {
                                     if gen_counter.load(Ordering::Relaxed) != generation {
                                         return DiffPayload::Empty;
@@ -3087,37 +3092,43 @@ impl Gui {
                                         }
                                         synthesize_new_file_diff(path, &content)
                                     };
-                                    if !combined_diff.is_empty() {
-                                        combined_diff.push('\n');
-                                    }
-                                    combined_diff.push_str(&synth);
-                                    // Mirror the synthesized section so the
-                                    // untracked file classifies as unstaged.
                                     if !unstaged_combined.is_empty() {
                                         unstaged_combined.push('\n');
                                     }
                                     unstaged_combined.push_str(&synth);
                                 }
 
-                                if combined_diff.is_empty() {
+                                if unstaged_combined.trim().is_empty()
+                                    && staged_combined.trim().is_empty()
+                                {
                                     DiffPayload::Empty
                                 } else {
-                                    use crate::pager::side_by_side::head_block_staged_flags;
-                                    let mut parsed = DiffViewState::parse_diff_output(
+                                    use crate::pager::side_by_side::DiffViewState as DVS;
+                                    let mut unstaged_parsed = DVS::parse_diff_output(
                                         &dir_name,
-                                        &combined_diff,
+                                        &unstaged_combined,
                                         4,
                                         true,
                                     );
-                                    parsed.hunk_staged = head_block_staged_flags(
-                                        &combined_diff,
-                                        &unstaged_combined,
+                                    unstaged_parsed.hunk_staged =
+                                        vec![false; unstaged_parsed.hunk_starts.len()];
+                                    let mut staged_parsed = DVS::parse_diff_output(
+                                        &dir_name,
+                                        &staged_combined,
                                         4,
+                                        true,
                                     );
-                                    if parsed.hunk_staged.len() != parsed.hunk_starts.len() {
-                                        parsed.hunk_staged = vec![false; parsed.hunk_starts.len()];
+                                    staged_parsed.hunk_staged =
+                                        vec![true; staged_parsed.hunk_starts.len()];
+                                    let parsed = DVS::combine_parsed_with_separator(
+                                        unstaged_parsed,
+                                        staged_parsed,
+                                    );
+                                    if parsed.lines.is_empty() {
+                                        DiffPayload::Empty
+                                    } else {
+                                        DiffPayload::Parsed(parsed)
                                     }
-                                    DiffPayload::Parsed(parsed)
                                 }
                             });
                         } else {
@@ -7810,39 +7821,6 @@ impl Gui {
         };
     }
 
-    /// Match the viewed HEAD block against the blocks of a freshly fetched
-    /// per-side diff, returning their slice ranges for patch building.
-    /// Matching runs on the side both diffs share (worktree for unstaged,
-    /// HEAD for staged) so staged edits elsewhere in the file can't shift
-    /// the mapping. Sorted deepest-first so sequential applies don't shift
-    /// the line numbers of pending ones.
-    fn matching_side_blocks(
-        &self,
-        hunk_idx: usize,
-        side_diff: &str,
-        new_side: bool,
-    ) -> Vec<(Option<(usize, usize)>, Option<(usize, usize)>)> {
-        let view_spans =
-            DiffViewState::block_spans(&self.diff_view.lines, &self.diff_view.hunk_line_offsets);
-        let Some(view) = view_spans.get(hunk_idx) else {
-            return Vec::new();
-        };
-        let mut matched: Vec<(usize, Option<(usize, usize)>, Option<(usize, usize)>)> =
-            DiffViewState::block_spans_for_diff(side_diff, 4)
-                .into_iter()
-                .filter(|s| view.overlaps(s, new_side))
-                .map(|s| {
-                    let anchor = s.old.map(|(lo, _)| lo).unwrap_or(s.old_point);
-                    (anchor, s.old, s.new)
-                })
-                .collect();
-        matched.sort_by(|a, b| b.0.cmp(&a.0));
-        matched
-            .into_iter()
-            .map(|(_, old, new)| (old, new))
-            .collect()
-    }
-
     fn stage_selected_file_hunk(&mut self, hunk_idx: usize) -> Result<()> {
         let Some(file_idx) = self.selected_file_index() else {
             return Ok(());
@@ -7852,6 +7830,15 @@ impl Gui {
             return Ok(());
         };
         drop(model);
+
+        // Each stacked section keeps its own side's line numbers, so the
+        // viewed hunk's ranges slice the unstaged diff directly.
+        let Some((want_old, want_new)) = self.diff_view.visual_block_line_ranges(hunk_idx) else {
+            return Ok(());
+        };
+        if want_old.is_none() && want_new.is_none() {
+            return Ok(());
+        }
 
         let path_refs: Vec<String> = file.diff_paths().into_iter().map(str::to_string).collect();
         let refs: Vec<&str> = path_refs.iter().map(String::as_str).collect();
@@ -7867,25 +7854,8 @@ impl Gui {
             return Ok(());
         }
 
-        // The view may be a HEAD buffer, so map the hunk onto the unstaged
-        // diff's blocks via the shared worktree side.
-        let targets = self.matching_side_blocks(hunk_idx, &diff, true);
-        if targets.is_empty() {
-            self.popup = PopupState::Message {
-                title: "Stage hunk".to_string(),
-                message: "That hunk moved — the diff was refreshed.".to_string(),
-                kind: MessageKind::Info,
-            };
-            self.needs_diff_refresh = true;
-            return Ok(());
-        }
-        for (want_old, want_new) in targets {
-            if want_old.is_none() && want_new.is_none() {
-                continue;
-            }
-            self.git
-                .stage_visual_block(file.current_path(), &diff, want_old, want_new)?;
-        }
+        self.git
+            .stage_visual_block(file.current_path(), &diff, want_old, want_new)?;
         self.needs_files_refresh = true;
         self.needs_diff_refresh = true;
         Ok(())
@@ -7901,6 +7871,15 @@ impl Gui {
         };
         drop(model);
 
+        // The staged section keeps staged line numbers, so the viewed
+        // hunk's ranges slice the staged diff directly.
+        let Some((want_old, want_new)) = self.diff_view.visual_block_line_ranges(hunk_idx) else {
+            return Ok(());
+        };
+        if want_old.is_none() && want_new.is_none() {
+            return Ok(());
+        }
+
         let path_refs: Vec<String> = file.diff_paths().into_iter().map(str::to_string).collect();
         let refs: Vec<&str> = path_refs.iter().map(String::as_str).collect();
         let diff = self.git.diff_file_staged_paths(&refs)?;
@@ -7908,25 +7887,8 @@ impl Gui {
             return Ok(());
         }
 
-        // The view may be a HEAD buffer, so map the hunk onto the staged
-        // diff's blocks via the shared HEAD side.
-        let targets = self.matching_side_blocks(hunk_idx, &diff, false);
-        if targets.is_empty() {
-            self.popup = PopupState::Message {
-                title: "Unstage hunk".to_string(),
-                message: "That hunk moved — the diff was refreshed.".to_string(),
-                kind: MessageKind::Info,
-            };
-            self.needs_diff_refresh = true;
-            return Ok(());
-        }
-        for (want_old, want_new) in targets {
-            if want_old.is_none() && want_new.is_none() {
-                continue;
-            }
-            self.git
-                .unstage_visual_block(file.current_path(), &diff, want_old, want_new)?;
-        }
+        self.git
+            .unstage_visual_block(file.current_path(), &diff, want_old, want_new)?;
         self.needs_files_refresh = true;
         self.needs_diff_refresh = true;
         Ok(())
@@ -7954,21 +7916,17 @@ impl Gui {
         let file_name = file.name.clone();
         drop(model);
 
-        let diff = self.git.diff_file(&file_name)?;
-        if diff.is_empty() {
+        // Revert is only offered on unstaged hunks, whose ranges slice the
+        // unstaged diff directly.
+        let Some((want_old, want_new)) = self.diff_view.visual_block_line_ranges(hunk_idx) else {
+            return Ok(());
+        };
+        if want_old.is_none() && want_new.is_none() {
             return Ok(());
         }
 
-        // The view may be a HEAD buffer, so map the hunk onto the unstaged
-        // diff's blocks via the shared worktree side.
-        let targets = self.matching_side_blocks(hunk_idx, &diff, true);
-        if targets.is_empty() {
-            self.popup = PopupState::Message {
-                title: "Revert block".to_string(),
-                message: "That hunk moved — the diff was refreshed.".to_string(),
-                kind: MessageKind::Info,
-            };
-            self.needs_diff_refresh = true;
+        let diff = self.git.diff_file(&file_name)?;
+        if diff.is_empty() {
             return Ok(());
         }
 
@@ -7978,13 +7936,8 @@ impl Gui {
         let abs_path = self.git.repo_path().join(&file_name);
         let pre_bytes = std::fs::read(&abs_path).ok();
 
-        for (want_old, want_new) in targets {
-            if want_old.is_none() && want_new.is_none() {
-                continue;
-            }
-            self.git
-                .revert_visual_block_in_worktree(&file_name, &diff, want_old, want_new)?;
-        }
+        self.git
+            .revert_visual_block_in_worktree(&file_name, &diff, want_old, want_new)?;
 
         if let Some(bytes) = pre_bytes {
             let stack = &mut self.diff_view.revert_undo_stack;
