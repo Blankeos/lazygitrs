@@ -2146,7 +2146,7 @@ pub fn render_diff(
                     );
                     if is_insert {
                         let slash: String =
-                            std::iter::repeat('/').take(panel_width as usize).collect();
+                            std::iter::repeat('╱').take(panel_width as usize).collect();
                         buf_write_str(
                             buf,
                             inner.x + gutter_width,
@@ -2204,7 +2204,7 @@ pub fn render_diff(
                         gutter_width,
                     );
                     if is_delete {
-                        let slash: String = std::iter::repeat('/')
+                        let slash: String = std::iter::repeat('╱')
                             .take(right_content_width as usize)
                             .collect();
                         buf_write_str(
@@ -2242,7 +2242,7 @@ pub fn render_diff(
                 // Left content
                 let left_spans = if is_insert {
                     let slash_fill: String =
-                        std::iter::repeat('/').take(panel_width as usize).collect();
+                        std::iter::repeat('╱').take(panel_width as usize).collect();
                     vec![Span::styled(
                         slash_fill,
                         Style::default().fg(theme.diff_line_number).bg(left_bg),
@@ -2305,7 +2305,7 @@ pub fn render_diff(
                 // Right content
                 let right_spans = if is_delete {
                     let slash_fill: String =
-                        std::iter::repeat('/').take(panel_width as usize).collect();
+                        std::iter::repeat('╱').take(panel_width as usize).collect();
                     vec![Span::styled(
                         slash_fill,
                         Style::default().fg(theme.diff_line_number).bg(right_bg),
