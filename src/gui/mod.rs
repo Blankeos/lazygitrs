@@ -7688,18 +7688,42 @@ impl Gui {
     /// or hovered revert hunk). Cancel is focused first so an accidental
     /// Enter doesn't revert anything.
     fn show_hunk_context_menu(&mut self, hunk_idx: usize) {
-        let items = vec![
-            popup::MenuItem {
-                label: "Cancel".to_string(),
+        // The Files diff pane shows the unstaged diff when the file has
+        // unstaged changes, otherwise the staged diff. Only offer the action
+        // that matches the visible hunks so the hunk index can't be applied
+        // to the wrong side of the index.
+        let (has_unstaged, has_staged) = self
+            .selected_file_index()
+            .and_then(|i| self.model.lock().unwrap().files.get(i).cloned())
+            .map(|f| (f.has_unstaged_changes, f.has_staged_changes))
+            .unwrap_or((false, false));
+        let mut items = vec![popup::MenuItem {
+            label: "Cancel".to_string(),
+            description: String::new(),
+            key: None,
+            // No-op: execute_menu_action already drops the menu popup
+            // before invoking the action, so returning Ok leaves the
+            // menu closed. Esc also closes the menu via the universal
+            // menu Esc handler.
+            action: Some(Box::new(|_gui| Ok(()))),
+        }];
+        if has_unstaged {
+            items.push(popup::MenuItem {
+                label: "Stage hunk".to_string(),
                 description: String::new(),
                 key: None,
-                // No-op: execute_menu_action already drops the menu popup
-                // before invoking the action, so returning Ok leaves the
-                // menu closed. Esc also closes the menu via the universal
-                // menu Esc handler.
-                action: Some(Box::new(|_gui| Ok(()))),
-            },
-            popup::MenuItem {
+                action: Some(Box::new(move |gui| {
+                    if let Err(err) = gui.stage_selected_file_hunk(hunk_idx) {
+                        gui.popup = PopupState::Message {
+                            title: "Stage hunk failed".to_string(),
+                            message: format!("{}", err),
+                            kind: MessageKind::Error,
+                        };
+                    }
+                    Ok(())
+                })),
+            });
+            items.push(popup::MenuItem {
                 label: "Revert hunk".to_string(),
                 description: String::new(),
                 key: None,
@@ -7713,8 +7737,25 @@ impl Gui {
                     }
                     Ok(())
                 })),
-            },
-        ];
+            });
+        }
+        if has_staged && !has_unstaged {
+            items.push(popup::MenuItem {
+                label: "Unstage hunk".to_string(),
+                description: String::new(),
+                key: None,
+                action: Some(Box::new(move |gui| {
+                    if let Err(err) = gui.unstage_selected_file_hunk(hunk_idx) {
+                        gui.popup = PopupState::Message {
+                            title: "Unstage hunk failed".to_string(),
+                            message: format!("{}", err),
+                            kind: MessageKind::Error,
+                        };
+                    }
+                    Ok(())
+                })),
+            });
+        }
 
         self.popup = PopupState::Menu {
             title: "Hunk".to_string(),
@@ -7722,6 +7763,75 @@ impl Gui {
             selected: 0,
             loading_index: None,
         };
+    }
+
+    fn stage_selected_file_hunk(&mut self, hunk_idx: usize) -> Result<()> {
+        let Some(file_idx) = self.selected_file_index() else {
+            return Ok(());
+        };
+        let model = self.model.lock().unwrap();
+        let Some(file) = model.files.get(file_idx).cloned() else {
+            return Ok(());
+        };
+        drop(model);
+
+        let Some((want_old, want_new)) = self.diff_view.visual_block_line_ranges(hunk_idx) else {
+            return Ok(());
+        };
+        if want_old.is_none() && want_new.is_none() {
+            return Ok(());
+        }
+
+        let path_refs: Vec<String> = file.diff_paths().into_iter().map(str::to_string).collect();
+        let refs: Vec<&str> = path_refs.iter().map(String::as_str).collect();
+        let diff = self.git.diff_file_paths(&refs)?;
+        if diff.is_empty() {
+            // Untracked / synthesized diffs have no unified diff to slice —
+            // fall back to staging the whole file.
+            if !file.tracked {
+                self.git.stage_file(file.current_path())?;
+                self.needs_files_refresh = true;
+                self.needs_diff_refresh = true;
+            }
+            return Ok(());
+        }
+
+        self.git
+            .stage_visual_block(file.current_path(), &diff, want_old, want_new)?;
+        self.needs_files_refresh = true;
+        self.needs_diff_refresh = true;
+        Ok(())
+    }
+
+    fn unstage_selected_file_hunk(&mut self, hunk_idx: usize) -> Result<()> {
+        let Some(file_idx) = self.selected_file_index() else {
+            return Ok(());
+        };
+        let model = self.model.lock().unwrap();
+        let Some(file) = model.files.get(file_idx).cloned() else {
+            return Ok(());
+        };
+        drop(model);
+
+        let Some((want_old, want_new)) = self.diff_view.visual_block_line_ranges(hunk_idx) else {
+            return Ok(());
+        };
+        if want_old.is_none() && want_new.is_none() {
+            return Ok(());
+        }
+
+        let path_refs: Vec<String> = file.diff_paths().into_iter().map(str::to_string).collect();
+        let refs: Vec<&str> = path_refs.iter().map(String::as_str).collect();
+        let diff = self.git.diff_file_staged_paths(&refs)?;
+        if diff.is_empty() {
+            return Ok(());
+        }
+
+        self.git
+            .unstage_visual_block(file.current_path(), &diff, want_old, want_new)?;
+        self.needs_files_refresh = true;
+        self.needs_diff_refresh = true;
+        Ok(())
     }
 
     fn revert_selected_file_hunk(&mut self, hunk_idx: usize) -> Result<()> {
