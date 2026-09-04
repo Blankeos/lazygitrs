@@ -18,15 +18,14 @@ pub fn render_file_list<'a>(model: &Model, theme: &Theme, width: usize) -> Vec<L
         .files
         .iter()
         .map(|file| {
-            let (status_style, status_icon) = file_status_display(file, theme);
             let name_style = file_name_style(file, theme);
             let dim_style = Style::default().fg(theme.text_dimmed);
 
             if file.rename_paths().is_some() {
-                let spans = vec![
-                    Span::styled(format!(" {} ", status_icon), status_style),
-                    Span::styled(file.display_name.clone(), name_style),
-                ];
+                let mut spans = vec![Span::raw(" ")];
+                spans.extend(file_status_spans(file, theme));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(file.display_name.clone(), name_style));
                 return ListItem::new(Line::from(append_file_stats(
                     spans,
                     file.hunk_count,
@@ -43,10 +42,10 @@ pub fn render_file_list<'a>(model: &Model, theme: &Theme, width: usize) -> Vec<L
                 None => ("", path),
             };
 
-            let mut spans = vec![
-                Span::styled(format!(" {} ", status_icon), status_style),
-                Span::styled(name.to_string(), name_style),
-            ];
+            let mut spans = vec![Span::raw(" ")];
+            spans.extend(file_status_spans(file, theme));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(name.to_string(), name_style));
             if !dir.is_empty() {
                 spans.push(Span::styled(format!(" {}", dir), dim_style));
             }
@@ -174,14 +173,12 @@ pub fn render_file_tree<'a>(
                 ListItem::new(line)
             } else if let Some(file_idx) = node.file_index {
                 let file = &model.files[file_idx];
-                let (status_style, status_icon) = file_status_display(file, theme);
                 let name_style = file_name_style(file, theme);
 
-                let spans = vec![
-                    Span::raw(format!(" {}", indent)),
-                    Span::styled(format!("{} ", status_icon), status_style),
-                    Span::styled(node.name.clone(), name_style),
-                ];
+                let mut spans = vec![Span::raw(format!(" {}", indent))];
+                spans.extend(file_status_spans(file, theme));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(node.name.clone(), name_style));
                 let line = Line::from(append_file_stats(
                     spans,
                     file.hunk_count,
@@ -207,7 +204,10 @@ fn file_name_style(file: &crate::model::File, theme: &Theme) -> Style {
     }
 }
 
-fn file_status_display<'a>(file: &crate::model::File, theme: &Theme) -> (Style, &'a str) {
+/// Per-char status colors: XY where X = index (staged) and Y = worktree
+/// (unstaged). Fully-staged (`M `) is green, unstaged (` M`) is yellow, and
+/// partially-staged (`MM`, `AM`, …) splits — left char green, right yellow.
+fn file_status_spans(file: &crate::model::File, theme: &Theme) -> Vec<Span<'static>> {
     let status_style = if file.has_merge_conflicts {
         theme.file_conflicted
     } else if file.has_staged_changes && !file.has_unstaged_changes {
@@ -241,7 +241,20 @@ fn file_status_display<'a>(file: &crate::model::File, theme: &Theme) -> (Style, 
         _ => "  ",
     };
 
-    (status_style, status_icon)
+    let mut chars = status_icon.chars();
+    let first = chars.next().unwrap_or(' ').to_string();
+    let second = chars.next().unwrap_or(' ').to_string();
+    if file.has_staged_changes && file.has_unstaged_changes {
+        vec![
+            Span::styled(first, theme.file_staged),
+            Span::styled(second, theme.file_unstaged),
+        ]
+    } else {
+        vec![
+            Span::styled(first, status_style),
+            Span::styled(second, status_style),
+        ]
+    }
 }
 
 #[cfg(test)]
