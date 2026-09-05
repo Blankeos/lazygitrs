@@ -7812,7 +7812,7 @@ impl Gui {
             items.push(popup::MenuItem {
                 label: "Unstage hunk".to_string(),
                 description: String::new(),
-                key: Some("u".to_string()),
+                key: Some("s".to_string()),
                 action: Some(Box::new(move |gui| {
                     if let Err(err) = gui.unstage_selected_file_hunk(hunk_idx) {
                         gui.popup = PopupState::Message {
