@@ -944,7 +944,7 @@ fn load_user_theme(id: &str) -> Option<Theme> {
 // ── Color helpers ────────────────────────────────────────────────────────
 
 /// Mix two RGB colors. `amount` is 0..255 where 0 = all `a`, 255 = all `b`.
-fn mix_colors(a: Color, b: Color, amount: u8) -> Color {
+pub(crate) fn mix_colors(a: Color, b: Color, amount: u8) -> Color {
     let (ar, ag, ab) = color_to_rgb(a);
     let (br, bg, bb) = color_to_rgb(b);
     let t = amount as f32 / 255.0;
