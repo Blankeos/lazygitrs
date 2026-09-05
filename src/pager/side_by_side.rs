@@ -1750,7 +1750,7 @@ pub fn render_diff(
                         "   · ".to_string()
                     };
                     buf_write_str(buf, inner.x, y, &gutter_text, gutter_style, gutter_width);
-                    buf_write_spans(buf, inner.x + gutter_width, y, chunk, content_width, 0);
+                    buf_write_spans(buf, inner.x + gutter_width, y, chunk, content_width, 0, bg);
                     row += 1;
                 }
             } else {
@@ -1775,6 +1775,7 @@ pub fn render_diff(
                         &spans,
                         content_width,
                         state.horizontal_scroll,
+                        bg,
                     );
                 } else {
                     let fill: String = std::iter::repeat(' ')
@@ -1932,7 +1933,15 @@ pub fn render_diff(
                             panel_width,
                         );
                     } else if let Some(chunk) = left_wrapped.get(chunk_idx) {
-                        buf_write_spans(buf, inner.x + gutter_width, y, chunk, panel_width, 0);
+                        buf_write_spans(
+                            buf,
+                            inner.x + gutter_width,
+                            y,
+                            chunk,
+                            panel_width,
+                            0,
+                            left_bg,
+                        );
                     } else {
                         let fill: String =
                             std::iter::repeat(' ').take(panel_width as usize).collect();
@@ -1992,7 +2001,15 @@ pub fn render_diff(
                             right_content_width,
                         );
                     } else if let Some(chunk) = right_wrapped.get(chunk_idx) {
-                        buf_write_spans(buf, right_content_x, y, chunk, right_content_width, 0);
+                        buf_write_spans(
+                            buf,
+                            right_content_x,
+                            y,
+                            chunk,
+                            right_content_width,
+                            0,
+                            right_bg,
+                        );
                     } else {
                         let fill: String = std::iter::repeat(' ')
                             .take(right_content_width as usize)
@@ -2043,6 +2060,7 @@ pub fn render_diff(
                     &left_spans,
                     panel_width,
                     state.horizontal_scroll,
+                    left_bg,
                 );
 
                 // Divider or revert marker.
@@ -2107,6 +2125,7 @@ pub fn render_diff(
                     &right_spans,
                     right_content_width,
                     state.horizontal_scroll,
+                    right_bg,
                 );
 
                 row += 1;
@@ -2447,6 +2466,7 @@ fn render_unified_row(
             } else {
                 state.horizontal_scroll
             },
+            bg,
         );
         *row += 1;
     }
@@ -2578,7 +2598,9 @@ fn buf_write_str(buf: &mut Buffer, x: u16, y: u16, text: &str, style: Style, max
 }
 
 /// Write styled spans directly to the buffer at (x, y), clamped to max_width.
-/// `h_scroll` skips the first N display columns of content.
+/// `h_scroll` skips the first N display columns of content. Trailing cells
+/// up to `max_width` are filled with `fill_bg` so hunk backgrounds span the
+/// full panel width (lumen-style) instead of ending at the last character.
 #[inline]
 fn buf_write_spans(
     buf: &mut Buffer,
@@ -2587,6 +2609,7 @@ fn buf_write_spans(
     spans: &[Span<'_>],
     max_width: u16,
     h_scroll: usize,
+    fill_bg: Color,
 ) {
     let buf_area = buf.area();
     if y < buf_area.y || y >= buf_area.y + buf_area.height {
@@ -2613,6 +2636,16 @@ fn buf_write_spans(
                 cell.set_style(span.style);
             }
             col += width as u16;
+        }
+    }
+    if col < end_col {
+        let fill_style = Style::default().bg(fill_bg);
+        while col < end_col {
+            if let Some(cell) = buf.cell_mut((col, y)) {
+                cell.set_char(' ');
+                cell.set_style(fill_style);
+            }
+            col += 1;
         }
     }
 }
