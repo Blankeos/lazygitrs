@@ -1226,16 +1226,28 @@ impl DiffViewState {
     }
 
     pub fn next_hunk(&mut self) {
+        if self.hunk_starts.is_empty() {
+            return;
+        }
         let current_line = self.current_scroll_line();
         if let Some(next) = self.hunk_starts.iter().find(|&&h| h > current_line) {
             self.scroll_offset = self.scroll_target_for_line(*next);
+        } else if let Some(&first) = self.hunk_starts.first() {
+            // Wrap past the last hunk to the first so { / } always cycles.
+            self.scroll_offset = self.scroll_target_for_line(first);
         }
     }
 
     pub fn prev_hunk(&mut self) {
+        if self.hunk_starts.is_empty() {
+            return;
+        }
         let current_line = self.current_scroll_line();
         if let Some(prev) = self.hunk_starts.iter().rev().find(|&&h| h < current_line) {
             self.scroll_offset = self.scroll_target_for_line(*prev);
+        } else if let Some(&last) = self.hunk_starts.last() {
+            // Wrap before the first hunk to the last so { / } always cycles.
+            self.scroll_offset = self.scroll_target_for_line(last);
         }
     }
 
