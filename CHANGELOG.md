@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.36] - 2026-09-06
+
+### Bug Fixes
+
+- Wrap hunk navigation at ends and guard empty hunk lists by @Blankeos
+
+### Features
+
+- Open selected directories in editor and default program by @Blankeos
+- Fill line background to full panel width in side-by-side diff by @Blankeos
+- Better hunk staging without separators (like zed/vscode) (#31) by @Blankeos in [#31](https://github.com/Blankeos/lazygitrs/pull/31)
+- Better looking stripes (inspired by lumen) by @Blankeos
+- Separator-stacked staged/unstaged diff (#30) by @Blankeos in [#30](https://github.com/Blankeos/lazygitrs/pull/30)
+
+### Refactor
+
+- Split file status indicator into per-char styled spans by @Blankeos
+
 ## [0.0.35] - 2026-08-30
 
 ### Bug Fixes
