@@ -96,29 +96,60 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
 
 fn selected_commit_file_abs_path(gui: &Gui) -> Option<String> {
     let selected = gui.context_mgr.selected_active();
-    let file_idx = if gui.show_commit_file_tree {
-        gui.commit_file_tree_nodes
-            .get(selected)
-            .and_then(|n| if n.is_dir { None } else { n.file_index })
-    } else {
-        Some(selected)
-    }?;
+    if gui.show_commit_file_tree {
+        let node = gui.commit_file_tree_nodes.get(selected)?;
+        if node.is_dir {
+            return selected_commit_dir_abs_path(gui);
+        }
+        let file_idx = node.file_index?;
+        let model = gui.model.lock().unwrap();
+        let file = model.commit_files.get(file_idx)?;
+        let rel = file.current_path().to_string();
+        drop(model);
+
+        let abs = gui.git.repo_path().join(&rel);
+        return Some(abs.to_string_lossy().to_string());
+    }
 
     let model = gui.model.lock().unwrap();
-    let file = model.commit_files.get(file_idx)?;
+    let file = model.commit_files.get(selected)?;
     let rel = file.current_path().to_string();
     drop(model);
 
     let abs = gui.git.repo_path().join(&rel);
-    if abs.exists() {
-        Some(abs.to_string_lossy().to_string())
-    } else {
-        // Deleted in this commit / not in working tree — still try the path.
-        Some(abs.to_string_lossy().to_string())
+    Some(abs.to_string_lossy().to_string())
+}
+
+/// Absolute path of the selected directory node in commit-file tree view.
+fn selected_commit_dir_abs_path(gui: &Gui) -> Option<String> {
+    if !gui.show_commit_file_tree {
+        return None;
     }
+    let selected = gui.context_mgr.selected_active();
+    let node = gui.commit_file_tree_nodes.get(selected)?;
+    if !node.is_dir {
+        return None;
+    }
+    if node.path == "." || node.path.is_empty() {
+        return Some(gui.git.repo_path().to_string_lossy().to_string());
+    }
+    Some(
+        gui.git
+            .repo_path()
+            .join(&node.path)
+            .to_string_lossy()
+            .to_string(),
+    )
 }
 
 fn open_selected_in_editor(gui: &mut Gui) -> Result<()> {
+    // Directories: open the folder in the editor.
+    if let Some(dir_abs) = selected_commit_dir_abs_path(gui) {
+        if let Ok(launch) = gui.config.user_config.os.plan_open_dir(&dir_abs) {
+            gui.launch_editor(launch)?;
+        }
+        return Ok(());
+    }
     let Some(abs_path) = selected_commit_file_abs_path(gui) else {
         return Ok(());
     };
@@ -129,6 +160,16 @@ fn open_selected_in_editor(gui: &mut Gui) -> Result<()> {
 }
 
 fn open_selected_in_default_program(gui: &mut Gui) -> Result<()> {
+    // Directories: open the folder with `os.open` (native file viewer by
+    // default), falling back to the platform opener.
+    if let Some(dir_abs) = selected_commit_dir_abs_path(gui) {
+        if let Ok(launch) = gui.config.user_config.os.plan_open(&dir_abs) {
+            gui.launch_editor(launch)?;
+        } else {
+            Platform::open_file(&dir_abs)?;
+        }
+        return Ok(());
+    }
     let Some(abs_path) = selected_commit_file_abs_path(gui) else {
         return Ok(());
     };
