@@ -91,8 +91,12 @@ fn pop_stash(gui: &mut Gui) -> Result<()> {
                     description: "apply and drop this stash".to_string(),
                     key: Some("g".to_string()),
                     action: Some(Box::new(move |gui| {
-                        gui.git.stash_pop(index)?;
+                        let result = gui.git.stash_pop(index);
+                        // A conflicting pop still touches the worktree (conflict
+                        // markers / unmerged paths), so refresh even on failure.
                         gui.needs_refresh = true;
+                        gui.needs_diff_refresh = true;
+                        result?;
                         Ok(())
                     })),
                 },
@@ -126,8 +130,12 @@ fn apply_stash(gui: &mut Gui) -> Result<()> {
                     description: "apply stash (keep in stash list)".to_string(),
                     key: Some("a".to_string()),
                     action: Some(Box::new(move |gui| {
-                        gui.git.stash_apply(index)?;
+                        let result = gui.git.stash_apply(index);
+                        // A conflicting apply still touches the worktree, so
+                        // refresh even on failure.
                         gui.needs_refresh = true;
+                        gui.needs_diff_refresh = true;
+                        result?;
                         Ok(())
                     })),
                 },

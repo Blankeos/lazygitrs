@@ -89,6 +89,19 @@ impl CmdResult {
     pub fn lines(&self) -> Vec<&str> {
         self.stdout.lines().collect()
     }
+
+    /// stdout + stderr for error messages. Many git commands (stash pop/apply,
+    /// merge, cherry-pick) report conflicts on stdout with empty stderr.
+    pub fn combined_output(&self) -> String {
+        let stdout = self.stdout.trim();
+        let stderr = self.stderr.trim();
+        match (stdout.is_empty(), stderr.is_empty()) {
+            (true, true) => "No output from git.".to_string(),
+            (false, true) => stdout.to_string(),
+            (true, false) => stderr.to_string(),
+            (false, false) => format!("{stdout}\n{stderr}"),
+        }
+    }
 }
 
 pub struct CmdBuilder {
@@ -204,7 +217,7 @@ impl CmdBuilder {
                 result.exit_code.unwrap_or(-1),
                 self.program,
                 self.args.join(" "),
-                result.stderr.trim()
+                result.combined_output(),
             );
         }
         Ok(result)
