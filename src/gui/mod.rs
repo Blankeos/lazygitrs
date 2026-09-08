@@ -767,6 +767,11 @@ pub struct Gui {
     /// Whether the commit-details box is visible.  Toggled with `.` in any
     /// commit-related context.
     pub show_commit_details: bool,
+    /// Receiver for a background extra-language install (`Ok` = ready).
+    /// While `Some`, the Loading overlay belongs to the install.
+    grammar_install_rx: Option<mpsc::Receiver<Result<(), String>>>,
+    /// Display name of the language being installed (for result messages).
+    grammar_install_pretty: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1092,6 +1097,8 @@ impl Gui {
             commit_details_scroll: 0,
             commit_details_scroll_hash: String::new(),
             show_commit_details,
+            grammar_install_rx: None,
+            grammar_install_pretty: String::new(),
         })
     }
 
@@ -1348,6 +1355,9 @@ impl Gui {
 
             // Check for completed background menu item operations
             self.receive_menu_async_results();
+
+            // Check for a finished background language install
+            self.receive_grammar_install_results();
 
             // Advance spinner animation
             self.spinner_frame = self.spinner_frame.wrapping_add(1);
@@ -4265,6 +4275,7 @@ impl Gui {
         let was_ref_picker = matches!(self.popup, PopupState::RefPicker { .. });
         let was_list_picker = matches!(self.popup, PopupState::ListPicker { .. });
         let was_theme_picker = matches!(self.popup, PopupState::ThemePicker { .. });
+        let was_syntax_menu = matches!(self.popup, PopupState::SyntaxMenu { .. });
 
         match &self.popup {
             PopupState::Confirm { .. } => {
@@ -4966,11 +4977,18 @@ impl Gui {
                 }
             }
             PopupState::Loading { .. } => {
-                // Block all input while loading — user must wait
+                // Grammar installs run behind this overlay — Esc stops waiting
+                // and goes back to the menu (the install keeps running; the
+                // menu refreshes if still open when it finishes).
+                if key.code == KeyCode::Esc && self.grammar_install_rx.is_some() {
+                    self.show_syntax_menu();
+                }
+                // Otherwise block all input while loading — user must wait.
             }
             PopupState::CommandPalette { .. } => {}
             PopupState::RefPicker { .. } => {}
             PopupState::ListPicker { .. } => {}
+            PopupState::SyntaxMenu { .. } => {}
             PopupState::ThemePicker { .. } => {}
             PopupState::None => {}
         }
@@ -4985,6 +5003,8 @@ impl Gui {
             self.handle_ref_picker_key(key)?;
         } else if was_list_picker && matches!(self.popup, PopupState::ListPicker { .. }) {
             self.handle_list_picker_key(key)?;
+        } else if was_syntax_menu && matches!(self.popup, PopupState::SyntaxMenu { .. }) {
+            self.handle_syntax_menu_key(key)?;
         } else if was_theme_picker && matches!(self.popup, PopupState::ThemePicker { .. }) {
             self.handle_theme_picker_key(key);
         }
@@ -5125,6 +5145,9 @@ impl Gui {
                 CommandAction::OpenThemePicker => {
                     self.popup = PopupState::None;
                     self.show_theme_picker();
+                }
+                CommandAction::ShowSyntaxHealth => {
+                    self.show_syntax_menu();
                 }
                 CommandAction::Unavailable => {}
             }
@@ -5388,7 +5411,8 @@ impl Gui {
 
     fn show_theme_picker(&mut self) {
         use crate::gui::popup::{
-            ListPickerCore, ListPickerItem, make_command_palette_search_textarea,
+            ListPickerCore, ListPickerItem, list_picker_initial_scroll,
+            make_command_palette_search_textarea,
         };
 
         let original = self.current_theme_index;
@@ -5401,13 +5425,18 @@ impl Gui {
                 description: Some(ct.appearance.as_str().to_string()),
             })
             .collect();
+        let scroll_offset = list_picker_initial_scroll(
+            &items,
+            original.min(items.len().saturating_sub(1)),
+            list_picker_visible_height(self.layout.height as usize),
+        );
 
         self.popup = PopupState::ThemePicker {
             core: ListPickerCore {
                 items,
                 selected: original,
                 search_textarea: make_command_palette_search_textarea(),
-                scroll_offset: 0,
+                scroll_offset,
             },
             original_theme_index: original,
         };
@@ -5517,6 +5546,186 @@ impl Gui {
         items
     }
 
+    /// Syntax highlighting menu (`?` → "Syntax highlighting...").
+    /// A searchable [`PopupState::SyntaxMenu`] reusing the shared list-picker
+    /// core (search, categories, hint bar, mouse). Ready languages just work;
+    /// Enter on an available one installs it on a background thread.
+    fn show_syntax_menu(&mut self) {
+        use crate::gui::popup::{
+            ListPickerCore, ListPickerItem, list_picker_initial_scroll,
+            make_command_palette_search_textarea,
+        };
+        use crate::pager::highlight::syntax_menu_rows;
+
+        let items: Vec<ListPickerItem> = syntax_menu_rows()
+            .into_iter()
+            .map(|row| ListPickerItem {
+                value: row.value,
+                label: row.label,
+                category: row.category,
+                description: Some(row.description),
+            })
+            .collect();
+        // Start on the first installable row so Enter just works, scrolled
+        // into view — otherwise the highlight sits below the fold and the
+        // first Down press appears to skip straight to the second row.
+        let selected = items
+            .iter()
+            .position(|i| i.category == "Available")
+            .unwrap_or(0);
+        let scroll_offset = list_picker_initial_scroll(
+            &items,
+            selected,
+            list_picker_visible_height(self.layout.height as usize),
+        );
+        self.popup = PopupState::SyntaxMenu {
+            core: ListPickerCore {
+                items,
+                selected,
+                search_textarea: make_command_palette_search_textarea(),
+                scroll_offset,
+            },
+        };
+    }
+
+    /// Key handling for the syntax menu: list-picker navigation + filter,
+    /// without the free-entry row (fixed language list). Enter installs.
+    fn handle_syntax_menu_key(&mut self, key: KeyEvent) -> Result<()> {
+        use crate::gui::popup::{
+            list_picker_clamp_selection_to_matches, list_picker_filtered_display_idx,
+            list_picker_matching_indices, list_picker_next_match, list_picker_prev_match,
+        };
+        use crate::pager::highlight::syntax_confirm_for;
+
+        if let PopupState::SyntaxMenu { core } = &mut self.popup {
+            let search = core.search_textarea.lines().join("");
+            let matching = list_picker_matching_indices(&core.items, &search);
+
+            let h = self.layout.height as usize;
+            let list_height = list_picker_visible_height(h);
+
+            match key.code {
+                KeyCode::Esc => {
+                    self.popup = PopupState::None;
+                    return Ok(());
+                }
+                KeyCode::Enter => {
+                    let value = core
+                        .items
+                        .get(core.selected)
+                        .filter(|_| matching.contains(&core.selected))
+                        .map(|i| i.value.clone())
+                        .or_else(|| {
+                            matching
+                                .first()
+                                .and_then(|&idx| core.items.get(idx).map(|i| i.value.clone()))
+                        });
+                    let Some(value) = value else {
+                        return Ok(());
+                    };
+                    match syntax_confirm_for(&value) {
+                        crate::pager::highlight::SyntaxConfirm::Reload => {
+                            crate::pager::highlight::dynamic::reload();
+                            self.show_syntax_menu();
+                        }
+                        crate::pager::highlight::SyntaxConfirm::AlreadyReady(pretty) => {
+                            self.popup = PopupState::Message {
+                                title: pretty,
+                                message: "Highlighting is ready — nothing to install.".to_string(),
+                                kind: MessageKind::Info,
+                            };
+                        }
+                        crate::pager::highlight::SyntaxConfirm::Install { id, pretty } => {
+                            self.start_grammar_install(id, pretty);
+                        }
+                    }
+                    return Ok(());
+                }
+                KeyCode::Down => {
+                    if let Some(next) = list_picker_next_match(&matching, core.selected) {
+                        core.selected = next;
+                    }
+                    list_picker_scroll_after_nav(core, &matching, list_height, true);
+                }
+                KeyCode::Up => {
+                    if let Some(prev) = list_picker_prev_match(&matching, core.selected) {
+                        core.selected = prev;
+                    }
+                    list_picker_scroll_after_nav(core, &matching, list_height, false);
+                }
+                _ => {
+                    textarea_input(&mut core.search_textarea, key);
+                    let new_search = core.search_textarea.lines().join("");
+                    if new_search != search {
+                        let matching = list_picker_matching_indices(&core.items, &new_search);
+                        if let Some(sel) =
+                            list_picker_clamp_selection_to_matches(&matching, core.selected)
+                        {
+                            core.selected = sel;
+                        }
+                        if !new_search.is_empty() {
+                            let sdi = list_picker_filtered_display_idx(
+                                &core.items,
+                                &matching,
+                                core.selected,
+                            );
+                            core.scroll_offset = sdi.saturating_sub(list_height / 2);
+                        } else {
+                            core.scroll_offset = 0;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Download + build an extra language without freezing the UI.
+    /// Shows the Loading overlay; completion reopens the menu (or reports).
+    fn start_grammar_install(&mut self, id: String, pretty: String) {
+        let (tx, rx) = mpsc::channel();
+        self.grammar_install_rx = Some(rx);
+        self.grammar_install_pretty = pretty.clone();
+        self.popup = PopupState::Loading {
+            title: format!("Installing {pretty}…"),
+            message: "Downloading and building — this can take a minute.".to_string(),
+        };
+        std::thread::spawn(move || {
+            let result = crate::pager::highlight::dynamic::install_lang(&id).map_err(|msg| msg);
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Poll a finished background language install (called every event-loop tick).
+    fn receive_grammar_install_results(&mut self) {
+        // Single `try_recv` — it consumes the message, so poll exactly once.
+        let result = match self.grammar_install_rx.as_ref() {
+            Some(rx) => match rx.try_recv() {
+                Ok(result) => result,
+                Err(_) => return,
+            },
+            None => return,
+        };
+        self.grammar_install_rx = None;
+        let pretty = std::mem::take(&mut self.grammar_install_pretty);
+        let waiting = matches!(self.popup, PopupState::Loading { .. });
+        let viewing_menu = matches!(self.popup, PopupState::SyntaxMenu { .. });
+        match result {
+            Ok(()) if waiting || viewing_menu => self.show_syntax_menu(),
+            Ok(()) => {}
+            Err(msg) if waiting => {
+                self.popup = PopupState::Message {
+                    title: pretty,
+                    message: msg,
+                    kind: MessageKind::Error,
+                };
+            }
+            // Escaped mid-install and moved on: stay where the user is; the
+            // menu (or its retry row) reflects the outcome on next open.
+            Err(_) => {}
+        }
+    }
+
     fn show_command_palette(&mut self) {
         let kb = &self.config.user_config.keybinding;
         let active = self.context_mgr.active();
@@ -5592,6 +5801,11 @@ impl Gui {
                     "".into(),
                     "Color theme...".into(),
                     CommandAction::OpenThemePicker,
+                ),
+                CommandEntry::action(
+                    "".into(),
+                    "Syntax highlighting...".into(),
+                    CommandAction::ShowSyntaxHealth,
                 ),
             ],
         };
@@ -6007,6 +6221,11 @@ impl Gui {
                     "".into(),
                     "Color theme...".into(),
                     CommandAction::OpenThemePicker,
+                ),
+                CommandEntry::action(
+                    "".into(),
+                    "Syntax highlighting...".into(),
+                    CommandAction::ShowSyntaxHealth,
                 ),
             ],
         };
@@ -6863,12 +7082,14 @@ impl Gui {
         // Free-entry list pickers (RefPicker / ListPicker) intercept mouse scroll and click
         if matches!(
             self.popup,
-            PopupState::RefPicker { .. } | PopupState::ListPicker { .. }
+            PopupState::RefPicker { .. }
+                | PopupState::ListPicker { .. }
+                | PopupState::SyntaxMenu { .. }
         ) {
             let (core, w, h) = match &mut self.popup {
-                PopupState::RefPicker { core, .. } | PopupState::ListPicker { core, .. } => {
-                    (core, self.layout.width, self.layout.height)
-                }
+                PopupState::RefPicker { core, .. }
+                | PopupState::ListPicker { core, .. }
+                | PopupState::SyntaxMenu { core } => (core, self.layout.width, self.layout.height),
                 _ => unreachable!(),
             };
             handle_list_picker_mouse(core, mouse, w, h);
@@ -7151,12 +7372,14 @@ impl Gui {
         // Free-entry list pickers (RefPicker / ListPicker) intercept mouse scroll and click
         if matches!(
             self.popup,
-            PopupState::RefPicker { .. } | PopupState::ListPicker { .. }
+            PopupState::RefPicker { .. }
+                | PopupState::ListPicker { .. }
+                | PopupState::SyntaxMenu { .. }
         ) {
             let (core, w, h) = match &mut self.popup {
-                PopupState::RefPicker { core, .. } | PopupState::ListPicker { core, .. } => {
-                    (core, self.layout.width, self.layout.height)
-                }
+                PopupState::RefPicker { core, .. }
+                | PopupState::ListPicker { core, .. }
+                | PopupState::SyntaxMenu { core } => (core, self.layout.width, self.layout.height),
                 _ => unreachable!(),
             };
             handle_list_picker_mouse(core, mouse, w, h);
