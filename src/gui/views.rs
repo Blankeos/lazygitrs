@@ -3588,6 +3588,24 @@ pub fn render_popup(
                 ],
             );
         }
+        PopupState::SyntaxMenu { core } => {
+            render_list_picker(
+                frame,
+                area,
+                theme,
+                core,
+                "Syntax highlighting",
+                65,
+                70,
+                36,
+                &[
+                    ("↑↓", "navigate"),
+                    ("type", "filter"),
+                    ("enter", "install"),
+                    ("esc", "close"),
+                ],
+            );
+        }
         PopupState::None => {}
     }
 

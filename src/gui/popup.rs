@@ -577,6 +577,13 @@ pub enum PopupState {
         free_entry_category: String,
         on_confirm: ListPickerAction,
     },
+    /// Syntax highlighting menu: searchable fixed language list, no free entry.
+    /// Reuses [`ListPickerCore`] + `render_list_picker` (search, categories,
+    /// hint bar, mouse); Enter installs the selected language on a background
+    /// thread instead of confirming a value.
+    SyntaxMenu {
+        core: ListPickerCore,
+    },
     /// Color theme picker with live preview and search.
     ThemePicker {
         core: ListPickerCore,
@@ -718,6 +725,7 @@ pub struct CommandSection {
 pub enum CommandAction {
     Dispatch(KeyEvent),
     OpenThemePicker,
+    ShowSyntaxHealth,
     Unavailable,
 }
 
@@ -959,6 +967,26 @@ pub fn list_picker_filtered_display_idx(
         di += 1;
     }
     di
+}
+
+/// Initial scroll offset so `selected` is visible on open (with its
+/// category header when possible). Without this the highlight can sit
+/// below the fold and the first Down press looks like it skips a row.
+pub fn list_picker_initial_scroll(
+    items: &[ListPickerItem],
+    selected: usize,
+    list_height: usize,
+) -> usize {
+    if list_height == 0 {
+        return 0;
+    }
+    let matching = list_picker_matching_indices(items, "");
+    let sdi = list_picker_filtered_display_idx(items, &matching, selected);
+    if sdi >= list_height {
+        sdi - list_height + 1
+    } else {
+        0
+    }
 }
 
 /// Next matching item index after `selected` (cycles within `matching`).
@@ -1229,5 +1257,51 @@ mod checklist_free_entry_tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "Alice <a@example.com>");
         assert!(items[0].checked);
+    }
+}
+
+#[cfg(test)]
+mod initial_scroll_tests {
+    use super::*;
+
+    fn categorized(labels: &[(&str, &str)]) -> Vec<ListPickerItem> {
+        labels
+            .iter()
+            .map(|(label, category)| ListPickerItem {
+                value: (*label).to_string(),
+                label: (*label).to_string(),
+                category: (*category).to_string(),
+                description: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn selected_at_top_needs_no_scroll() {
+        let items = categorized(&[("a", ""), ("b", ""), ("c", "")]);
+        assert_eq!(list_picker_initial_scroll(&items, 0, 3), 0);
+    }
+
+    #[test]
+    fn selected_below_fold_scrolls_into_view_with_header() {
+        // Ready header + 3 ready rows, Available header + 2 available rows.
+        let items = categorized(&[
+            ("r1", "Ready"),
+            ("r2", "Ready"),
+            ("r3", "Ready"),
+            ("a1", "Available"),
+            ("a2", "Available"),
+        ]);
+        // Display rows: Ready(0) r1(1) r2(2) r3(3) Available(4) a1(5).
+        // Height 3 -> scroll 3 shows Available header + a1 + a2.
+        assert_eq!(list_picker_initial_scroll(&items, 3, 3), 3);
+        // Height covers it -> no scroll.
+        assert_eq!(list_picker_initial_scroll(&items, 3, 6), 0);
+    }
+
+    #[test]
+    fn zero_height_never_scrolls() {
+        let items = categorized(&[("a", ""), ("b", "")]);
+        assert_eq!(list_picker_initial_scroll(&items, 1, 0), 0);
     }
 }

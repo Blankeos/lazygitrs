@@ -6,7 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::config::keybindings::parse_key;
 use crate::gui::modes::diff_mode::{DiffModeFocus, DiffModeSelector};
-use crate::gui::popup::{CommandEntry, CommandSection, MenuItem, PopupState};
+use crate::gui::popup::{CommandAction, CommandEntry, CommandSection, MenuItem, PopupState};
 use crate::gui::{DiffPayload, Gui, textarea_input};
 use crate::model::FileChangeStatus;
 use crate::os::platform::Platform;
@@ -825,6 +825,11 @@ fn show_diff_mode_command_palette(gui: &mut Gui) {
             CommandEntry::keybinding("n/N".into(), "Next / previous search match".into()),
             CommandEntry::keybinding("y".into(), "Copy to clipboard".into()),
             CommandEntry::keybinding("?".into(), "Show command palette".into()),
+            CommandEntry::action(
+                "".into(),
+                "Syntax highlighting...".into(),
+                CommandAction::ShowSyntaxHealth,
+            ),
         ],
     };
 
