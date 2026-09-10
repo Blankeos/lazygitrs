@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.37] - 2026-09-10
+
+### Bug Fixes
+
+- Match lazygit commit and merge glyphs by @Blankeos
+- Refresh diff and show conflict output on failed pop/apply by @Blankeos
+
+### Features
+
+- Render commit refs and tags lazygit-style by @Blankeos
+- Match lazygit commit list row layout with local-time dates and author columns by @Blankeos
+
 ## [0.0.36] - 2026-09-06
 
 ### Bug Fixes
