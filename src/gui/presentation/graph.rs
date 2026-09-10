@@ -280,25 +280,18 @@ fn box_drawing(up: bool, down: bool, left: bool, right: bool) -> (&'static str, 
 /// immediately after this row's graph. Ensures a single trailing space before
 /// the hash/message.
 ///
-/// `is_head` swaps the commit glyph to a filled circle for HEAD.
-pub fn render_graph_spans(row: &GraphRow, is_head: bool, theme: &Theme) -> Vec<Span<'static>> {
+/// Glyphs match lazygit: `○` for commits, `◎` for merges.
+/// `is_head` is kept for API compatibility but no longer swaps the glyph
+/// (lazygit shows HEAD via ref labels, not a special graph symbol).
+pub fn render_graph_spans(row: &GraphRow, _is_head: bool, theme: &Theme) -> Vec<Span<'static>> {
     let mut spans = Vec::with_capacity(row.cells.len() * 2 + 1);
 
     for cell in &row.cells {
         let (first, second) = box_drawing(cell.up, cell.down, cell.left, cell.right);
 
         let first_glyph: &'static str = match cell.cell_type {
-            CellType::Commit | CellType::Merge => {
-                if is_head && cell.style_col == row.commit_col {
-                    "⬤"
-                } else {
-                    match cell.cell_type {
-                        CellType::Commit => "◯",
-                        CellType::Merge => "⏣",
-                        _ => unreachable!(),
-                    }
-                }
-            }
+            CellType::Commit => "○",
+            CellType::Merge => "◎",
             CellType::Connection => first,
         };
 
@@ -335,8 +328,8 @@ mod tests {
         for cell in &row.cells {
             let (first, second) = box_drawing(cell.up, cell.down, cell.left, cell.right);
             let g = match cell.cell_type {
-                CellType::Commit => "◯",
-                CellType::Merge => "⏣",
+                CellType::Commit => "○",
+                CellType::Merge => "◎",
                 CellType::Connection => first,
             };
             out.push_str(g);
@@ -367,12 +360,12 @@ mod tests {
         assert_eq!(
             rendered,
             vec![
-                "◯",   // 6975eec: main lane only
-                "│ ⏣", // 0d129e4: main pipe continues, merge symbol on feature lane
-                "◯─│", // 1b91554: merge stroke drawn HERE (parent's row), into col 1
-                "│ ⏣", // 9902457: main pipe continues, merge symbol on feature lane
-                "◯─│", // f6ecf6f: merge stroke drawn HERE, into col 1
-                "│ ◯", // 22d0113: feature tip
+                "○",   // 6975eec: main lane only
+                "│ ◎", // 0d129e4: main pipe continues, merge symbol on feature lane
+                "○─│", // 1b91554: merge stroke drawn HERE (parent's row), into col 1
+                "│ ◎", // 9902457: main pipe continues, merge symbol on feature lane
+                "○─│", // f6ecf6f: merge stroke drawn HERE, into col 1
+                "│ ○", // 22d0113: feature tip
             ]
         );
     }
