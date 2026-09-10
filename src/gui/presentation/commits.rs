@@ -187,30 +187,24 @@ fn render_commits_window(
                 spans.push(Span::raw("  "));
             }
 
-            // Ref decorations (HEAD -> main, origin/main, etc.)
-            for r in &commit.refs {
-                let (label, color) = if r.starts_with("HEAD -> ") {
-                    (r.clone(), theme.ref_head)
-                } else if r == "HEAD" {
-                    (r.clone(), theme.ref_head)
-                } else if r.contains('/') {
-                    (r.clone(), theme.ref_remote)
-                } else {
-                    (r.clone(), theme.ref_local)
-                };
+            // Tags/refs like lazygit (`commits.go:396`): compact shows bare
+            // tags, maximised shows combined `(refs, tag: x)`. Color is
+            // theme-based (`ref_tag`) rather than hardcoded magenta.
+            let tag_style = Style::default()
+                .fg(theme.ref_tag)
+                .add_modifier(Modifier::BOLD);
+            if full {
+                let mut parts = commit.refs.clone();
+                for tag in &commit.tags {
+                    parts.push(format!("tag: {tag}"));
+                }
+                if !parts.is_empty() {
+                    spans.push(Span::styled(format!("({}) ", parts.join(", ")), tag_style));
+                }
+            } else if !commit.tags.is_empty() {
                 spans.push(Span::styled(
-                    format!("({}) ", label),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ));
-            }
-
-            // Tags after graph, before message.
-            for tag in &commit.tags {
-                spans.push(Span::styled(
-                    format!("{} ", tag),
-                    Style::default()
-                        .fg(theme.ref_tag)
-                        .add_modifier(Modifier::BOLD),
+                    format!("{} ", commit.tags.join(" ")),
+                    tag_style,
                 ));
             }
 
