@@ -285,6 +285,7 @@ pub fn render(
                         ctx_id,
                         commit_list_cache,
                         false,
+                        screen_mode != ScreenMode::Normal,
                     );
                 }
                 ContextId::Stash => {
@@ -316,6 +317,7 @@ pub fn render(
                         ctx_id,
                         commit_list_cache,
                         true,
+                        screen_mode != ScreenMode::Normal,
                     );
                 }
                 ContextId::CommitFiles | ContextId::StashFiles | ContextId::BranchCommitFiles => {
@@ -586,6 +588,7 @@ pub fn render(
                         ContextId::BranchCommits,
                         commit_list_cache,
                         true,
+                        screen_mode != ScreenMode::Normal,
                     );
                 } else {
                     let items = presentation::branches::render_branch_list(
@@ -675,6 +678,7 @@ pub fn render(
                         ContextId::BranchCommits,
                         commit_list_cache,
                         true,
+                        screen_mode != ScreenMode::Normal,
                     );
                 } else if ctx_mgr.active() == ContextId::RemoteBranches {
                     let rb_selected = ctx_mgr.selected(ContextId::RemoteBranches);
@@ -778,6 +782,7 @@ pub fn render(
                         ContextId::BranchCommits,
                         commit_list_cache,
                         true,
+                        screen_mode != ScreenMode::Normal,
                     );
                 } else {
                     let items = presentation::tags::render_tag_list(model, theme);
@@ -857,6 +862,7 @@ pub fn render(
                         ctx_id,
                         commit_list_cache,
                         false,
+                        screen_mode != ScreenMode::Normal,
                     );
                 }
             }
@@ -1938,6 +1944,7 @@ fn render_commit_list_ctx(
     ctx: ContextId,
     cache: &mut presentation::commits::CommitListCache,
     sub_commits: bool,
+    full: bool,
 ) {
     let total_len = if sub_commits {
         model.sub_commits.len()
@@ -1968,6 +1975,7 @@ fn render_commit_list_ctx(
             theme,
             offset,
             visible_height,
+            full,
             cache,
         )
     } else {
@@ -1977,6 +1985,7 @@ fn render_commit_list_ctx(
             cherry_picked,
             offset,
             visible_height,
+            full,
             cache,
         )
     };

@@ -19,8 +19,8 @@ pub struct Commit {
 
 impl Commit {
     pub fn short_hash(&self) -> &str {
-        if self.hash.len() >= 7 {
-            &self.hash[..7]
+        if self.hash.len() >= 8 {
+            &self.hash[..8]
         } else {
             &self.hash
         }

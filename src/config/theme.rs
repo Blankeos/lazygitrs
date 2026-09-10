@@ -30,6 +30,7 @@ pub struct Theme {
 
     // ── Commits ──────────────────────────────────────────────────────
     pub commit_hash: Style,
+    pub commit_hash_unpushed: Style,
     pub commit_author: Style,
     pub commit_date: Style,
     pub commit_hash_pushed: Color,
@@ -203,6 +204,7 @@ impl Theme {
             diff_add_word: Color::Rgb(0, 120, 0),
             diff_remove_word: Color::Rgb(120, 0, 0),
             commit_hash: Style::default().fg(Color::Yellow),
+            commit_hash_unpushed: Style::default().fg(Color::Red),
             commit_author: Style::default().fg(Color::Green),
             commit_date: Style::default().fg(Color::Blue),
             commit_hash_pushed: Color::Rgb(102, 102, 102),
@@ -636,6 +638,7 @@ impl ThemeJson {
             diff_remove_word,
 
             commit_hash: Style::default().fg(warning),
+            commit_hash_unpushed: Style::default().fg(error),
             commit_author: Style::default().fg(primary),
             commit_date: Style::default().fg(info),
             commit_hash_pushed: text_dimmed,
