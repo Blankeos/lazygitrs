@@ -3532,7 +3532,7 @@ pub fn render_popup(
             // Hint bar at bottom
             let hint_area = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
             let hint = Line::from(vec![
-                Span::styled(" j/k", Style::default().fg(theme.accent_secondary)),
+                Span::styled(" ↑↓", Style::default().fg(theme.accent_secondary)),
                 Span::styled(": navigate  ", Style::default().fg(theme.text_dimmed)),
                 Span::styled("type", Style::default().fg(theme.accent_secondary)),
                 Span::styled(": search  ", Style::default().fg(theme.text_dimmed)),
