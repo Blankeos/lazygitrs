@@ -109,56 +109,42 @@ lazygitrs ships with 30+ built-in color themes (Catppuccin, Dracula, Tokyo Night
 ### Editor integrations
 
 <details>
-<summary><strong>Helix</strong> — <code>Ctrl-g</code> to open, <code>e</code>/<code>o</code> to edit back in hx</summary>
+<summary><strong>Helix</strong> — <code>Space G g</code> to open, <code>Space G f</code> for file history</summary>
 
-**1. Open lazygitrs from Helix** — add to `~/.config/helix/config.toml`:
+Add to `~/.config/helix/config.toml` — capital `G` keeps the built-in `space g` changed-file picker intact:
 
 ```toml
-[keys.normal]
-# Open lazygitrs w/ ctrl-g
-"C-g" = [":new", ":insert-output lazygitrs", ":buffer-close!", ":redraw"]
+[keys.normal.space.G]
+g = [":insert-output lazygitrs", ":redraw"]
+f = [":insert-output lazygitrs -f '%{file_path_absolute}'", ":redraw"]
 ```
 
-**2. Make `e` / `o` open files in Helix** — add to `~/.config/lazygitrs/config.yml` (or `~/.config/lazygit/config.yml`):
+Absolute path matters — `-f` resolves it to repo-relative (e.g. `apps/nextjs/next.config.ts` in a monorepo).
+
+For `e` (edit back in hx) — `~/.config/lazygitrs/config.yml`:
 
 ```yaml
 os:
-  # Suspends TUI → hx → restores. editPreset fills edit / editAtLine / etc.
   editPreset: "helix"
-  open: "hx {{filename}}"
 ```
 
-Then inside lazygitrs: `e` edits at line, `o` opens the file.
+For `o` (open), leave the default — OS opener (Finder for folders on macOS).
 
 </details>
 
 <details>
-<summary><strong>Neovim (LazyVim / snacks.nvim)</strong> — <code>&lt;leader&gt;gg</code> to open, <code>e</code>/<code>o</code> to edit back in nvim</summary>
+<summary><strong>Neovim (LazyVim / snacks.nvim)</strong> — <code>&lt;leader&gt;gg</code> to open, <code>&lt;leader&gt;gF</code> for file history</summary>
 
-**1. Open lazygitrs from Neovim** — `Snacks.lazygit()` hardcodes `lazygit`, so use `Snacks.terminal` instead.
-
-Create `~/.config/nvim/lua/plugins/snacks-lazygitrs.lua`:
+`Snacks.lazygit()` hardcodes `lazygit`, so use `Snacks.terminal` instead. In `~/.config/nvim/lua/plugins/snacks-lazygitrs.lua`:
 
 ```lua
 return {
   {
     "folke/snacks.nvim",
-    opts = {
-      lazygit = {
-        configure = false, -- snacks assumes real lazygit YAML/theme
-      },
-    },
+    opts = { lazygit = { configure = false } },
     keys = {
-      {
-        "<leader>gg",
-        function()
-          Snacks.terminal({ "lazygitrs" }, {
-            cwd = LazyVim.root.git(),
-            win = { style = "lazygit" },
-          })
-        end,
-        desc = "Lazygitrs",
-      },
+      { "<leader>gg", function() Snacks.terminal({ "lazygitrs" }, { cwd = LazyVim.root.git(), win = { style = "lazygit" } }) end, desc = "Lazygitrs" },
+      { "<leader>gF", function() Snacks.terminal({ "lazygitrs", "-f", vim.fn.expand("%:p") }, { cwd = LazyVim.root.git(), win = { style = "lazygit" } }) end, desc = "Lazygitrs file history" },
     },
   },
 }
@@ -166,16 +152,14 @@ return {
 
 Restart nvim (or `:Lazy reload snacks.nvim`) to pick it up.
 
-**2. Make `e` / `o` open files in Neovim** — add to `~/.config/lazygitrs/config.yml` (or `~/.config/lazygit/config.yml`):
+For `e` (edit back in nvim) — `~/.config/lazygitrs/config.yml`:
 
 ```yaml
 os:
-  # Suspends TUI → nvim → restores. editPreset fills edit / editAtLine / etc.
   editPreset: "nvim"
-  open: "nvim {{filename}}"
 ```
 
-Then inside lazygitrs: `e` edits at line, `o` opens the file.
+For `o` (open), leave the default — it uses the OS opener (Finder for folders on macOS).
 
 </details>
 
