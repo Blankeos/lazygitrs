@@ -388,9 +388,11 @@ pub fn render(
                 commit_details_scroll,
             );
         }
-        render_status_bar(
+        render_search_bar_or_status_bar(
             frame,
             fl.status_bar,
+            search_state,
+            search_textarea,
             ctx_mgr,
             diff_view,
             theme,
@@ -1066,71 +1068,18 @@ pub fn render(
     }
 
     // Render status bar (or search bar if search is active)
-    if let Some((query, match_count, current_match)) = search_state {
-        let match_info = if match_count > 0 {
-            format!(" {}/{}", current_match + 1, match_count)
-        } else if !query.is_empty() {
-            " (no matches)".to_string()
-        } else {
-            String::new()
-        };
-
-        if let Some(ta) = search_textarea {
-            // Render: "/" prefix + textarea + match info
-            // Split the status bar into three parts
-            let prefix_width = 2u16; // " /"
-            let suffix_text = match_info;
-            let suffix_width = suffix_text.len() as u16;
-            let ta_width = fl
-                .status_bar
-                .width
-                .saturating_sub(prefix_width + suffix_width);
-
-            // Prefix " /"
-            let prefix_rect = Rect::new(fl.status_bar.x, fl.status_bar.y, prefix_width, 1);
-            let prefix = Paragraph::new(Span::styled(
-                " /",
-                Style::default().fg(theme.accent_secondary),
-            ));
-            frame.render_widget(prefix, prefix_rect);
-
-            // Textarea
-            let ta_rect = Rect::new(fl.status_bar.x + prefix_width, fl.status_bar.y, ta_width, 1);
-            frame.render_widget(ta, ta_rect);
-
-            // Suffix (match info)
-            if !suffix_text.is_empty() {
-                let suffix_rect = Rect::new(
-                    fl.status_bar.x + prefix_width + ta_width,
-                    fl.status_bar.y,
-                    suffix_width,
-                    1,
-                );
-                let suffix = Paragraph::new(Span::styled(
-                    suffix_text,
-                    Style::default().fg(theme.accent_secondary),
-                ));
-                frame.render_widget(suffix, suffix_rect);
-            }
-        } else {
-            let bar = Paragraph::new(Span::styled(
-                format!(" /{}{}", query, match_info),
-                Style::default().fg(theme.accent_secondary),
-            ));
-            frame.render_widget(bar, fl.status_bar);
-        }
-    } else {
-        render_status_bar(
-            frame,
-            fl.status_bar,
-            ctx_mgr,
-            diff_view,
-            theme,
-            model,
-            diff_focused,
-            !cherry_pick_clipboard.is_empty(),
-        );
-    }
+    render_search_bar_or_status_bar(
+        frame,
+        fl.status_bar,
+        search_state,
+        search_textarea,
+        ctx_mgr,
+        diff_view,
+        theme,
+        model,
+        diff_focused,
+        !cherry_pick_clipboard.is_empty(),
+    );
 
     // Render text selection highlight overlay and tooltip
     render_selection_overlay(frame, diff_view, fl.main_panel, theme);
@@ -2242,6 +2191,78 @@ fn get_info_content<'a>(model: &Model, ctx_mgr: &ContextManager) -> Vec<Line<'a>
             }
         }
         _ => vec![Line::from(" lazygitrs")],
+    }
+}
+
+fn render_search_bar_or_status_bar(
+    frame: &mut Frame,
+    status_bar: Rect,
+    search_state: Option<(&str, usize, usize)>,
+    search_textarea: Option<&tui_textarea::TextArea<'_>>,
+    ctx_mgr: &ContextManager,
+    diff_view: &DiffViewState,
+    theme: &Theme,
+    model: &Model,
+    diff_focused: bool,
+    has_copied_commits: bool,
+) {
+    if let Some((query, match_count, current_match)) = search_state {
+        let match_info = if match_count > 0 {
+            format!(" {}/{}", current_match + 1, match_count)
+        } else if !query.is_empty() {
+            " (no matches)".to_string()
+        } else {
+            String::new()
+        };
+
+        if let Some(ta) = search_textarea {
+            // Render: "/" prefix + textarea + match info
+            let prefix_width = 2u16; // " /"
+            let suffix_text = match_info;
+            let suffix_width = suffix_text.len() as u16;
+            let ta_width = status_bar.width.saturating_sub(prefix_width + suffix_width);
+
+            let prefix_rect = Rect::new(status_bar.x, status_bar.y, prefix_width, 1);
+            let prefix = Paragraph::new(Span::styled(
+                " /",
+                Style::default().fg(theme.accent_secondary),
+            ));
+            frame.render_widget(prefix, prefix_rect);
+
+            let ta_rect = Rect::new(status_bar.x + prefix_width, status_bar.y, ta_width, 1);
+            frame.render_widget(ta, ta_rect);
+
+            if !suffix_text.is_empty() {
+                let suffix_rect = Rect::new(
+                    status_bar.x + prefix_width + ta_width,
+                    status_bar.y,
+                    suffix_width,
+                    1,
+                );
+                let suffix = Paragraph::new(Span::styled(
+                    suffix_text,
+                    Style::default().fg(theme.accent_secondary),
+                ));
+                frame.render_widget(suffix, suffix_rect);
+            }
+        } else {
+            let bar = Paragraph::new(Span::styled(
+                format!(" /{}{}", query, match_info),
+                Style::default().fg(theme.accent_secondary),
+            ));
+            frame.render_widget(bar, status_bar);
+        }
+    } else {
+        render_status_bar(
+            frame,
+            status_bar,
+            ctx_mgr,
+            diff_view,
+            theme,
+            model,
+            diff_focused,
+            has_copied_commits,
+        );
     }
 }
 
