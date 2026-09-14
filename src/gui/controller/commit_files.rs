@@ -10,6 +10,9 @@ use crate::model::FileChangeStatus;
 use crate::os::platform::Platform;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
+    if super::diff_grep::is_diff_grep_key(key) {
+        return super::diff_grep::open_diff_grep_picker(gui);
+    }
     if super::commits::matches_key(key, &keybindings.commits.open_log_menu) {
         let selected = gui.context_mgr.selected_active();
         let selected_path = if gui.show_commit_file_tree {

@@ -11,9 +11,14 @@ fn is_word_char(c: char) -> bool {
 
 /// Synchronize a free-entry row and keep it selected. Used where the typed
 /// value is valid on its own and suggestions are optional completions.
+///
+/// An empty `free_entry_category` opts out of the synthetic row (e.g. the
+/// diff-grep dialog only confirms real matches): no row is inserted or
+/// stripped — real items with empty categories are left alone — and the
+/// selection is just kept on a matching item.
 pub fn sync_list_picker_prefer_free_entry(core: &mut ListPickerCore, free_entry_category: &str) {
     sync_list_picker_free_entry(core, free_entry_category);
-    if !core.search_textarea.lines().join("").trim().is_empty() {
+    if !free_entry_category.is_empty() && !core.search_textarea.lines().join("").trim().is_empty() {
         core.selected = 0;
     }
 }
@@ -884,10 +889,29 @@ pub fn remove_free_entry_item(items: &mut Vec<ListPickerItem>, free_entry_catego
 /// After the search textarea changes, sync the free-entry synthetic item and
 /// update selection to the first matching real item (or the free-entry row).
 ///
+/// An empty `free_entry_category` disables the synthetic row entirely (used
+/// by pickers like diff-grep that only confirm real matches): items are left
+/// untouched and selection is clamped to matches. Callers must check the
+/// selection is a real match before confirming (zero matches = no-op).
+///
 /// Scroll offset is left to the caller when matches exist (key vs paste differ);
 /// when search is cleared, `scroll_offset` is reset to 0.
 pub fn sync_list_picker_free_entry(core: &mut ListPickerCore, free_entry_category: &str) {
     let new_search = core.search_textarea.lines().join("");
+    if free_entry_category.is_empty() {
+        if new_search.trim().is_empty() {
+            if !core.items.is_empty() {
+                core.selected = 0;
+            }
+            core.scroll_offset = 0;
+        } else {
+            let matching = list_picker_matching_indices(&core.items, &new_search);
+            if let Some(sel) = list_picker_clamp_selection_to_matches(&matching, core.selected) {
+                core.selected = sel;
+            }
+        }
+        return;
+    }
     remove_free_entry_item(&mut core.items, free_entry_category);
 
     let new_lower = new_search.to_lowercase();
@@ -903,10 +927,12 @@ pub fn sync_list_picker_free_entry(core: &mut ListPickerCore, free_entry_categor
             },
         );
 
-        if let Some(idx) = core.items.iter().skip(1).position(|i| {
-            i.label.to_lowercase().contains(&new_lower)
-                || i.value.to_lowercase().contains(&new_lower)
-        }) {
+        if let Some(idx) = core
+            .items
+            .iter()
+            .skip(1)
+            .position(|i| list_picker_item_matches(i, new_lower.trim()))
+        {
             core.selected = idx + 1;
         } else {
             core.selected = 0;
@@ -918,21 +944,106 @@ pub fn sync_list_picker_free_entry(core: &mut ListPickerCore, free_entry_categor
 }
 
 /// Whether a list-picker row matches the current search (empty search = all).
+/// Multi-word queries are order-independent: every whitespace-separated token
+/// must appear as a case-insensitive substring of label or value.
 pub fn list_picker_item_matches(item: &ListPickerItem, search_lower: &str) -> bool {
     if search_lower.is_empty() {
         return true;
     }
-    item.label.to_lowercase().contains(search_lower)
-        || item.value.to_lowercase().contains(search_lower)
+    let label = item.label.to_lowercase();
+    let value = item.value.to_lowercase();
+    search_lower
+        .split_whitespace()
+        .all(|tok| label.contains(tok) || value.contains(tok))
 }
 
-/// Indices into `items` that match `search` (trimmed, case-insensitive).
+/// Lowercased whitespace-separated tokens of a picker query, in order.
+/// Empty / whitespace-only queries yield no tokens (match-all).
+pub fn list_picker_search_tokens(search: &str) -> Vec<String> {
+    search
+        .split_whitespace()
+        .map(|t| t.to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// Whether a `?` command-palette entry matches pre-tokenized `tokens`.
+/// Every token must appear in the key or the description (order-free),
+/// mirroring the list-picker token-AND behavior. Empty tokens = match-all.
+pub fn command_palette_entry_matches(key: &str, description: &str, tokens: &[String]) -> bool {
+    if tokens.is_empty() {
+        return true;
+    }
+    let key_lower = key.to_lowercase();
+    let desc_lower = description.to_lowercase();
+    tokens
+        .iter()
+        .all(|tok| key_lower.contains(tok) || desc_lower.contains(tok))
+}
+
+/// Byte ranges in `label` covered by any of `tokens` (already lowercased),
+/// matched case-insensitively. Sorted, non-overlapping (overlaps merged).
+///
+/// Ranges index the original `label` so the caller can slice it directly for
+/// highlighting. A hit is only reported when the original slice lowercases
+/// back to the token, which keeps byte indices valid for non-ASCII text
+/// (slices that don't round-trip are skipped).
+pub fn list_picker_highlight_ranges(label: &str, tokens: &[String]) -> Vec<(usize, usize)> {
+    if tokens.is_empty() || label.is_empty() {
+        return Vec::new();
+    }
+    let lower = label.to_lowercase();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for tok in tokens {
+        if tok.is_empty() {
+            continue;
+        }
+        for (start, _) in lower.match_indices(tok.as_str()) {
+            let end = start + tok.len();
+            let Some(slice) = label.get(start..end) else {
+                continue;
+            };
+            if slice.to_lowercase() != *tok {
+                continue;
+            }
+            ranges.push((start, end));
+        }
+    }
+    if ranges.is_empty() {
+        return ranges;
+    }
+    ranges.sort();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+    for (s, e) in ranges {
+        if let Some(last) = merged.last_mut() {
+            if s <= last.1 {
+                last.1 = last.1.max(e);
+                continue;
+            }
+        }
+        merged.push((s, e));
+    }
+    merged
+}
+
+/// Indices into `items` that match `search` (trimmed, case-insensitive,
+/// order-independent tokens). Lowercases the query once and each item once.
 pub fn list_picker_matching_indices(items: &[ListPickerItem], search: &str) -> Vec<usize> {
     let search_lower = search.trim().to_lowercase();
+    if search_lower.is_empty() {
+        return (0..items.len()).collect();
+    }
+    let tokens: Vec<&str> = search_lower.split_whitespace().collect();
     items
         .iter()
         .enumerate()
-        .filter(|(_, item)| list_picker_item_matches(item, &search_lower))
+        .filter(|(_, item)| {
+            let label = item.label.to_lowercase();
+            let value = item.value.to_lowercase();
+            tokens
+                .iter()
+                .all(|tok| label.contains(tok) || value.contains(tok))
+        })
         .map(|(i, _)| i)
         .collect()
 }
@@ -1151,6 +1262,134 @@ mod free_entry_tests {
         assert_eq!(list_picker_matching_indices(&items, "SRC"), vec![0, 2]);
         assert_eq!(list_picker_matching_indices(&items, ""), vec![0, 1, 2]);
         assert!(list_picker_matching_indices(&items, "zzz").is_empty());
+    }
+
+    #[test]
+    fn matching_is_order_independent() {
+        let items = vec![
+            item("KeyCode Enter handling", ""),
+            item("Enter KeyCode swapped", ""),
+            item("unrelated line", ""),
+        ];
+        // Both orders match the same two rows.
+        assert_eq!(
+            list_picker_matching_indices(&items, "KeyCode Enter"),
+            vec![0, 1]
+        );
+        assert_eq!(
+            list_picker_matching_indices(&items, "Enter KeyCode"),
+            vec![0, 1]
+        );
+        // Extra whitespace is ignored; all tokens must be present.
+        assert_eq!(
+            list_picker_matching_indices(&items, "  enter   keycode  "),
+            vec![0, 1]
+        );
+        assert_eq!(
+            list_picker_matching_indices(&items, "KeyCode unrelated"),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn highlight_ranges_cover_each_token_in_either_order() {
+        let tokens = list_picker_search_tokens("KeyCode Enter");
+        assert_eq!(tokens, vec!["keycode".to_string(), "enter".to_string()]);
+        // Token order in the query must not matter for the ranges.
+        let rev = list_picker_search_tokens("Enter KeyCode");
+        for label in ["KeyCode Enter handling", "Enter KeyCode swapped"] {
+            let a = list_picker_highlight_ranges(label, &tokens);
+            let b = list_picker_highlight_ranges(label, &rev);
+            assert_eq!(a, b);
+            assert_eq!(a.len(), 2);
+            // Ranges slice back to the original-cased text.
+            let joined: String = a
+                .iter()
+                .map(|(s, e)| label[*s..*e].to_string())
+                .collect::<Vec<_>>()
+                .join("|")
+                .to_lowercase();
+            assert!(joined.contains("keycode"), "{label} -> {joined}");
+            assert!(joined.contains("enter"), "{label} -> {joined}");
+        }
+        // Overlapping tokens merge into one range.
+        let tokens = list_picker_search_tokens("enter ent");
+        assert_eq!(
+            list_picker_highlight_ranges("Enter here", &tokens),
+            vec![(0, 5)]
+        );
+        // Empty query / no hits.
+        assert!(list_picker_highlight_ranges("abc", &[]).is_empty());
+        assert!(list_picker_highlight_ranges("abc", &list_picker_search_tokens("zzz")).is_empty());
+    }
+
+    #[test]
+    fn command_palette_matching_is_order_independent() {
+        let tokens = list_picker_search_tokens("diff grep");
+        assert!(command_palette_entry_matches(
+            "<c-f>",
+            "Grep diff contents",
+            &tokens
+        ));
+        let rev = list_picker_search_tokens("grep diff");
+        assert!(command_palette_entry_matches(
+            "<c-f>",
+            "Grep diff contents",
+            &rev
+        ));
+        // All tokens must be present; empty = match-all.
+        assert!(!command_palette_entry_matches(
+            "<c-f>",
+            "Grep diff contents",
+            &list_picker_search_tokens("diff zzz")
+        ));
+        assert!(command_palette_entry_matches(
+            "<c-f>",
+            "Grep diff contents",
+            &[]
+        ));
+        // Tokens may split across key and description.
+        assert!(command_palette_entry_matches(
+            "<c-f>",
+            "Grep diff contents",
+            &list_picker_search_tokens("c-f grep")
+        ));
+    }
+
+    #[test]
+    fn empty_category_disables_synthetic_row_and_clamps_to_matches() {
+        // Flat list with empty categories (like the diff-grep dialog): sync
+        // must not insert or strip any row.
+        let mut core = core_with(
+            vec![item("src/main.rs", ""), item("src/gui/mod.rs", "")],
+            "gui",
+        );
+        core.selected = 0;
+
+        sync_list_picker_free_entry(&mut core, "");
+
+        assert_eq!(core.items.len(), 2);
+        assert_eq!(core.selected, 1);
+        assert_eq!(core.items[core.selected].value, "src/gui/mod.rs");
+
+        // Zero matches: items untouched, selection left for the Enter guard.
+        let mut core = core_with(vec![item("src/main.rs", "")], "zzz");
+        sync_list_picker_free_entry(&mut core, "");
+        assert_eq!(core.items.len(), 1);
+        assert_eq!(core.items[0].value, "src/main.rs");
+
+        // Clearing the search resets to the top without touching items.
+        let mut core = core_with(vec![item("a", ""), item("b", "")], "");
+        core.selected = 1;
+        sync_list_picker_free_entry(&mut core, "");
+        assert_eq!(core.items.len(), 2);
+        assert_eq!(core.selected, 0);
+        assert_eq!(core.scroll_offset, 0);
+
+        // The prefer- variant also skips its force-select for empty category.
+        let mut core = core_with(vec![item("src/main.rs", "")], "zzz");
+        sync_list_picker_prefer_free_entry(&mut core, "");
+        assert_eq!(core.items.len(), 1);
     }
 
     #[test]

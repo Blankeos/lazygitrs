@@ -72,6 +72,7 @@ lazygitrs upgrade 0.0.32   # specific version
   - [x] `git diff/compare` (global `W`) and then asks what branch/commit A and B, has quick search.
   - [x] `git rebase` (global `I`) and then asks rebase on top of what branch/commit.
   - [x] 🎨 Themes + Theme-Picker!
+- [x] **Grep diff contents** — `Ctrl-F` in Files / Commit Files / Compare searches hunk lines in-context, `Enter` jumps to the file in the current list.
 
 ### Configuration
 

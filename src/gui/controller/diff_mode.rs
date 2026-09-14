@@ -28,6 +28,11 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         return handle_file_search_key(gui, key);
     }
 
+    // Ctrl-F: same-context grep dialog over all hunk contents.
+    if super::diff_grep::is_diff_grep_key(key) {
+        return super::diff_grep::open_diff_grep_picker(gui);
+    }
+
     // q to exit diff mode
     if key.code == KeyCode::Char('q') {
         gui.diff_mode.exit();
@@ -823,6 +828,7 @@ fn show_diff_mode_command_palette(gui: &mut Gui) {
             CommandEntry::keybinding("g/G".into(), "Go to top / bottom".into()),
             CommandEntry::keybinding("/".into(), "Search (files or diff content)".into()),
             CommandEntry::keybinding("n/N".into(), "Next / previous search match".into()),
+            CommandEntry::keybinding("<c-f>".into(), "Grep diff contents".into()),
             CommandEntry::keybinding("y".into(), "Copy to clipboard".into()),
             CommandEntry::keybinding("?".into(), "Show command palette".into()),
         ],

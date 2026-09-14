@@ -12,6 +12,9 @@ use crate::os::platform::Platform;
 use crate::pager::side_by_side::DiffPanel;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
+    if super::diff_grep::is_diff_grep_key(key) {
+        return super::diff_grep::open_diff_grep_picker(gui);
+    }
     if super::commits::matches_key(key, &keybindings.commits.open_log_menu) {
         return super::commits::show_files_filtering_menu(gui);
     }

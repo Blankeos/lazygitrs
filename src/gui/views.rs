@@ -3335,8 +3335,8 @@ pub fn render_popup(
         } => {
             // Collect all visible entries (filtered by search) as flat list with section headers
             let search = search_textarea.lines().join("");
-            let search_lower = search.to_lowercase();
-            let has_search = !search_lower.is_empty();
+            let tokens = super::popup::list_picker_search_tokens(&search);
+            let has_search = !tokens.is_empty();
 
             // Build flat display list: (is_header, key, description, executable)
             let mut display: Vec<(bool, String, String, bool)> = Vec::new();
@@ -3346,8 +3346,11 @@ pub fn render_popup(
                         .entries
                         .iter()
                         .filter(|e| {
-                            e.key.to_lowercase().contains(&search_lower)
-                                || e.description.to_lowercase().contains(&search_lower)
+                            super::popup::command_palette_entry_matches(
+                                &e.key,
+                                &e.description,
+                                &tokens,
+                            )
                         })
                         .collect()
                 } else {
@@ -3493,23 +3496,33 @@ pub fn render_popup(
                         if !has_search {
                             return vec![Span::styled(text.to_string(), base)];
                         }
-                        let lower = text.to_lowercase();
-                        if let Some(pos) = lower.find(&search_lower) {
-                            let before = &text[..pos];
-                            let matched = &text[pos..pos + search_lower.len()];
-                            let after = &text[pos + search_lower.len()..];
-                            let mut s = Vec::new();
-                            if !before.is_empty() {
-                                s.push(Span::styled(before.to_string(), base));
-                            }
-                            s.push(Span::styled(matched.to_string(), highlight_style));
-                            if !after.is_empty() {
-                                s.push(Span::styled(after.to_string(), base));
-                            }
-                            s
-                        } else {
-                            vec![Span::styled(text.to_string(), base)]
+                        // Highlight every query token (order-free), mirroring
+                        // the list-picker highlight.
+                        let ranges = super::popup::list_picker_highlight_ranges(text, &tokens);
+                        if ranges.is_empty() {
+                            return vec![Span::styled(text.to_string(), base)];
                         }
+                        let mut s = Vec::new();
+                        let mut cursor = 0usize;
+                        for (start, end) in ranges {
+                            if start > cursor {
+                                if let Some(chunk) = text.get(cursor..start) {
+                                    if !chunk.is_empty() {
+                                        s.push(Span::styled(chunk.to_string(), base));
+                                    }
+                                }
+                            }
+                            if let Some(chunk) = text.get(start..end) {
+                                s.push(Span::styled(chunk.to_string(), highlight_style));
+                            }
+                            cursor = end;
+                        }
+                        if let Some(rest) = text.get(cursor..) {
+                            if !rest.is_empty() {
+                                s.push(Span::styled(rest.to_string(), base));
+                            }
+                        }
+                        s
                     };
 
                     let mut spans = build_spans(&key_display, key_base_style);
@@ -3818,31 +3831,38 @@ fn render_list_picker(
                 Style::default().fg(theme.accent_secondary),
             )];
 
-            // Build label spans with search match highlighting
+            // Build label spans with search match highlighting.
+            // Multi-word queries highlight every token in either order,
+            // mirroring `list_picker_matching_indices` (token-AND).
             if !search_lower.is_empty() {
-                let label_lower = label.to_lowercase();
-                if let Some(pos) = label_lower.find(&search_lower) {
-                    let before = &label[..pos];
-                    let matched = &label[pos..pos + search_lower.len()];
-                    let after = &label[pos + search_lower.len()..];
-                    if !before.is_empty() {
-                        spans.push(Span::styled(
-                            before.to_string(),
-                            Style::default().fg(base_fg),
-                        ));
-                    }
+                let tokens = super::popup::list_picker_search_tokens(&search);
+                let ranges = super::popup::list_picker_highlight_ranges(label, &tokens);
+                if ranges.is_empty() {
+                    spans.push(Span::styled(label.clone(), Style::default().fg(base_fg)));
+                } else {
                     let match_style = Style::default()
                         .fg(highlight_fg)
                         .add_modifier(Modifier::BOLD);
-                    spans.push(Span::styled(matched.to_string(), match_style));
-                    if !after.is_empty() {
-                        spans.push(Span::styled(
-                            after.to_string(),
-                            Style::default().fg(base_fg),
-                        ));
+                    let base_style = Style::default().fg(base_fg);
+                    let mut cursor = 0usize;
+                    for (s, e) in ranges {
+                        if s > cursor {
+                            if let Some(chunk) = label.get(cursor..s) {
+                                if !chunk.is_empty() {
+                                    spans.push(Span::styled(chunk.to_string(), base_style));
+                                }
+                            }
+                        }
+                        if let Some(chunk) = label.get(s..e) {
+                            spans.push(Span::styled(chunk.to_string(), match_style));
+                        }
+                        cursor = e;
                     }
-                } else {
-                    spans.push(Span::styled(label.clone(), Style::default().fg(base_fg)));
+                    if let Some(rest) = label.get(cursor..) {
+                        if !rest.is_empty() {
+                            spans.push(Span::styled(rest.to_string(), base_style));
+                        }
+                    }
                 }
             } else {
                 let style = if is_selected {
