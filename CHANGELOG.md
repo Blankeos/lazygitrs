@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.37] - 2026-09-14
+
+### Bug Fixes
+
+- Use localtime_s on Windows for commit dates by @Blankeos
+- Change j/k hint to arrow symbols in popup hint bar by @Blankeos
+- Match lazygit commit and merge glyphs by @Blankeos
+- Refresh diff and show conflict output on failed pop/apply by @Blankeos
+
+### Chores
+
+- Backtrack unreleased v0.0.37/v0.0.38 to v0.0.36 by @Blankeos
+
+### Documentation
+
+- Simplify Helix and Neovim integration instructions by @Blankeos
+
+### Features
+
+- Add Ctrl-F grep over diff contents by @Blankeos
+- Render commit refs and tags lazygit-style by @Blankeos
+- Match lazygit commit list row layout with local-time dates and author columns by @Blankeos
+
+### Refactor
+
+- Extract search bar/status bar rendering into helper by @Blankeos
+
 ## [0.0.36] - 2026-09-06
 
 ### Bug Fixes
