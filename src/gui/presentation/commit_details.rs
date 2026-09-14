@@ -367,7 +367,11 @@ fn local_from_unix(secs: i64) -> (i64, u32, u32, u32, u32) {
     unsafe {
         let t = secs as libc::time_t;
         let mut tm: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&t, &mut tm).is_null() {
+        #[cfg(windows)]
+        let ok = libc::localtime_s(&mut tm, &t) == 0;
+        #[cfg(not(windows))]
+        let ok = !libc::localtime_r(&t, &mut tm).is_null();
+        if !ok {
             return civil_from_unix(secs);
         }
         (

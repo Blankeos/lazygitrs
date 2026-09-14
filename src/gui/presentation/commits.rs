@@ -269,12 +269,16 @@ fn smart_date(unix_ts: i64) -> String {
 }
 
 /// Local-time conversion via libc (matches lazygit's `In(now.Location())`).
-/// Falls back to UTC (`civil_from_unix`) if `localtime_r` fails.
+/// Falls back to UTC (`civil_from_unix`) if local conversion fails.
 fn local_from_unix(secs: i64) -> (i64, u32, u32, u32, u32) {
     unsafe {
         let t = secs as libc::time_t;
         let mut tm: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&t, &mut tm).is_null() {
+        #[cfg(windows)]
+        let ok = libc::localtime_s(&mut tm, &t) == 0;
+        #[cfg(not(windows))]
+        let ok = !libc::localtime_r(&t, &mut tm).is_null();
+        if !ok {
             return civil_from_unix(secs);
         }
         (
