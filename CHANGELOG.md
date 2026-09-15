@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.38] - 2026-09-15
+
+### Bug Fixes
+
+- Size graph rows for deferred merge connectors by @Blankeos
+
 ## [0.0.37] - 2026-09-14
 
 ### Bug Fixes
