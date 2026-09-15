@@ -144,7 +144,14 @@ pub fn compute_graph(commits: &[(String, Vec<String>)]) -> Vec<GraphRow> {
         }
 
         // Build cells from a side-by-side comparison of lanes_before vs lanes.
-        let width = lanes.len().max(lanes_before.len()).max(commit_col + 1);
+        // Deferred endpoints may reference a trailing source lane that has
+        // since been popped, so include them in the width (never skip).
+        let deferred_width = deferred_cols.iter().max().map_or(0, |m| m + 1);
+        let width = lanes
+            .len()
+            .max(lanes_before.len())
+            .max(commit_col + 1)
+            .max(deferred_width);
         let mut cells: Vec<Cell> = vec![Cell::default(); width];
 
         let is_merge = !merge_parents.is_empty();
@@ -336,6 +343,44 @@ mod tests {
             out.push_str(second);
         }
         out.trim_end().to_string()
+    }
+
+    #[test]
+    fn deferred_connector_outlives_its_source_lane() {
+        let commits = vec![
+            ("tip".into(), vec!["root".into()]),
+            ("merge".into(), vec!["side_root".into(), "root".into()]),
+            ("side_root".into(), vec![]),
+            ("root".into(), vec![]),
+        ];
+        let rows = compute_graph(&commits);
+        let last = rows.last().unwrap();
+        assert_eq!(last.cells.len(), 2);
+        assert_eq!(render_plain(last), "○──");
+        assert_eq!(last.cells[0].right_style_col, Some(1));
+        assert!(last.cells[1].left);
+    }
+
+    #[test]
+    fn deferred_connector_spanning_multiple_popped_lanes() {
+        // Merge at the far-right lane defers to lane 0, then the middle and
+        // far-right lanes both close before lane 0 terminates. Width must
+        // still cover the deferred endpoint (col 2) after trailing pops.
+        let commits = vec![
+            ("tip".into(), vec!["a".into()]),
+            ("m1".into(), vec!["b".into(), "c".into()]),
+            ("c".into(), vec!["d".into(), "a".into()]),
+            ("b".into(), vec![]),
+            ("d".into(), vec![]),
+            ("a".into(), vec![]),
+        ];
+        let rows = compute_graph(&commits);
+        let last = rows.last().unwrap();
+        assert_eq!(last.cells.len(), 3);
+        assert_eq!(render_plain(last), "○────");
+        assert_eq!(last.cells[0].right_style_col, Some(2));
+        assert!(last.cells[1].left && last.cells[1].right);
+        assert!(last.cells[2].left);
     }
 
     #[test]
