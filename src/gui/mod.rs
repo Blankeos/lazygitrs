@@ -3429,6 +3429,10 @@ impl Gui {
             return self.handle_diff_focused_key(key);
         }
 
+        if matches_key(key, &keybindings.universal.custom_command_prompt) {
+            return controller::custom_commands::open_custom_command_prompt(self);
+        }
+
         // Global keybindings
         if matches_key(key, &keybindings.universal.quit)
             || matches_key(key, &keybindings.universal.quit_alt1)
@@ -5617,6 +5621,10 @@ impl Gui {
                 CommandEntry::keybinding("I".into(), "Interactive rebase onto...".into()),
                 CommandEntry::keybinding("G".into(), "Reset to...".into()),
                 CommandEntry::keybinding("1-5".into(), "Jump to panel".into()),
+                CommandEntry::keybinding(
+                    kb.universal.custom_command_prompt.clone(),
+                    "Execute shell command".into(),
+                ),
                 CommandEntry::keybinding("?".into(), "Show command palette".into()),
                 CommandEntry::action(
                     "".into(),
@@ -8990,6 +8998,75 @@ mod terminal_mouse_tests {
             keys.insert(result.diff_key);
         }
         assert_eq!(keys.len(), 8);
+    }
+
+    struct TempRepo {
+        path: PathBuf,
+    }
+
+    impl TempRepo {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "lazygitrs-shell-test-{}-{}-{}",
+                name,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            let _ = std::process::Command::new("git")
+                .args(["init", "-b", "main"])
+                .current_dir(&path)
+                .output();
+            Self { path }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn colon_key_opens_custom_command_prompt() {
+        let repo = TempRepo::new("colon-shell-prompt");
+        let config = crate::config::AppConfig::load(false).unwrap_or_else(|_| {
+            let mut c = crate::config::AppConfig {
+                debug: false,
+                version: "test".into(),
+                user_config: crate::config::UserConfig::default(),
+                app_state: crate::config::AppState::default(),
+                config_dir: repo.path().to_path_buf(),
+                state_dir: repo.path().to_path_buf(),
+                state_path: repo.path().join("state.yml"),
+            };
+            c
+        });
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(config, git, None).unwrap();
+
+        assert!(matches!(gui.popup, PopupState::None));
+
+        // Send ':' key
+        let colon = KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE);
+        gui.handle_key(colon).unwrap();
+
+        match &gui.popup {
+            PopupState::Input {
+                title, is_commit, ..
+            } => {
+                assert_eq!(title, "Execute Shell Command");
+                assert!(!is_commit);
+            }
+            _ => panic!("Expected PopupState::Input"),
+        }
     }
 }
 
