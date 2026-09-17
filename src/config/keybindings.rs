@@ -126,6 +126,16 @@ pub struct UniversalKeybinding {
     pub reset_side_panel: String,
     #[serde(rename = "toggleDiffViewLayout")]
     pub toggle_diff_view_layout: String,
+    #[serde(rename = "foldDirectory")]
+    pub fold_directory: String,
+    #[serde(rename = "treeParent")]
+    pub tree_parent: String,
+    #[serde(rename = "treeChild")]
+    pub tree_child: String,
+    #[serde(rename = "treePrevSibling")]
+    pub tree_prev_sibling: String,
+    #[serde(rename = "treeNextSibling")]
+    pub tree_next_sibling: String,
 }
 
 impl Default for UniversalKeybinding {
@@ -181,6 +191,11 @@ impl Default for UniversalKeybinding {
             main_panel_full: "<a-j>".into(),
             reset_side_panel: "<a-r>".into(),
             toggle_diff_view_layout: "\\".into(),
+            fold_directory: "-".into(),
+            tree_parent: ",".into(),
+            tree_child: ".".into(),
+            tree_prev_sibling: "<".into(),
+            tree_next_sibling: ">".into(),
         }
     }
 }
@@ -447,4 +462,34 @@ pub fn parse_key(s: &str) -> Option<KeyEvent> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tree_keybindings_defaults_and_deserialization() {
+        let default_config = KeybindingConfig::default();
+        assert_eq!(default_config.universal.fold_directory, "-");
+        assert_eq!(default_config.universal.tree_parent, ",");
+        assert_eq!(default_config.universal.tree_child, ".");
+        assert_eq!(default_config.universal.tree_prev_sibling, "<");
+        assert_eq!(default_config.universal.tree_next_sibling, ">");
+
+        let yaml = r#"
+universal:
+  foldDirectory: "_"
+  treeParent: "p"
+  treeChild: "c"
+  treePrevSibling: "h"
+  treeNextSibling: "l"
+"#;
+        let parsed: KeybindingConfig = serde_yaml::from_str(yaml).expect("valid yaml");
+        assert_eq!(parsed.universal.fold_directory, "_");
+        assert_eq!(parsed.universal.tree_parent, "p");
+        assert_eq!(parsed.universal.tree_child, "c");
+        assert_eq!(parsed.universal.tree_prev_sibling, "h");
+        assert_eq!(parsed.universal.tree_next_sibling, "l");
+    }
 }

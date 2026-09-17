@@ -3708,7 +3708,18 @@ impl Gui {
         // `.` toggles the commit-details box when in any commit-related
         // context.  Kept outside per-context controllers so the binding is
         // consistent across Commits / BranchCommits / Reflog / CommitFiles.
-        if key.code == KeyCode::Char('.') && self.context_has_commit_details() {
+        if key.code == KeyCode::Char('.')
+            && self.context_has_commit_details()
+            && !(self.show_commit_file_tree
+                && matches_key(
+                    key,
+                    &self.config.user_config.keybinding.universal.tree_child,
+                )
+                && matches!(
+                    self.context_mgr.active(),
+                    ContextId::CommitFiles | ContextId::BranchCommitFiles | ContextId::StashFiles
+                ))
+        {
             self.show_commit_details = !self.show_commit_details;
             self.persist_commit_details_visibility();
             return Ok(());
@@ -3998,6 +4009,112 @@ impl Gui {
             // q quits the app (same as global behavior)
             KeyCode::Char('q') => {
                 self.should_quit = true;
+            }
+            _ if matches_key(
+                key,
+                &self.config.user_config.keybinding.universal.tree_parent,
+            ) || matches_key(
+                key,
+                &self.config.user_config.keybinding.universal.tree_child,
+            ) || matches_key(
+                key,
+                &self
+                    .config
+                    .user_config
+                    .keybinding
+                    .universal
+                    .tree_next_sibling,
+            ) || matches_key(
+                key,
+                &self
+                    .config
+                    .user_config
+                    .keybinding
+                    .universal
+                    .tree_prev_sibling,
+            ) =>
+            {
+                let active = self.context_mgr.active();
+                let is_parent = matches_key(
+                    key,
+                    &self.config.user_config.keybinding.universal.tree_parent,
+                );
+                let is_child = matches_key(
+                    key,
+                    &self.config.user_config.keybinding.universal.tree_child,
+                );
+                let is_next = matches_key(
+                    key,
+                    &self
+                        .config
+                        .user_config
+                        .keybinding
+                        .universal
+                        .tree_next_sibling,
+                );
+
+                let new_idx = match active {
+                    ContextId::Files if self.show_file_tree => {
+                        let selected = self.context_mgr.selected(ContextId::Files);
+                        if is_parent {
+                            crate::model::file_tree::find_parent_idx(
+                                &self.file_tree_nodes,
+                                selected,
+                            )
+                        } else if is_child {
+                            crate::model::file_tree::find_first_child_idx(
+                                &self.file_tree_nodes,
+                                selected,
+                            )
+                        } else if is_next {
+                            crate::model::file_tree::find_next_sibling_idx(
+                                &self.file_tree_nodes,
+                                selected,
+                            )
+                        } else {
+                            crate::model::file_tree::find_prev_sibling_idx(
+                                &self.file_tree_nodes,
+                                selected,
+                            )
+                        }
+                        .map(|idx| (ContextId::Files, idx))
+                    }
+                    ContextId::CommitFiles
+                    | ContextId::StashFiles
+                    | ContextId::BranchCommitFiles
+                        if self.show_commit_file_tree =>
+                    {
+                        let selected = self.context_mgr.selected(active);
+                        if is_parent {
+                            crate::model::file_tree::find_parent_idx(
+                                &self.commit_file_tree_nodes,
+                                selected,
+                            )
+                        } else if is_child {
+                            crate::model::file_tree::find_first_child_idx(
+                                &self.commit_file_tree_nodes,
+                                selected,
+                            )
+                        } else if is_next {
+                            crate::model::file_tree::find_next_sibling_idx(
+                                &self.commit_file_tree_nodes,
+                                selected,
+                            )
+                        } else {
+                            crate::model::file_tree::find_prev_sibling_idx(
+                                &self.commit_file_tree_nodes,
+                                selected,
+                            )
+                        }
+                        .map(|idx| (active, idx))
+                    }
+                    _ => None,
+                };
+                if let Some((ctx, idx)) = new_idx {
+                    self.context_mgr.set_selected(ctx, idx);
+                    self.needs_diff_refresh = true;
+                }
+                return Ok(());
             }
             // j/k/up/down scroll line by line
             KeyCode::Char('j') | KeyCode::Down => {
@@ -5666,6 +5783,21 @@ impl Gui {
                         kb.files.toggle_tree_view.clone(),
                         "Toggle tree view".into(),
                     ),
+                    CommandEntry::keybinding(
+                        kb.universal.fold_directory.clone(),
+                        "Fold / unfold directory node".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        format!("{} / {}", kb.universal.tree_parent, kb.universal.tree_child),
+                        "Navigate to parent / child node in tree".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        format!(
+                            "{} / {}",
+                            kb.universal.tree_prev_sibling, kb.universal.tree_next_sibling
+                        ),
+                        "Navigate to prev / next sibling in tree".into(),
+                    ),
                     CommandEntry::keybinding(kb.files.fetch.clone(), "Fetch".into()),
                     CommandEntry::keybinding(kb.files.ignore_file.clone(), "Ignore file".into()),
                     CommandEntry::keybinding("d".into(), "Discard changes".into()),
@@ -5868,6 +6000,21 @@ impl Gui {
                         kb.files.toggle_tree_view.clone(),
                         "Toggle tree view".into(),
                     ),
+                    CommandEntry::keybinding(
+                        kb.universal.fold_directory.clone(),
+                        "Fold / unfold directory node".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        format!("{} / {}", kb.universal.tree_parent, kb.universal.tree_child),
+                        "Navigate to parent / child node in tree".into(),
+                    ),
+                    CommandEntry::keybinding(
+                        format!(
+                            "{} / {}",
+                            kb.universal.tree_prev_sibling, kb.universal.tree_next_sibling
+                        ),
+                        "Navigate to prev / next sibling in tree".into(),
+                    ),
                     CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
                     CommandEntry::keybinding(".".into(), "Toggle commit details panel".into()),
                 ],
@@ -6055,6 +6202,30 @@ impl Gui {
             CommandEntry::keybinding("e".into(), "Edit file at line".into()),
             CommandEntry::keybinding("o".into(), "Open file in default program".into()),
             CommandEntry::keybinding("y".into(), "Copy selected text".into()),
+            CommandEntry::keybinding(
+                format!(
+                    "{} / {}",
+                    self.config.user_config.keybinding.universal.tree_parent,
+                    self.config.user_config.keybinding.universal.tree_child
+                ),
+                "Navigate to parent / child node in tree".into(),
+            ),
+            CommandEntry::keybinding(
+                format!(
+                    "{} / {}",
+                    self.config
+                        .user_config
+                        .keybinding
+                        .universal
+                        .tree_prev_sibling,
+                    self.config
+                        .user_config
+                        .keybinding
+                        .universal
+                        .tree_next_sibling
+                ),
+                "Navigate to prev / next sibling in tree".into(),
+            ),
             CommandEntry::keybinding("q".into(), "Quit".into()),
             CommandEntry::keybinding("+/_".into(), "Enlarge / shrink panel".into()),
             CommandEntry::keybinding(";".into(), "Toggle command log".into()),

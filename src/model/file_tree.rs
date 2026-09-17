@@ -68,6 +68,51 @@ mod tests {
         assert_eq!(nodes[1].path, "src/views/provider_oauth_flow.rs");
         assert_eq!(nodes[1].file_index, Some(0));
     }
+
+    #[test]
+    fn test_tree_navigation() {
+        struct TestNode {
+            depth: usize,
+        }
+
+        impl NavigableTreeNode for TestNode {
+            fn depth(&self) -> usize {
+                self.depth
+            }
+        }
+
+        // Tree structure:
+        // 0: root (depth 0, dir)
+        // 1:   child1 (depth 1, dir)
+        // 2:     grandchild1 (depth 2, file)
+        // 3:     grandchild2 (depth 2, file)
+        // 4:   child2 (depth 1, file)
+        let nodes = vec![
+            TestNode { depth: 0 },
+            TestNode { depth: 1 },
+            TestNode { depth: 2 },
+            TestNode { depth: 2 },
+            TestNode { depth: 1 },
+        ];
+
+        // Parent navigation
+        assert_eq!(find_parent_idx(&nodes, 2), Some(1));
+        assert_eq!(find_parent_idx(&nodes, 1), Some(0));
+        assert_eq!(find_parent_idx(&nodes, 0), None);
+        assert_eq!(find_parent_idx(&nodes, 4), Some(0));
+
+        // First child navigation
+        assert_eq!(find_first_child_idx(&nodes, 0), Some(1));
+        assert_eq!(find_first_child_idx(&nodes, 1), Some(2));
+        assert_eq!(find_first_child_idx(&nodes, 2), None); // Not a directory / no child
+
+        // Sibling navigation
+        assert_eq!(find_next_sibling_idx(&nodes, 2), Some(3)); // grandchild1 -> grandchild2
+        assert_eq!(find_next_sibling_idx(&nodes, 3), None); // grandchild2 is last child
+        assert_eq!(find_next_sibling_idx(&nodes, 1), Some(4)); // child1 -> child2 (skipping grandchildren!)
+        assert_eq!(find_prev_sibling_idx(&nodes, 3), Some(2)); // grandchild2 -> grandchild1
+        assert_eq!(find_prev_sibling_idx(&nodes, 4), Some(1)); // child2 -> child1 (skipping grandchildren!)
+    }
 }
 
 fn rename_leaf_name(name: &str) -> Option<String> {
@@ -460,4 +505,91 @@ fn compress_single_child_commit_dirs(nodes: &mut Vec<CommitFileTreeNode>) {
 
         i += 1;
     }
+}
+
+pub trait NavigableTreeNode {
+    fn depth(&self) -> usize;
+}
+
+impl NavigableTreeNode for FileTreeNode {
+    fn depth(&self) -> usize {
+        self.depth
+    }
+}
+
+impl NavigableTreeNode for CommitFileTreeNode {
+    fn depth(&self) -> usize {
+        self.depth
+    }
+}
+
+pub fn find_parent_idx<T: NavigableTreeNode>(nodes: &[T], current_idx: usize) -> Option<usize> {
+    if current_idx == 0 || nodes.is_empty() || current_idx >= nodes.len() {
+        return None;
+    }
+    let current_depth = nodes[current_idx].depth();
+    if current_depth == 0 {
+        return None;
+    }
+    let target_depth = current_depth - 1;
+    for idx in (0..current_idx).rev() {
+        if nodes[idx].depth() == target_depth {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+pub fn find_first_child_idx<T: NavigableTreeNode>(
+    nodes: &[T],
+    current_idx: usize,
+) -> Option<usize> {
+    if current_idx + 1 >= nodes.len() || current_idx >= nodes.len() {
+        return None;
+    }
+    let current_depth = nodes[current_idx].depth();
+    if nodes[current_idx + 1].depth() == current_depth + 1 {
+        return Some(current_idx + 1);
+    }
+    None
+}
+
+pub fn find_prev_sibling_idx<T: NavigableTreeNode>(
+    nodes: &[T],
+    current_idx: usize,
+) -> Option<usize> {
+    if current_idx == 0 || nodes.is_empty() || current_idx >= nodes.len() {
+        return None;
+    }
+    let current_depth = nodes[current_idx].depth();
+    for idx in (0..current_idx).rev() {
+        let depth = nodes[idx].depth();
+        if depth < current_depth {
+            break;
+        }
+        if depth == current_depth {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+pub fn find_next_sibling_idx<T: NavigableTreeNode>(
+    nodes: &[T],
+    current_idx: usize,
+) -> Option<usize> {
+    if current_idx + 1 >= nodes.len() || current_idx >= nodes.len() {
+        return None;
+    }
+    let current_depth = nodes[current_idx].depth();
+    for idx in (current_idx + 1)..nodes.len() {
+        let depth = nodes[idx].depth();
+        if depth < current_depth {
+            break;
+        }
+        if depth == current_depth {
+            return Some(idx);
+        }
+    }
+    None
 }
