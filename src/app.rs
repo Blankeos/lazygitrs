@@ -10,10 +10,16 @@ pub struct App {
     pub config: AppConfig,
     pub repo_path: PathBuf,
     pub filter_path: Option<PathBuf>,
+    pub start_in_commits: bool,
 }
 
 impl App {
-    pub fn new(repo_path: PathBuf, debug: bool, filter_path: Option<PathBuf>) -> Result<Self> {
+    pub fn new(
+        repo_path: PathBuf,
+        debug: bool,
+        filter_path: Option<PathBuf>,
+        start_in_commits: bool,
+    ) -> Result<Self> {
         let config = AppConfig::load(debug)?;
 
         // Validate git repo
@@ -25,6 +31,7 @@ impl App {
             config,
             repo_path,
             filter_path,
+            start_in_commits,
         })
     }
 
@@ -36,9 +43,9 @@ impl App {
         self.config.app_state.add_recent_repo(&repo_str);
         let _ = self.config.save_state();
 
-        // Pass `-f` into Gui::new so the initial model stream loads filtered
-        // commits immediately (no wait for full refresh + second git log).
-        let mut gui = Gui::new(self.config, git, self.filter_path)?;
+        // Pass `-f` and start_in_commits into Gui::new so the initial model stream loads
+        // filtered commits or commits tab immediately.
+        let mut gui = Gui::new(self.config, git, self.filter_path, self.start_in_commits)?;
         gui.run()?;
 
         Ok(())
