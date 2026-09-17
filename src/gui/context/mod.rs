@@ -299,6 +299,10 @@ impl ContextManager {
         self.selections.get(&ctx).copied().unwrap_or(0)
     }
 
+    pub fn set_selected(&mut self, ctx: ContextId, idx: usize) {
+        self.selections.insert(ctx, idx);
+    }
+
     pub fn selected_active(&self) -> usize {
         self.selected(self.active)
     }

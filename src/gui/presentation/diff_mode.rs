@@ -431,15 +431,20 @@ fn render_status_bar(
             side_by_side::DiffViewLayout::SideBySide => "unified view",
             side_by_side::DiffViewLayout::Unified => "split view",
         };
-        vec![
+        let mut h = vec![
             ("q", "exit"),
             ("Tab", "cycle"),
             ("1-4", "panel"),
             ("<c-s>", "swap"),
             ("`", "tree"),
-            ("\\", view_layout_hint),
-            ("?", "help"),
-        ]
+        ];
+        if state.show_tree {
+            h.push(("-", "fold"));
+            h.push((",/.", "nav"));
+        }
+        h.push(("\\", view_layout_hint));
+        h.push(("?", "help"));
+        h
     };
 
     let key_style = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);

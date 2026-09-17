@@ -293,28 +293,74 @@ fn handle_commit_files_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
             }
         }
         KeyCode::Enter => {
-            if gui.diff_mode.show_tree {
-                // Toggle dir collapse or focus diff
-                if let Some(node) = gui
-                    .diff_mode
-                    .tree_nodes
-                    .get(gui.diff_mode.diff_files_selected)
-                {
-                    if node.is_dir {
-                        let path = node.path.clone();
-                        if gui.diff_mode.collapsed_dirs.contains(&path) {
-                            gui.diff_mode.collapsed_dirs.remove(&path);
-                        } else {
-                            gui.diff_mode.collapsed_dirs.insert(path);
-                        }
-                        update_diff_mode_tree(gui);
-                        return Ok(());
-                    }
-                }
-            }
             gui.diff_mode.focus = DiffModeFocus::DiffExploration;
             gui.needs_diff_refresh = true;
         }
+        _ => {}
+    }
+
+    let is_fold = matches_key(key, &keybindings.universal.fold_directory);
+    if key.code == KeyCode::Enter || is_fold {
+        if gui.diff_mode.show_tree {
+            if let Some(node) = gui
+                .diff_mode
+                .tree_nodes
+                .get(gui.diff_mode.diff_files_selected)
+            {
+                if node.is_dir {
+                    if !is_fold {
+                        gui.diff_mode.focus = DiffModeFocus::DiffExploration;
+                        gui.needs_diff_refresh = true;
+                        return Ok(());
+                    }
+                    let path = node.path.clone();
+                    if gui.diff_mode.collapsed_dirs.contains(&path) {
+                        gui.diff_mode.collapsed_dirs.remove(&path);
+                    } else {
+                        gui.diff_mode.collapsed_dirs.insert(path);
+                    }
+                    update_diff_mode_tree(gui);
+                    return Ok(());
+                }
+            }
+        }
+        if is_fold {
+            return Ok(());
+        }
+    }
+
+    if gui.diff_mode.show_tree {
+        let new_idx = if matches_key(key, &keybindings.universal.tree_parent) {
+            crate::model::file_tree::find_parent_idx(
+                &gui.diff_mode.tree_nodes,
+                gui.diff_mode.diff_files_selected,
+            )
+        } else if matches_key(key, &keybindings.universal.tree_child) {
+            crate::model::file_tree::find_first_child_idx(
+                &gui.diff_mode.tree_nodes,
+                gui.diff_mode.diff_files_selected,
+            )
+        } else if matches_key(key, &keybindings.universal.tree_next_sibling) {
+            crate::model::file_tree::find_next_sibling_idx(
+                &gui.diff_mode.tree_nodes,
+                gui.diff_mode.diff_files_selected,
+            )
+        } else if matches_key(key, &keybindings.universal.tree_prev_sibling) {
+            crate::model::file_tree::find_prev_sibling_idx(
+                &gui.diff_mode.tree_nodes,
+                gui.diff_mode.diff_files_selected,
+            )
+        } else {
+            None
+        };
+        if let Some(idx) = new_idx {
+            gui.diff_mode.diff_files_selected = idx;
+            gui.needs_diff_refresh = true;
+            return Ok(());
+        }
+    }
+
+    match key.code {
         KeyCode::Char('g') => {
             gui.diff_mode.diff_files_selected = 0;
             gui.diff_mode.viewport_manually_scrolled = false;
@@ -579,6 +625,38 @@ fn handle_diff_exploration_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         }
         if matches_key(key, &keybindings.universal.prev_match) {
             gui.diff_view.prev_search_match();
+            return Ok(());
+        }
+    }
+
+    let keybindings = &gui.config.user_config.keybinding;
+    if gui.diff_mode.show_tree {
+        let new_idx = if matches_key(key, &keybindings.universal.tree_parent) {
+            crate::model::file_tree::find_parent_idx(
+                &gui.diff_mode.tree_nodes,
+                gui.diff_mode.diff_files_selected,
+            )
+        } else if matches_key(key, &keybindings.universal.tree_child) {
+            crate::model::file_tree::find_first_child_idx(
+                &gui.diff_mode.tree_nodes,
+                gui.diff_mode.diff_files_selected,
+            )
+        } else if matches_key(key, &keybindings.universal.tree_next_sibling) {
+            crate::model::file_tree::find_next_sibling_idx(
+                &gui.diff_mode.tree_nodes,
+                gui.diff_mode.diff_files_selected,
+            )
+        } else if matches_key(key, &keybindings.universal.tree_prev_sibling) {
+            crate::model::file_tree::find_prev_sibling_idx(
+                &gui.diff_mode.tree_nodes,
+                gui.diff_mode.diff_files_selected,
+            )
+        } else {
+            None
+        };
+        if let Some(idx) = new_idx {
+            gui.diff_mode.diff_files_selected = idx;
+            gui.needs_diff_refresh = true;
             return Ok(());
         }
     }
