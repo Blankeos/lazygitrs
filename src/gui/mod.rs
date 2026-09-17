@@ -891,7 +891,12 @@ impl Gui {
         };
     }
 
-    pub fn new(config: AppConfig, git: GitCommands, filter_path: Option<PathBuf>) -> Result<Self> {
+    pub fn new(
+        config: AppConfig,
+        git: GitCommands,
+        filter_path: Option<PathBuf>,
+        start_in_commits: bool,
+    ) -> Result<Self> {
         let (diff_tx, diff_rx) = mpsc::channel();
         let (diff_scheduler_tx, diff_scheduler_rx) = mpsc::channel();
         let (diff_prefetch_tx, diff_prefetch_rx) = mpsc::channel();
@@ -983,8 +988,9 @@ impl Gui {
             .unwrap_or(0);
 
         let mut context_mgr = ContextManager::new();
-        if startup_path_filter.is_some() {
+        if startup_path_filter.is_some() || start_in_commits {
             context_mgr.set_active(ContextId::Commits);
+            context_mgr.set_selection_for(ContextId::Commits, 0);
         }
 
         Ok(Self {
@@ -3429,6 +3435,15 @@ impl Gui {
             return self.handle_diff_focused_key(key);
         }
 
+        // Toggle between Working Tree (Files) and Latest Commit (Commits at HEAD)
+        if matches_key(key, &keybindings.universal.toggle_working_tree_and_head)
+            || (key.modifiers == KeyModifiers::CONTROL
+                && (key.code == KeyCode::Char('g') || key.code == KeyCode::Char('G')))
+        {
+            self.toggle_working_tree_and_head();
+            return Ok(());
+        }
+
         // Global keybindings
         if matches_key(key, &keybindings.universal.quit)
             || matches_key(key, &keybindings.universal.quit_alt1)
@@ -3946,6 +3961,15 @@ impl Gui {
                     };
                 }
             }
+            return Ok(());
+        }
+
+        // Toggle between Working Tree (Files) and Latest Commit (Commits at HEAD)
+        if matches_key(key, &keybindings.universal.toggle_working_tree_and_head)
+            || (key.modifiers == KeyModifiers::CONTROL
+                && (key.code == KeyCode::Char('g') || key.code == KeyCode::Char('G')))
+        {
+            self.toggle_working_tree_and_head();
             return Ok(());
         }
 
@@ -5611,6 +5635,10 @@ impl Gui {
                     kb.universal.create_patch_options_menu.clone(),
                     "Patch options".into(),
                 ),
+                CommandEntry::keybinding(
+                    kb.universal.toggle_working_tree_and_head.clone(),
+                    "Toggle files / commit HEAD".into(),
+                ),
                 CommandEntry::keybinding("{/}".into(), "Previous/next hunk".into()),
                 CommandEntry::keybinding(";".into(), "Toggle command log".into()),
                 CommandEntry::keybinding("W".into(), "Compare / Diff mode".into()),
@@ -6018,6 +6046,15 @@ impl Gui {
                     .toggle_diff_view_layout
                     .clone(),
                 "Toggle unified / side-by-side view".into(),
+            ),
+            CommandEntry::keybinding(
+                self.config
+                    .user_config
+                    .keybinding
+                    .universal
+                    .toggle_working_tree_and_head
+                    .clone(),
+                "Toggle files / commit HEAD".into(),
             ),
             CommandEntry::keybinding("z".into(), "Toggle line wrap".into()),
             CommandEntry::keybinding("g/G".into(), "Go to top / bottom".into()),
@@ -8491,6 +8528,22 @@ impl Gui {
         }
     }
 
+    pub fn toggle_working_tree_and_head(&mut self) {
+        self.range_select_anchor = None;
+        match self.context_mgr.active() {
+            ContextId::Commits | ContextId::CommitFiles | ContextId::Reflog => {
+                self.context_mgr.set_active(ContextId::Files);
+                self.needs_diff_refresh = true;
+            }
+            _ => {
+                self.context_mgr.set_active(ContextId::Commits);
+                self.context_mgr.set_selection_for(ContextId::Commits, 0);
+                self.context_mgr.set_scroll_offset(ContextId::Commits, 0);
+                self.needs_diff_refresh = true;
+            }
+        }
+    }
+
     fn next_screen_mode(&mut self) {
         self.screen_mode = match self.screen_mode {
             ScreenMode::Normal => ScreenMode::Half,
@@ -8990,6 +9043,130 @@ mod terminal_mouse_tests {
             keys.insert(result.diff_key);
         }
         assert_eq!(keys.len(), 8);
+    }
+
+    struct TempRepo {
+        path: PathBuf,
+    }
+
+    impl TempRepo {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "lazygitrs-gui-test-{}-{}-{}",
+                name,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            let _ = std::process::Command::new("git")
+                .args(["init", "-b", "main"])
+                .current_dir(&path)
+                .output();
+            Self { path }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn toggle_working_tree_and_head_toggles_between_files_and_head() {
+        let repo = TempRepo::new("toggle-files-head");
+        let config = crate::config::AppConfig::default();
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(config, git, None, false).unwrap();
+
+        // Starts in Files by default
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+
+        // Toggle to Commits (HEAD at index 0)
+        gui.toggle_working_tree_and_head();
+        assert_eq!(gui.context_mgr.active(), ContextId::Commits);
+        assert_eq!(gui.context_mgr.selected(ContextId::Commits), 0);
+        assert_eq!(gui.context_mgr.scroll_offset(ContextId::Commits), 0);
+        assert!(gui.needs_diff_refresh);
+
+        // Move commit selection, then toggle back to Files
+        gui.context_mgr.set_selection_for(ContextId::Commits, 3);
+        gui.toggle_working_tree_and_head();
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+        assert!(gui.needs_diff_refresh);
+
+        // Toggle from CommitFiles subcontext back to Files
+        gui.context_mgr.set_active(ContextId::CommitFiles);
+        gui.toggle_working_tree_and_head();
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+
+        // Toggle from outside context (e.g. Branches) jumps to Commits at HEAD
+        gui.context_mgr.set_active(ContextId::Branches);
+        gui.toggle_working_tree_and_head();
+        assert_eq!(gui.context_mgr.active(), ContextId::Commits);
+        assert_eq!(gui.context_mgr.selected(ContextId::Commits), 0);
+    }
+
+    #[test]
+    fn start_in_commits_initializes_context_to_commits_head() {
+        let repo = TempRepo::new("start-in-commits");
+        let config = crate::config::AppConfig::default();
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let gui = Gui::new(config, git, None, true).unwrap();
+
+        assert_eq!(gui.context_mgr.active(), ContextId::Commits);
+        assert_eq!(gui.context_mgr.selected(ContextId::Commits), 0);
+    }
+
+    #[test]
+    fn ctrl_g_key_event_triggers_toggle() {
+        let repo = TempRepo::new("ctrl-g-toggle");
+        let config = crate::config::AppConfig::default();
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(config, git, None, false).unwrap();
+
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+
+        // Send Ctrl+g
+        let ctrl_g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        gui.handle_key(ctrl_g).unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Commits);
+
+        // Send Ctrl+g again to toggle back
+        gui.handle_key(ctrl_g).unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+
+        // Send Ctrl+g while diff is focused
+        gui.diff_focused = true;
+        gui.handle_key(ctrl_g).unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Commits);
+        assert!(gui.diff_focused);
+
+        // Send Ctrl+G (uppercase) while diff is focused to toggle back to Files
+        let ctrl_g_upper = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::CONTROL);
+        gui.handle_key(ctrl_g_upper).unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+        assert!(gui.diff_focused);
+
+        // Test custom keybinding (e.g. <c-t>)
+        let mut custom_config = crate::config::AppConfig::default();
+        custom_config
+            .user_config
+            .keybinding
+            .universal
+            .toggle_working_tree_and_head = "<c-t>".into();
+        let git2 = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui2 = Gui::new(custom_config, git2, None, false).unwrap();
+        let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        gui2.handle_key(ctrl_t).unwrap();
+        assert_eq!(gui2.context_mgr.active(), ContextId::Commits);
     }
 }
 
