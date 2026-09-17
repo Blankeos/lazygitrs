@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::config::{AppConfig, Theme};
+use crate::config::{AppConfig, KeybindingConfig, Theme};
 use crate::model::Model;
 use crate::model::commit::{Commit, CommitStat};
 use crate::model::file_tree::{CommitFileTreeNode, FileTreeNode};
@@ -399,6 +399,7 @@ pub fn render(
             model,
             diff_focused,
             !cherry_pick_clipboard.is_empty(),
+            &config.user_config.keybinding,
         );
         // Render text selection highlight overlay and tooltip (must be before popup)
         render_selection_overlay(frame, diff_view, fl.main_panel, theme);
@@ -1079,6 +1080,7 @@ pub fn render(
         model,
         diff_focused,
         !cherry_pick_clipboard.is_empty(),
+        &config.user_config.keybinding,
     );
 
     // Render text selection highlight overlay and tooltip
@@ -1326,12 +1328,109 @@ pub fn checklist_item_at(popup: &PopupState, area: Rect, col: u16, row: u16) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{checklist_item_at, command_log_geometry, menu_item_at, render_popup};
+    use super::{
+        checklist_item_at, command_log_geometry, format_key_hint, menu_item_at, render_popup,
+    };
     use crate::config::Theme;
     use crate::gui::popup::{ChecklistItem, MenuItem, MessageKind, PopupState};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
+
+    #[test]
+    fn format_key_hint_formats_modifiers_and_preserves_plain() {
+        assert_eq!(format_key_hint("<c-s>"), "ctrl+s");
+        assert_eq!(format_key_hint("<C-s>"), "ctrl+s");
+        assert_eq!(format_key_hint("<ctrl-s>"), "ctrl+s");
+        assert_eq!(format_key_hint("<c+s>"), "ctrl+s");
+        assert_eq!(format_key_hint("Ctrl+S"), "ctrl+s");
+        assert_eq!(format_key_hint("ctrl-s"), "ctrl+s");
+        assert_eq!(format_key_hint("<c-l>"), "ctrl+l");
+        assert_eq!(format_key_hint("<c-f>"), "ctrl+f");
+        assert_eq!(format_key_hint("<a-h>"), "alt+h");
+        assert_eq!(format_key_hint("<alt-h>"), "alt+h");
+        assert_eq!(format_key_hint("<s-f>"), "shift+f");
+        assert_eq!(format_key_hint("<shift-f>"), "shift+f");
+        assert_eq!(format_key_hint("<shift-tab>"), "shift+tab");
+        assert_eq!(format_key_hint("<space>"), "space");
+        assert_eq!(format_key_hint("<Space>"), "space");
+        assert_eq!(format_key_hint("<Enter>"), "enter");
+        assert_eq!(format_key_hint("<escape>"), "esc");
+        assert_eq!(format_key_hint(":"), ":");
+        assert_eq!(format_key_hint(""), "");
+    }
+
+    #[test]
+    fn status_bar_shows_shell_command_prompt_hint() {
+        use crate::config::KeybindingConfig;
+        use crate::gui::context::{ContextId, ContextManager};
+        use crate::model::Model;
+        use crate::pager::side_by_side::DiffViewState;
+
+        let backend = TestBackend::new(160, 1);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let theme = Theme::default();
+        let mut ctx_mgr = ContextManager::new();
+        ctx_mgr.set_active(ContextId::Files);
+        let diff_view = DiffViewState::new();
+        let model = Model::default();
+        let keybindings = KeybindingConfig::default();
+
+        terminal
+            .draw(|f| {
+                super::render_status_bar(
+                    f,
+                    Rect::new(0, 0, 160, 1),
+                    &ctx_mgr,
+                    &diff_view,
+                    &theme,
+                    &model,
+                    false,
+                    false,
+                    &keybindings,
+                );
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let content: String = (0..160)
+            .map(|x| buf.cell((x, 0)).unwrap().symbol())
+            .collect();
+        assert!(
+            content.contains(": shell"),
+            "Expected ': shell' in status bar, got: {}",
+            content
+        );
+
+        // Test custom keybinding for custom_command_prompt (e.g. ;)
+        let mut custom_kb = KeybindingConfig::default();
+        custom_kb.universal.custom_command_prompt = ";".into();
+        terminal
+            .draw(|f| {
+                super::render_status_bar(
+                    f,
+                    Rect::new(0, 0, 160, 1),
+                    &ctx_mgr,
+                    &diff_view,
+                    &theme,
+                    &model,
+                    false,
+                    false,
+                    &custom_kb,
+                );
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let content: String = (0..160)
+            .map(|x| buf.cell((x, 0)).unwrap().symbol())
+            .collect();
+        assert!(
+            content.contains("; shell"),
+            "Expected '; shell' with custom keybinding, got: {}",
+            content
+        );
+    }
 
     #[test]
     fn command_log_is_hidden_when_main_panel_is_absent() {
@@ -2194,6 +2293,48 @@ fn get_info_content<'a>(model: &Model, ctx_mgr: &ContextManager) -> Vec<Line<'a>
     }
 }
 
+fn format_key_hint(key: &str) -> String {
+    let key = key.trim();
+    let inner = if let Some(stripped) = key.strip_prefix('<').and_then(|k| k.strip_suffix('>')) {
+        stripped.trim()
+    } else {
+        key
+    };
+    let inner_lower = inner.to_ascii_lowercase();
+    if let Some(rest) = inner_lower
+        .strip_prefix("c-")
+        .or_else(|| inner_lower.strip_prefix("c+"))
+        .or_else(|| inner_lower.strip_prefix("ctrl-"))
+        .or_else(|| inner_lower.strip_prefix("ctrl+"))
+    {
+        format!("ctrl+{}", rest)
+    } else if let Some(rest) = inner_lower
+        .strip_prefix("a-")
+        .or_else(|| inner_lower.strip_prefix("a+"))
+        .or_else(|| inner_lower.strip_prefix("alt-"))
+        .or_else(|| inner_lower.strip_prefix("alt+"))
+    {
+        format!("alt+{}", rest)
+    } else if let Some(rest) = inner_lower
+        .strip_prefix("s-")
+        .or_else(|| inner_lower.strip_prefix("s+"))
+        .or_else(|| inner_lower.strip_prefix("shift-"))
+        .or_else(|| inner_lower.strip_prefix("shift+"))
+    {
+        format!("shift+{}", rest)
+    } else if inner_lower == "enter" || inner_lower == "return" {
+        "enter".to_string()
+    } else if inner_lower == "escape" || inner_lower == "esc" {
+        "esc".to_string()
+    } else if inner_lower == "space" {
+        "space".to_string()
+    } else if inner_lower == "backtab" || inner_lower == "shift-tab" || inner_lower == "shift+tab" {
+        "shift+tab".to_string()
+    } else {
+        key.to_string()
+    }
+}
+
 fn render_search_bar_or_status_bar(
     frame: &mut Frame,
     status_bar: Rect,
@@ -2205,6 +2346,7 @@ fn render_search_bar_or_status_bar(
     model: &Model,
     diff_focused: bool,
     has_copied_commits: bool,
+    keybindings: &KeybindingConfig,
 ) {
     if let Some((query, match_count, current_match)) = search_state {
         let match_info = if match_count > 0 {
@@ -2262,6 +2404,7 @@ fn render_search_bar_or_status_bar(
             model,
             diff_focused,
             has_copied_commits,
+            keybindings,
         );
     }
 }
@@ -2275,9 +2418,16 @@ fn render_status_bar(
     model: &Model,
     diff_focused: bool,
     has_copied_commits: bool,
+    keybindings: &KeybindingConfig,
 ) {
     let mut hints: Vec<(&str, &str)> = Vec::new();
     let mut emphasized: Vec<&str> = Vec::new();
+    let shell_key = format_key_hint(&keybindings.universal.custom_command_prompt);
+    let shell_hint = if !shell_key.is_empty() {
+        shell_key.as_str()
+    } else {
+        ":"
+    };
 
     // When in a special state (rebasing/merging/cherry-picking), show those options prominently
     if model.is_rebasing {
@@ -2426,7 +2576,12 @@ fn render_status_bar(
     }
 
     // Global hints (always last)
-    hints.extend([("q", "quit"), ("tab/1-5", "panels"), ("j/k", "nav")]);
+    hints.extend([
+        ("q", "quit"),
+        (shell_hint, "shell"),
+        ("tab/1-5", "panels"),
+        ("j/k", "nav"),
+    ]);
 
     let key_style = Style::default()
         .fg(_theme.text)

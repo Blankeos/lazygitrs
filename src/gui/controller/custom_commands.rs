@@ -68,10 +68,49 @@ fn execute_custom_command(gui: &mut Gui, cmd: &CustomCommand) -> Result<()> {
 }
 
 fn run_command(gui: &mut Gui, command: &str, show_output: bool) -> Result<()> {
-    let result = CmdBuilder::new("sh")
-        .args(&["-c", command])
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+    let is_zsh = shell.ends_with("zsh");
+    let is_bash = shell.ends_with("bash");
+
+    // Create a temporary script file to execute aliases/functions cleanly without TTY hang
+    let temp_dir = std::env::temp_dir();
+    let temp_file = temp_dir.join(format!(
+        "lazygitrs-cmd-{}-{}.sh",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+
+    let mut script_content = String::new();
+    if is_zsh {
+        script_content.push_str(
+            "#!/bin/zsh\nsetopt aliases\n[ -f ~/.zshrc ] && source ~/.zshrc >/dev/null 2>&1\n",
+        );
+    } else if is_bash {
+        script_content.push_str(
+            "#!/bin/bash\nshopt -s expand_aliases\n[ -f ~/.bash_aliases ] && source ~/.bash_aliases >/dev/null 2>&1\n[ -f ~/.bashrc ] && source ~/.bashrc >/dev/null 2>&1\n",
+        );
+    } else {
+        script_content.push_str("#!/bin/sh\n");
+    }
+    script_content.push_str(command);
+    script_content.push('\n');
+
+    std::fs::write(&temp_file, &script_content)?;
+
+    // Execute the temporary script with null stdin
+    let result = CmdBuilder::new(&shell)
+        .arg(&temp_file.to_string_lossy().to_string())
+        .stdin(String::new())
         .cwd_path(gui.git.repo_path())
-        .run()?;
+        .run();
+
+    // Clean up temporary file
+    let _ = std::fs::remove_file(&temp_file);
+
+    let result = result?;
 
     if let Ok(mut log) = gui.command_log.lock() {
         log.push(format!("$ {}", command));
@@ -167,4 +206,20 @@ fn context_id_to_name(ctx: ContextId) -> &'static str {
         ContextId::RemoteBranches => "remoteBranches",
         ContextId::Staging => "staging",
     }
+}
+
+pub fn open_custom_command_prompt(gui: &mut Gui) -> Result<()> {
+    gui.popup = PopupState::Input {
+        title: "Execute Shell Command".to_string(),
+        textarea: crate::gui::popup::make_textarea(""),
+        on_confirm: Box::new(move |gui, input| {
+            if !input.trim().is_empty() {
+                run_command(gui, &input, true)?;
+            }
+            Ok(())
+        }),
+        is_commit: false,
+        confirm_focused: false,
+    };
+    Ok(())
 }
