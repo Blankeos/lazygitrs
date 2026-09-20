@@ -101,7 +101,7 @@ impl InputReader {
     pub fn pause(&self) {
         self.paused.store(true, Ordering::SeqCst);
         // Wait for the reader to finish its current poll (≤ PAUSE_POLL).
-        thread::sleep(Duration::from_millis(120));
+        thread::sleep(Duration::from_millis(300));
     }
 
     /// Resume polling after a suspended subprocess exits.
@@ -155,10 +155,10 @@ impl EventSource for CrosstermSource {
 }
 
 /// Poll granularity for the reader thread. Short enough that `pause()` takes
-/// effect quickly for editor handoff (pause() sleeps 120ms to cover one
+/// effect quickly for editor handoff (pause() sleeps 300ms to cover one
 /// in-flight poll), long enough that the idle wakeup rate stays negligible —
-/// 50ms polled the tty 20×/s forever for no benefit.
-const PAUSE_POLL: Duration = Duration::from_millis(100);
+/// 100ms polled the tty 10×/s forever for no benefit.
+const PAUSE_POLL: Duration = Duration::from_millis(250);
 
 /// Like [`next_events`], but returns `Ok(None)` when `paused` becomes true so
 /// the reader thread can yield the tty to a suspended editor.

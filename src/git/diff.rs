@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use super::GitCommands;
-use super::file::{parse_hunk_counts, parse_numstat_z};
+use super::file::parse_patch_stats;
 
 impl GitCommands {
     /// Get diff for a specific file (unstaged changes).
@@ -197,9 +197,9 @@ impl GitCommands {
         hash: &str,
         include_stats: bool,
     ) -> Result<Vec<crate::model::CommitFile>> {
-        // Try diffing against first parent; fall back for root commits.
-        // Root commits need `--root` so git compares against the empty tree;
-        // plain `diff-tree <hash>` succeeds but prints nothing for roots.
+        // File list: `diff-tree --name-status` compares tree entries only —
+        // no blob loading, so this walk is cheap. `hash^1..hash` handles merge
+        // commits (including stashes); root commits fall back to `--root`.
         let result = self
             .git()
             .args(&[
@@ -373,31 +373,30 @@ impl GitCommands {
         Ok(files)
     }
 
-    /// Enrich a commit-like file list with line and hunk counts in two bulk
-    /// Git calls. Stats are best-effort so the file list remains available if
-    /// a particular diff cannot be produced.
+    /// Enrich a commit-like file list with line and hunk counts in one bulk
+    /// patch run. Stats are best-effort so the file list remains available if
+    /// the diff cannot be produced.
     fn populate_commit_file_stats(
         &self,
         files: &mut [crate::model::CommitFile],
         diff_base: &[String],
     ) {
-        let run = |extra: &[&str]| {
-            let mut args = diff_base.to_vec();
-            args.extend(extra.iter().map(|arg| (*arg).to_string()));
-            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            self.git()
-                .args(&refs)
-                .run()
-                .ok()
-                .filter(|result| result.success)
-                .map(|result| result.stdout)
-        };
-
-        let line_stats = run(&["--numstat", "-z", "--find-renames", "--no-color"])
-            .map(|output| parse_numstat_z(&output))
-            .unwrap_or_default();
-        let hunk_counts = run(&["--unified=0", "--find-renames", "--no-color", "--no-prefix"])
-            .map(|output| parse_hunk_counts(&output))
+        // One `--unified=0` patch yields per-file add/del and hunk counts —
+        // previously this was a `--numstat -z` walk plus a `--unified=0` walk.
+        let mut args = diff_base.to_vec();
+        args.extend(
+            ["--unified=0", "--find-renames", "--no-color", "--no-prefix"]
+                .iter()
+                .map(|arg| (*arg).to_string()),
+        );
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let (line_stats, hunk_counts, _) = self
+            .git()
+            .args(&refs)
+            .run()
+            .ok()
+            .filter(|result| result.success)
+            .map(|result| parse_patch_stats(&result.stdout))
             .unwrap_or_default();
 
         for file in files {

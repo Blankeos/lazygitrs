@@ -37,14 +37,7 @@ pub fn highlight_color(index: usize, theme: &Theme) -> Color {
 
 fn get_config_for_file(filename: &str) -> Option<&'static LanguageConfig> {
     let ext = Path::new(filename).extension().and_then(|e| e.to_str())?;
-    CONFIGS.iter().find(|(e, _)| *e == ext).map(|(_, c)| c)
-}
-
-/// Compile the tree-sitter highlight queries (~40-60ms for all languages).
-/// They live in a lazy static, so without this the first diff ever rendered
-/// pays the whole cost on its critical path.
-pub fn warm_configs() {
-    once_cell::sync::Lazy::force(&CONFIGS);
+    CONFIGS.get(ext).and_then(|entry| entry.as_ref())
 }
 
 /// Pre-computed highlights for an entire file, organized by line number.

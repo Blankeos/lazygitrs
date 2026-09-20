@@ -1014,9 +1014,9 @@ impl Gui {
             Arc::clone(&prefetch_generation),
         );
         spawn_latest_background_worker(commit_details_job_rx);
-        // Compile tree-sitter highlight queries off the critical path so the
-        // first diff shown doesn't pay the ~40-60ms lazy-init cost.
-        std::thread::spawn(crate::pager::highlight::warm_configs);
+        // Tree-sitter highlight queries compile per-language on first use —
+        // no eager warm-up (that burned ~0.4s of startup CPU for languages
+        // the session may never display).
         let mut model = Model::default();
         model.repo_name = git.repo_name();
         let (head_hash, head_branch) = git.head_info().unwrap_or_default();
