@@ -29,6 +29,11 @@ pub struct RefresherConfig {
     pub refresh_interval: u64,
     #[serde(rename = "fetchInterval")]
     pub fetch_interval: u64,
+    /// Seconds between `git show-ref`+HEAD polls that detect ref changes made
+    /// outside the app (mirrors lazygit's refresher.externalChangeCheckInterval).
+    /// 0 disables the poll.
+    #[serde(rename = "externalChangeCheckInterval")]
+    pub external_change_check_interval: u64,
 }
 
 impl Default for RefresherConfig {
@@ -36,6 +41,7 @@ impl Default for RefresherConfig {
         Self {
             refresh_interval: 10,
             fetch_interval: 60,
+            external_change_check_interval: 2,
         }
     }
 }
@@ -130,6 +136,11 @@ pub struct GitConfig {
     pub auto_fetch: bool,
     #[serde(rename = "autoRefresh")]
     pub auto_refresh: bool,
+    /// Poll refs for changes made outside the app (mirrors lazygit's
+    /// git.autoDetectExternalChanges). The poll cadence is
+    /// `refresher.externalChangeCheckInterval`.
+    #[serde(rename = "autoDetectExternalChanges")]
+    pub auto_detect_external_changes: bool,
     #[serde(rename = "branchLogCmd")]
     pub branch_log_cmd: String,
     pub paging: PagingConfig,
@@ -142,6 +153,7 @@ impl Default for GitConfig {
         Self {
             auto_fetch: true,
             auto_refresh: true,
+            auto_detect_external_changes: true,
             branch_log_cmd: "git log --graph --color=always --abbrev-commit --decorate --date=relative --pretty=medium {{branchName}} --".to_string(),
             paging: PagingConfig::default(),
             commit: CommitConfig::default(),

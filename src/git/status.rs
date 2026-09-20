@@ -5,12 +5,6 @@ use crate::os::cmd::CmdResult;
 
 #[derive(Debug)]
 pub struct RepoStatus {
-    #[allow(dead_code)]
-    pub branch: String,
-    #[allow(dead_code)]
-    pub ahead: usize,
-    #[allow(dead_code)]
-    pub behind: usize,
     pub is_rebasing: bool,
     pub is_merging: bool,
     pub is_cherry_picking: bool,
@@ -21,13 +15,10 @@ pub struct RepoStatus {
 
 impl GitCommands {
     pub fn repo_status(&self) -> Result<RepoStatus> {
-        let branch = self
-            .current_branch_name()
-            .unwrap_or_else(|_| "HEAD".to_string());
-
-        let (ahead, behind) = self.ahead_behind().unwrap_or((0, 0));
-
-        let git_dir = self.repo_path().join(".git");
+        // Use the resolved git dir, not repo_path/.git — in a linked worktree
+        // .git is a file pointing at the real git dir, so probing
+        // repo_path/.git/MERGE_HEAD would silently miss in-progress ops.
+        let git_dir = &self.git_dir;
 
         let is_rebasing = self.is_rebase_in_progress();
 
@@ -46,36 +37,16 @@ impl GitCommands {
             String::new()
         };
 
+        // ahead/behind are intentionally absent here: the branches panel
+        // already derives them from `%(upstream:track)` in load_branches, so
+        // a separate `rev-list --left-right` subprocess per refresh is waste.
         Ok(RepoStatus {
-            branch,
-            ahead,
-            behind,
             is_rebasing,
             is_merging: git_dir.join("MERGE_HEAD").exists(),
             is_cherry_picking: git_dir.join("CHERRY_PICK_HEAD").exists(),
             is_bisecting: git_dir.join("BISECT_LOG").exists(),
             rebase_onto_hash,
         })
-    }
-
-    fn ahead_behind(&self) -> Result<(usize, usize)> {
-        let result = self
-            .git()
-            .args(&["rev-list", "--left-right", "--count", "HEAD...@{u}"])
-            .run()?;
-
-        if !result.success {
-            return Ok((0, 0));
-        }
-
-        let parts: Vec<&str> = result.stdout_trimmed().split_whitespace().collect();
-        if parts.len() == 2 {
-            let ahead = parts[0].parse().unwrap_or(0);
-            let behind = parts[1].parse().unwrap_or(0);
-            Ok((ahead, behind))
-        } else {
-            Ok((0, 0))
-        }
     }
 
     pub fn continue_rebase(&self) -> Result<()> {
@@ -95,8 +66,7 @@ impl GitCommands {
     }
 
     pub(crate) fn is_rebase_in_progress(&self) -> bool {
-        let git_dir = self.repo_path().join(".git");
-        git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists()
+        self.git_dir.join("rebase-merge").exists() || self.git_dir.join("rebase-apply").exists()
     }
 
     pub(crate) fn handle_rebase_step_result(&self, action: &str, result: CmdResult) -> Result<()> {

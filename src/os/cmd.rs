@@ -31,6 +31,20 @@ fn make_non_interactive(cmd: &mut Command) {
     }
 }
 
+/// Spawn `cmd` detached from the controlling terminal (see
+/// `make_non_interactive`) with stdin null and stdout/stderr piped.
+///
+/// Used by callers that need to poll/kill the child themselves (e.g. the
+/// bounded `ls-remote` probe in git::tag) where `CmdBuilder::run`'s blocking
+/// `wait_with_output` would not allow a wall-clock timeout.
+pub(crate) fn spawn_non_interactive(cmd: &mut Command) -> std::io::Result<std::process::Child> {
+    make_non_interactive(cmd);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd.spawn()
+}
+
 /// Shared command log that CmdBuilder writes to when set.
 pub type CommandLog = Arc<Mutex<Vec<String>>>;
 
@@ -62,6 +76,12 @@ pub fn log_command(desc: &str) {
             }
         }
     });
+}
+
+/// True when a command log is installed for this thread. Lets callers skip
+/// building a description string when nothing would record it.
+fn command_log_enabled() -> bool {
+    CMD_LOG.with(|l| l.borrow().is_some())
 }
 
 #[derive(Debug)]
@@ -174,7 +194,11 @@ impl CmdBuilder {
     }
 
     pub fn run(&self) -> Result<CmdResult> {
-        log_command(&self.description());
+        // Skip building the description string when no log is installed —
+        // otherwise every spawn allocates a String that is never read.
+        if command_log_enabled() {
+            log_command(&self.description());
+        }
 
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.args);

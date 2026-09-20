@@ -24,6 +24,7 @@ use ratatui::backend::CrosstermBackend;
 
 use crate::config::keybindings::Key;
 use crate::config::{AppConfig, AppState};
+use crate::git::tag::RemoteTagMode;
 use crate::git::{DEFAULT_COMMIT_LIMIT, GitCommands, MODEL_PART_COUNT, ModelPart};
 use crate::model::Model;
 use crate::model::file_tree::{CommitFileTreeNode, FileTreeNode, build_file_tree};
@@ -470,22 +471,28 @@ fn diff_key_is_immutable(key: &str) -> bool {
 }
 
 struct DiffPrefetchJob {
+    /// Selection generation this job was queued under. A newer selection
+    /// makes the queued load dead weight — the worker skips it but still
+    /// sends a result so inflight bookkeeping clears.
+    prefetch_gen: u64,
     diff_key: String,
     load: Box<dyn FnOnce() -> DiffPayload + Send>,
 }
-
 /// Low-priority lane that warms the preview cache with neighbor diffs.
-/// Every job MUST produce a result: `begin_diff_request` skips spawning an
-/// interactive job when a prefetch for the same key is in flight, and waits
-/// for this result instead.
+/// Every job MUST produce a result — even a stale-generation one whose load
+/// is skipped — because `diff_prefetch_inflight` is only cleared when the
+/// result arrives.
+
 fn spawn_diff_prefetch_workers(
     rx: mpsc::Receiver<DiffPrefetchJob>,
     result_tx: mpsc::Sender<DiffResult>,
+    latest: Arc<AtomicU64>,
 ) {
     let rx = Arc::new(Mutex::new(rx));
     for _ in 0..DIFF_PREFETCH_WORKERS {
         let rx = Arc::clone(&rx);
         let result_tx = result_tx.clone();
+        let latest = Arc::clone(&latest);
         std::thread::spawn(move || {
             loop {
                 let job = match rx.lock() {
@@ -493,9 +500,16 @@ fn spawn_diff_prefetch_workers(
                     Err(_) => return,
                 };
                 let Ok(job) = job else { return };
-                let payload = (job.load)();
+                // Stale-generation jobs are dead weight (the selection moved
+                // on): skip the git work but still deliver a result so the
+                // inflight set and any waiter unblock.
+                let payload = if latest.load(Ordering::Relaxed) == job.prefetch_gen {
+                    (job.load)()
+                } else {
+                    DiffPayload::Empty
+                };
                 let _ = result_tx.send(DiffResult {
-                    generation: 0,
+                    generation: job.prefetch_gen,
                     diff_key: job.diff_key,
                     payload,
                     is_prefetch: true,
@@ -637,6 +651,14 @@ pub struct Gui {
     /// Keys with a prefetch queued or running. An interactive request for one
     /// of these waits for the prefetch result instead of duplicating the work.
     diff_prefetch_inflight: HashSet<String>,
+    /// Selection generation shared with the prefetch workers. Bumped on every
+    /// selection change so queued prefetch jobs for the old selection are
+    /// skipped instead of burning git subprocesses on dead work.
+    prefetch_generation: Arc<AtomicU64>,
+    /// When the diff selection last changed. Prefetch jobs are held back for
+    /// a short debounce window so rapid navigation doesn't spawn a storm of
+    /// speculative git subprocesses.
+    selection_changed_at: Option<Instant>,
     /// Receiver for AI commit message generation results.
     ai_commit_rx: mpsc::Receiver<AiCommitResult>,
     /// Sender cloned into background threads for AI commit generation.
@@ -790,6 +812,26 @@ pub struct Gui {
     /// input, background results, refresh, spinner ticks. Eliminates the
     /// ~60fps idle redraw.
     needs_redraw: bool,
+    /// Ping channel from the external-change watcher: one unit per detected
+    /// `git show-ref`+HEAD snapshot change (lazygit's
+    /// startBackgroundExternalChangeDetection). `None` when detection is
+    /// disabled or the watcher thread is gone.
+    external_change_rx: Option<mpsc::Receiver<()>>,
+    /// Reseed channel to the watcher: sent after every streaming refresh so
+    /// the watcher re-baselines instead of flagging our own refresh's ref
+    /// writes as external changes.
+    external_change_reseed_tx: Option<mpsc::Sender<()>>,
+    /// Shared handle to the repo the watcher polls. Repo switches swap the
+    /// inner Arc so the watcher follows the new repo instead of polling the
+    /// stale one forever.
+    external_change_git: Arc<Mutex<Arc<GitCommands>>>,
+    /// Next full refresh must re-query remote tags (`git ls-remote`) instead
+    /// of reusing `remote_tag_names`. Set on manual refresh and after ops
+    /// that touch the remote — the only moments remote tag state can change.
+    pending_remote_tags: bool,
+    /// Tag names known to exist on a remote, captured from the last Tags
+    /// model part. Lets background refreshes skip the `ls-remote` probe.
+    remote_tag_names: HashSet<String>,
     /// Wall-clock timestamp of the last spinner advance, so animation cadence
     /// is decoupled from the frame/poll rate.
     last_spinner_tick: Instant,
@@ -965,16 +1007,66 @@ impl Gui {
             diff_tx.clone(),
             Arc::clone(&diff_generation),
         );
-        spawn_diff_prefetch_workers(diff_prefetch_rx, diff_tx.clone());
+        let prefetch_generation = Arc::new(AtomicU64::new(0));
+        spawn_diff_prefetch_workers(
+            diff_prefetch_rx,
+            diff_tx.clone(),
+            Arc::clone(&prefetch_generation),
+        );
         spawn_latest_background_worker(commit_details_job_rx);
         // Compile tree-sitter highlight queries off the critical path so the
         // first diff shown doesn't pay the ~40-60ms lazy-init cost.
         std::thread::spawn(crate::pager::highlight::warm_configs);
         let mut model = Model::default();
         model.repo_name = git.repo_name();
-        model.head_hash = git.head_hash().unwrap_or_default();
-        model.head_branch_name = git.current_branch_name().unwrap_or_default();
+        let (head_hash, head_branch) = git.head_info().unwrap_or_default();
+        model.head_hash = head_hash;
+        model.head_branch_name = head_branch;
 
+        // External-change watcher (lazygit's startBackgroundExternalChangeDetection):
+        // one long-lived thread polling `git show-ref`+HEAD on a timer. A
+        // changed snapshot pings the GUI for a full refresh; a reseed message
+        // (sent after every streaming refresh) re-baselines so our own ref
+        // writes don't read as external. `external_change_git` is shared so a
+        // repo switch redirects the poll instead of leaving it on the old repo.
+        let external_change_git = Arc::new(Mutex::new(Arc::clone(&git)));
+        let (external_change_rx, external_change_reseed_tx) = {
+            let interval_secs = config.user_config.refresher.external_change_check_interval;
+            if config.user_config.git.auto_detect_external_changes && interval_secs > 0 {
+                let (ping_tx, ping_rx) = mpsc::channel();
+                let (reseed_tx, reseed_rx) = mpsc::channel();
+                let watched_git = Arc::clone(&external_change_git);
+                let interval = Duration::from_secs(interval_secs);
+                std::thread::spawn(move || {
+                    let mut last_snapshot: Option<String> = None;
+                    loop {
+                        match reseed_rx.recv_timeout(interval) {
+                            Ok(()) => last_snapshot = None,
+                            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                            Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        }
+                        let git = match watched_git.lock() {
+                            Ok(guard) => Arc::clone(&*guard),
+                            Err(_) => return,
+                        };
+                        let snapshot = git.refs_snapshot();
+                        match &last_snapshot {
+                            None => last_snapshot = Some(snapshot),
+                            Some(last) if *last != snapshot => {
+                                last_snapshot = Some(snapshot);
+                                if ping_tx.send(()).is_err() {
+                                    return;
+                                }
+                            }
+                            Some(_) => {}
+                        }
+                    }
+                });
+                (Some(ping_rx), Some(reseed_tx))
+            } else {
+                (None, None)
+            }
+        };
         // Normalize `-f` to a repo-relative path before kicking off the stream
         // so the first Commits part is already filtered (lazygit-style).
         let startup_path_filter = filter_path.and_then(|p| {
@@ -1003,7 +1095,12 @@ impl Gui {
                 });
 
         let (initial_load_tx, initial_load_rx) = mpsc::channel();
-        git.load_model_streaming(&initial_load_tx, startup_commit_filter);
+        git.load_model_streaming(
+            &initial_load_tx,
+            startup_commit_filter,
+            // First load must probe remotes so tag `on_remote` flags are real.
+            RemoteTagMode::Query,
+        );
 
         let commit_history = Self::load_commit_history(&config);
 
@@ -1065,6 +1162,8 @@ impl Gui {
             displayed_diff_key: String::new(),
             diff_prefetch_tx,
             diff_prefetch_inflight: HashSet::new(),
+            prefetch_generation,
+            selection_changed_at: None,
             ai_commit_rx,
             ai_commit_tx,
             commit_page_rx,
@@ -1133,6 +1232,11 @@ impl Gui {
             last_spinner_tick: Instant::now(),
             commit_details_done_rx,
             commit_details_done_tx,
+            external_change_rx,
+            external_change_reseed_tx,
+            external_change_git,
+            pending_remote_tags: false,
+            remote_tag_names: HashSet::new(),
         })
     }
 
@@ -1156,12 +1260,35 @@ impl Gui {
     /// True when something can change the rendered frame without further user
     /// input: streamed initial load, in-flight diff/commit-page/AI/remote/
     /// auto-fetch work, an async menu item, background stat/message fetches, or
-    /// the temporary post-operation success ✓. Used to (a) keep redrawing while
-    /// work is pending, (b) animate the spinner, and (c) pick the event-poll
-    /// timeout. Every async op has an observable in-flight flag, so combined
-    /// with the `prev_busy` snapshot the main loop never misses the redraw on
-    /// the frame a result lands.
+    /// the temporary post-operation success ✓. Combined with the `prev_busy`
+    /// snapshot the main loop never misses the redraw on the frame a result
+    /// lands.
     fn has_background_activity(&self) -> bool {
+        if self.is_animating() {
+            return true;
+        }
+        // Silent states: real background work, but nothing on screen moves —
+        // they must not keep the loop at spinner cadence.
+        if self.auto_fetch_in_flight {
+            return true;
+        }
+        // Temporary success ✓ that auto-expires after 5s.
+        if self
+            .remote_op_success_at
+            .map(|t| t.elapsed() < std::time::Duration::from_secs(5))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        false
+    }
+
+    /// The animating subset of `has_background_activity`: states that visibly
+    /// change frame-to-frame (spinners, loading panes, streamed parts). Drives
+    /// the spinner tick and the short event-poll timeout; silent work like an
+    /// in-flight auto-fetch or the static ✓ hold is deliberately excluded so
+    /// it can't pin the loop at 12.5fps.
+    fn is_animating(&self) -> bool {
         if self.initial_load_rx.is_some()
             || self.diff_loading
             || self.needs_diff_refresh
@@ -1171,32 +1298,19 @@ impl Gui {
             || self.files_refresh_in_progress
             || self.filter_paths_rx.is_some()
             || self.commit_page_loading
-            || self.auto_fetch_in_flight
             || self.remote_op_label.is_some()
             || self.ai_commit_generation_active()
         {
             return true;
         }
         // Async menu item (e.g. fetching a PR URL) shows a loading spinner.
-        if matches!(
+        matches!(
             &self.popup,
             PopupState::Menu {
                 loading_index: Some(_),
                 ..
             }
-        ) {
-            return true;
-        }
-        // Temporary success ✓ that auto-expires after 5s — keep redrawing until
-        // it should disappear.
-        if self
-            .remote_op_success_at
-            .map(|t| t.elapsed() < std::time::Duration::from_secs(5))
-            .unwrap_or(false)
-        {
-            return true;
-        }
-        false
+        )
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -1345,58 +1459,88 @@ impl Gui {
             if let Some(rx) = &self.initial_load_rx {
                 let mut got_files = false;
                 let mut got_rebase_in_progress = false;
-                let received_before = self.initial_load_received;
-                while let Ok(part) = rx.try_recv() {
-                    let mut model = self.model.lock().unwrap();
-                    match part {
-                        ModelPart::Files(v) => {
-                            model.set_files(v);
-                            got_files = true;
-                        }
-                        ModelPart::Branches(v) => model.branches = v,
-                        ModelPart::Commits(v) => {
-                            // Stream already applies the active filter when one is set
-                            // (`load_model_streaming(commit_filter)`), so always take it.
-                            self.commit_history_complete = v.len() < DEFAULT_COMMIT_LIMIT;
-                            model.set_commits(v);
-                        }
-                        ModelPart::Stash(v) => model.stash_entries = v,
-                        ModelPart::Remotes(v) => model.remotes = v,
-                        ModelPart::Tags(v) => model.tags = v,
-                        ModelPart::Worktrees(v) => model.worktrees = v,
-                        ModelPart::Submodules(v) => model.submodules = v,
-                        ModelPart::Reflog(v) => model.reflog_commits = v,
-                        ModelPart::DiffStats { added, deleted } => {
-                            model.total_additions = added;
-                            model.total_deletions = deleted;
-                        }
-                        ModelPart::RepoStatus {
-                            is_rebasing,
-                            is_merging,
-                            is_cherry_picking,
-                            is_bisecting,
-                            rebase_onto_hash,
-                        } => {
-                            model.is_rebasing = is_rebasing;
-                            model.is_merging = is_merging;
-                            model.is_cherry_picking = is_cherry_picking;
-                            model.is_bisecting = is_bisecting;
-                            model.rebase_onto_hash = rebase_onto_hash;
-                            if is_rebasing {
-                                got_rebase_in_progress = true;
+                // Files/RepoStatus are the only parts whose arrival can change
+                // what the working-tree diff shows — other parts must not
+                // re-trigger a diff load (stream completion already does).
+                let mut got_diffable_part = false;
+                // A dead sender (loader thread panicked or exited early) ends
+                // the stream exactly like the last part: without this the
+                // loop would spin at 12.5fps on `refresh_in_progress` forever.
+                let mut stream_done = false;
+                loop {
+                    match rx.try_recv() {
+                        Ok(part) => {
+                            let mut model = self.model.lock().unwrap();
+                            match part {
+                                ModelPart::Files(v) => {
+                                    model.set_files(v);
+                                    got_files = true;
+                                    got_diffable_part = true;
+                                }
+                                ModelPart::Branches(v) => model.branches = v,
+                                ModelPart::Commits(v) => {
+                                    // Stream already applies the active filter when one is set
+                                    // (`load_model_streaming(commit_filter)`), so always take it.
+                                    self.commit_history_complete = v.len() < DEFAULT_COMMIT_LIMIT;
+                                    model.set_commits(v);
+                                }
+                                ModelPart::Stash(v) => model.stash_entries = v,
+                                ModelPart::Remotes(v) => model.remotes = v,
+                                ModelPart::Tags(v) => {
+                                    // Cache remote tag names so background
+                                    // refreshes can skip the ls-remote probe.
+                                    self.remote_tag_names = v
+                                        .iter()
+                                        .filter(|t| t.on_remote)
+                                        .map(|t| t.name.clone())
+                                        .collect();
+                                    model.tags = v;
+                                }
+                                ModelPart::Worktrees(v) => model.worktrees = v,
+                                ModelPart::Submodules(v) => model.submodules = v,
+                                ModelPart::Reflog(v) => model.reflog_commits = v,
+                                ModelPart::DiffStats { added, deleted } => {
+                                    model.total_additions = added;
+                                    model.total_deletions = deleted;
+                                }
+                                ModelPart::RepoStatus {
+                                    is_rebasing,
+                                    is_merging,
+                                    is_cherry_picking,
+                                    is_bisecting,
+                                    rebase_onto_hash,
+                                } => {
+                                    model.is_rebasing = is_rebasing;
+                                    model.is_merging = is_merging;
+                                    model.is_cherry_picking = is_cherry_picking;
+                                    model.is_bisecting = is_bisecting;
+                                    model.rebase_onto_hash = rebase_onto_hash;
+                                    got_diffable_part = true;
+                                    if is_rebasing {
+                                        got_rebase_in_progress = true;
+                                    }
+                                }
+                                ModelPart::Head { hash, branch_name } => {
+                                    model.head_hash = hash;
+                                    model.head_branch_name = branch_name;
+                                }
+                                ModelPart::RepoUrl(url) => model.repo_url = url,
+                                ModelPart::Contributors(c) => model.contributors = c,
+                                // A part's git command failed — counts toward
+                                // completion but carries no data.
+                                ModelPart::Skipped => {}
                             }
+                            self.initial_load_received += 1;
                         }
-                        ModelPart::Head { hash, branch_name } => {
-                            model.head_hash = hash;
-                            model.head_branch_name = branch_name;
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            stream_done = true;
+                            break;
                         }
-                        ModelPart::RepoUrl(url) => model.repo_url = url,
-                        ModelPart::Contributors(c) => model.contributors = c,
                     }
-                    self.initial_load_received += 1;
                 }
                 // Enter the InProgress rebase view as soon as we know a rebase
-                // is on disk — don't wait for a future `refresh()` tick (focus
+                // is on disk — don't wait for a future refresh tick (focus
                 // event / auto-refresh interval), which is what made the view
                 // pop in ~0.8s after the default screen appeared on startup.
                 if got_rebase_in_progress
@@ -1411,16 +1555,11 @@ impl Gui {
                     self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
                     self.context_mgr.files_list_len_override = Some(self.file_tree_nodes.len());
                 }
-                // Trigger a diff reload when new data arrived THIS frame.
-                // (A cumulative `> 0` check here re-requested the same diff
-                // every frame for the whole stream, and each request's
-                // generation bump invalidated the in-flight result — diffs
-                // only settled once streaming finished.)
-                if self.initial_load_received > received_before {
+                if got_diffable_part {
                     self.needs_diff_refresh = true;
                 }
-                // All parts received — done loading.
-                if self.initial_load_received >= MODEL_PART_COUNT {
+                // All parts received (or the stream died) — done loading.
+                if stream_done || self.initial_load_received >= MODEL_PART_COUNT {
                     self.initial_load_rx = None;
                     let was_refresh = self.refresh_in_progress;
                     self.refresh_in_progress = false;
@@ -1429,6 +1568,11 @@ impl Gui {
                     self.needs_files_refresh = false;
                     self.needs_diff_refresh = true;
                     self.last_refresh_at = Instant::now();
+                    // Re-baseline the external-change watcher: refs the refresh
+                    // itself wrote must not read as external changes.
+                    if let Some(tx) = &self.external_change_reseed_tx {
+                        let _ = tx.send(());
+                    }
                     // Re-apply filters / selection-dependent views after stream
                     // completes (initial load and background refresh). Needed so
                     // startup `-f/--filter` takes effect once commits arrive.
@@ -1481,16 +1625,20 @@ impl Gui {
                 self.needs_redraw = true;
             }
 
-            // Mark the frame dirty if background work is (or just was) pending,
-            // so its result — and any spinner animation — actually renders.
+            // Mark the frame dirty while something is visibly animating, or on
+            // the busy↔idle transition itself (the frame a background result
+            // lands and clears its in-flight flag). Silent background states
+            // (auto-fetch, the ✓ hold) don't animate, so they no longer pin
+            // the loop at 12.5fps.
             let now_busy = self.has_background_activity();
-            if prev_busy || now_busy {
+            let animating = self.is_animating();
+            if animating || prev_busy != now_busy {
                 self.needs_redraw = true;
             }
 
             // Advance the loading spinner on a wall-clock cadence (decoupled
             // from the frame rate) only while something is animating.
-            if now_busy && self.last_spinner_tick.elapsed() >= SPINNER_TICK {
+            if animating && self.last_spinner_tick.elapsed() >= SPINNER_TICK {
                 self.spinner_frame = self.spinner_frame.wrapping_add(1);
                 self.last_spinner_tick = Instant::now();
                 self.needs_redraw = true;
@@ -1706,17 +1854,12 @@ impl Gui {
 
             // One batch per frame. Reassembly lives on the reader thread so a
             // split ESC [ A cannot leak as Char('A') → amend between frames.
-            // Keep the frame budget tight while anything animated/async is up:
-            // a short timeout while busy keeps the spinner smooth and picks up
-            // background results promptly; a longer idle timeout drops CPU to
-            // ~0. Input wakes `wait_batch` immediately either way.
-            let timeout = if now_busy {
-                SPINNER_TICK
-            } else if self.config.user_config.git.auto_refresh {
-                Duration::from_millis(50)
-            } else {
-                IDLE_POLL
-            };
+            // Keep the frame budget tight only while something is visibly
+            // animating (spinner smoothness, prompt background results);
+            // silent background work and idle both get the long timeout, which
+            // drops idle CPU to ~0. Input wakes `wait_batch` immediately
+            // either way.
+            let timeout = if animating { SPINNER_TICK } else { IDLE_POLL };
             let events = input.wait_batch(timeout);
             if !events.is_empty() {
                 self.needs_redraw = true;
@@ -1732,14 +1875,32 @@ impl Gui {
                 break;
             }
 
-            // Background auto-refresh on refresher.refreshInterval (0 = disabled).
+            // External-change watcher ping: refs moved outside the app → full
+            // refresh. A dead watcher just disables detection.
+            if let Some(rx) = &self.external_change_rx {
+                match rx.try_recv() {
+                    Ok(()) => self.needs_refresh = true,
+                    Err(mpsc::TryRecvError::Empty) => {}
+                    Err(mpsc::TryRecvError::Disconnected) => self.external_change_rx = None,
+                }
+            }
+
+            // Background files refresh on refresher.refreshInterval (0 =
+            // disabled). Status-only, like lazygit's startBackgroundFilesRefresh
+            // — full model reloads are driven by the refs poll above, not a
+            // timer.
             let refresh_interval = self.config.user_config.refresher.refresh_interval;
             if self.config.user_config.git.auto_refresh
                 && refresh_interval > 0
                 && !self.refresh_in_progress
+                // `last_refresh_at` only advances when a refresh *completes*,
+                // so without this guard the timer re-arms while a status is
+                // still in flight and completion immediately re-fires a
+                // second `git status` one tick later.
+                && !self.files_refresh_in_progress
                 && self.last_refresh_at.elapsed().as_secs() >= refresh_interval
             {
-                self.needs_refresh = true;
+                self.needs_files_refresh = true;
             }
 
             // Kick off a non-blocking full refresh (same streaming path as
@@ -1840,9 +2001,27 @@ impl Gui {
     fn receive_diff_results(&mut self) {
         // Drain all available results, keeping only the latest valid one
         let current_gen = self.diff_generation.load(Ordering::Relaxed);
-        while let Ok(result) = self.diff_rx.try_recv() {
+        let prefetch_gen = self.prefetch_generation.load(Ordering::Relaxed);
+        loop {
+            let result = match self.diff_rx.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => break,
+                // Scheduler/prefetch threads are gone — clear in-flight flags
+                // so the pane doesn't spin "Loading" forever.
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.diff_loading = false;
+                    self.diff_loading_since = None;
+                    self.diff_prefetch_inflight.clear();
+                    break;
+                }
+            };
             if result.is_prefetch {
                 self.diff_prefetch_inflight.remove(&result.diff_key);
+                // Stale-generation results (queued before the selection moved)
+                // only exist to clear bookkeeping — never apply or cache them.
+                if result.generation != prefetch_gen {
+                    continue;
+                }
                 if result.diff_key == self.last_diff_key && self.diff_loading {
                     // The user navigated onto this key while the prefetch was
                     // in flight and is waiting on it — apply it directly.
@@ -2029,6 +2208,14 @@ impl Gui {
 
         let generation = self.diff_generation.fetch_add(1, Ordering::Relaxed) + 1;
         if selection_changed {
+            // Debounce bookkeeping: prefetch jobs queued for the previous
+            // selection are dead weight — bump the generation so workers skip
+            // their loads, and clear the inflight set so the new selection
+            // always gets a real interactive job (a stale prefetch result can
+            // no longer satisfy it).
+            self.selection_changed_at = Some(Instant::now());
+            self.prefetch_generation.fetch_add(1, Ordering::Relaxed);
+            self.diff_prefetch_inflight.clear();
             if let Some(mut cached) = self.diff_preview_cache.take(&diff_key) {
                 cached.wrap = self.diff_view.wrap;
                 cached.view_layout = self.diff_view.view_layout;
@@ -2037,13 +2224,6 @@ impl Gui {
                 self.displayed_diff_key = diff_key;
                 self.diff_loading = false;
                 self.diff_loading_since = None;
-                return None;
-            }
-            // A prefetch for this key is already in flight — wait for its
-            // result instead of spawning a duplicate load.
-            if self.diff_prefetch_inflight.contains(&diff_key) {
-                self.diff_loading = true;
-                self.diff_loading_since = Some(Instant::now());
                 return None;
             }
             // Cache miss: keep the outgoing diff on screen while the new one
@@ -2088,6 +2268,16 @@ impl Gui {
             return;
         }
         if self.diff_prefetch_inflight.len() >= DIFF_PREFETCH_INFLIGHT_MAX {
+            return;
+        }
+        // Debounce: hold prefetch back while the selection is still moving so
+        // rapid navigation doesn't spawn a storm of speculative git
+        // subprocesses for diffs nobody will look at.
+        if self
+            .selection_changed_at
+            .map(|t| t.elapsed() < Duration::from_millis(150))
+            .unwrap_or(false)
+        {
             return;
         }
 
@@ -2178,9 +2368,12 @@ impl Gui {
             return;
         }
         self.diff_prefetch_inflight.insert(diff_key.clone());
-        let _ = self
-            .diff_prefetch_tx
-            .send(DiffPrefetchJob { diff_key, load });
+        let prefetch_gen = self.prefetch_generation.load(Ordering::Relaxed);
+        let _ = self.diff_prefetch_tx.send(DiffPrefetchJob {
+            prefetch_gen,
+            diff_key,
+            load,
+        });
     }
 
     fn clear_diff_preview_cache(&mut self) {
@@ -2301,7 +2494,20 @@ impl Gui {
 
     /// Check for completed AI commit message generation results.
     fn receive_ai_commit_results(&mut self) {
-        while let Ok(result) = self.ai_commit_rx.try_recv() {
+        loop {
+            let result = match self.ai_commit_rx.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => break,
+                // Sender side is gone — clear the in-flight job (and recover
+                // the stashed commit draft) so the spinner can't stick.
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.ai_commit_job = None;
+                    if let Some(stashed) = self.pending_commit_popup.take() {
+                        self.saved_commit_popup = Some(stashed);
+                    }
+                    break;
+                }
+            };
             let active_generation = self.ai_commit_job.as_ref().map(|job| job.generation);
             if active_generation != Some(result.generation) {
                 continue;
@@ -2453,7 +2659,17 @@ impl Gui {
     }
 
     fn receive_commit_page_results(&mut self) {
-        while let Ok(result) = self.commit_page_rx.try_recv() {
+        loop {
+            let result = match self.commit_page_rx.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => break,
+                // Sender side is gone — clear the in-flight flag so the
+                // commits panel doesn't stay "loading" forever.
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.commit_page_loading = false;
+                    break;
+                }
+            };
             if result.generation != self.commit_page_generation {
                 continue;
             }
@@ -2618,52 +2834,89 @@ impl Gui {
     /// (offline, auth prompt suppressed, etc.) are intentionally silent —
     /// surfacing them as popups every 60s would be worse than missing data.
     fn receive_auto_fetch_results(&mut self) {
-        while let Ok(result) = self.auto_fetch_rx.try_recv() {
-            self.auto_fetch_in_flight = false;
-            if matches!(result, Ok(true)) {
-                self.needs_refresh = true;
+        loop {
+            match self.auto_fetch_rx.try_recv() {
+                Ok(result) => {
+                    self.auto_fetch_in_flight = false;
+                    if matches!(result, Ok(true)) {
+                        // Refs moved on the remote — the follow-up refresh
+                        // must re-probe remote tags (ls-remote), not reuse
+                        // the cached set.
+                        self.pending_remote_tags = true;
+                        self.needs_refresh = true;
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                // Sender side is gone — clear the in-flight flag so auto-fetch
+                // isn't considered stuck forever.
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.auto_fetch_in_flight = false;
+                    break;
+                }
             }
         }
     }
 
     /// Check for completed background remote operations (push, pull, fetch).
     fn receive_remote_op_results(&mut self) {
-        if let Ok(result) = self.remote_op_rx.try_recv() {
-            self.remote_op_label = None;
-            match result {
-                Ok(()) => {
-                    self.pending_checkout_by_name = None;
-                    self.needs_refresh = true;
-                    self.remote_op_success_at = Some(Instant::now());
-                }
-                Err(e) => {
-                    let err = format!("{}", e);
-                    if let Some(name) = self
-                        .pending_checkout_by_name
-                        .take()
-                        .filter(|_| is_checkout_ref_not_found(&err))
-                    {
-                        self.popup = PopupState::Confirm {
-                            title: "Branch not found".to_string(),
-                            message: format!(
-                                "Branch not found. Create a new branch named {}?",
-                                name
-                            ),
-                            on_confirm: Box::new(move |gui| {
-                                gui.git.create_branch(&name)?;
-                                gui.needs_refresh = true;
-                                Ok(())
-                            }),
-                        };
-                    } else {
+        match self.remote_op_rx.try_recv() {
+            Ok(result) => {
+                // Only ops that touch the remote can change remote tag state —
+                // a local "Commit"/"Reword" must not trigger an ls-remote.
+                // Labels are Push→Pushing/Pull→Pulling/Fetch→Fetching; custom
+                // titles like "Delete remote tag" pass through unchanged.
+                let touched_remote = self
+                    .remote_op_label
+                    .as_deref()
+                    .map(|l| {
+                        matches!(l, "Pushing" | "Pulling" | "Fetching") || l.contains("remote")
+                    })
+                    .unwrap_or(false);
+                self.remote_op_label = None;
+                match result {
+                    Ok(()) => {
                         self.pending_checkout_by_name = None;
-                        self.popup = PopupState::Message {
-                            title: "Error".to_string(),
-                            message: err,
-                            kind: MessageKind::Error,
-                        };
+                        if touched_remote {
+                            self.pending_remote_tags = true;
+                        }
+                        self.needs_refresh = true;
+                        self.remote_op_success_at = Some(Instant::now());
+                    }
+                    Err(e) => {
+                        let err = format!("{}", e);
+                        if let Some(name) = self
+                            .pending_checkout_by_name
+                            .take()
+                            .filter(|_| is_checkout_ref_not_found(&err))
+                        {
+                            self.popup = PopupState::Confirm {
+                                title: "Branch not found".to_string(),
+                                message: format!(
+                                    "Branch not found. Create a new branch named {}?",
+                                    name
+                                ),
+                                on_confirm: Box::new(move |gui| {
+                                    gui.git.create_branch(&name)?;
+                                    gui.needs_refresh = true;
+                                    Ok(())
+                                }),
+                            };
+                        } else {
+                            self.pending_checkout_by_name = None;
+                            self.popup = PopupState::Message {
+                                title: "Error".to_string(),
+                                message: err,
+                                kind: MessageKind::Error,
+                            };
+                        }
                     }
                 }
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            // Sender side is gone — clear the in-flight label so the branch
+            // doesn't show "Pushing" forever.
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.remote_op_label = None;
             }
         }
     }
@@ -2756,6 +3009,9 @@ impl Gui {
             Ok(Ok(files)) => {
                 self.files_refresh_rx = None;
                 self.files_refresh_in_progress = false;
+                // The refresh-interval timer measures between files refreshes
+                // now that the timer itself is files-only.
+                self.last_refresh_at = Instant::now();
                 {
                     let mut model = self.model.lock().unwrap();
                     model.set_files(files);
@@ -2777,12 +3033,17 @@ impl Gui {
             Ok(Err(err)) => {
                 self.files_refresh_rx = None;
                 self.files_refresh_in_progress = false;
+                // Failed or dead refreshes still count against the interval —
+                // otherwise the timer re-fires immediately and error popups
+                // (or silent retries) loop every frame.
+                self.last_refresh_at = Instant::now();
                 self.show_error("Refresh failed", err);
             }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.files_refresh_rx = None;
                 self.files_refresh_in_progress = false;
+                self.last_refresh_at = Instant::now();
             }
         }
     }
@@ -2841,50 +3102,60 @@ impl Gui {
 
     /// Handle results from background menu item operations.
     fn receive_menu_async_results(&mut self) {
-        if let Ok(result) = self.menu_async_rx.try_recv() {
-            // Only process if the popup is still a menu with loading state.
-            // If the user pressed Esc, the menu is already gone — discard the result.
-            let is_menu_loading = matches!(
-                &self.popup,
-                PopupState::Menu {
-                    loading_index: Some(_),
-                    ..
+        match self.menu_async_rx.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => {}
+            // Sender side is gone — clear the menu's loading spinner so it
+            // can't animate forever.
+            Err(mpsc::TryRecvError::Disconnected) => {
+                if let PopupState::Menu { loading_index, .. } = &mut self.popup {
+                    *loading_index = None;
                 }
-            );
-            if !is_menu_loading {
-                return;
             }
-            match result {
-                Ok(outcome) => {
-                    // Close the menu
-                    self.popup = PopupState::None;
-                    match outcome {
-                        popup::MenuAsyncResult::CopyToClipboard(url) => {
-                            if let Err(e) = Platform::copy_to_clipboard(&url) {
-                                self.popup = PopupState::Message {
-                                    title: "Error".to_string(),
-                                    message: format!("{}", e),
-                                    kind: MessageKind::Error,
-                                };
+            Ok(result) => {
+                // Only process if the popup is still a menu with loading state.
+                // If the user pressed Esc, the menu is already gone — discard the result.
+                let is_menu_loading = matches!(
+                    &self.popup,
+                    PopupState::Menu {
+                        loading_index: Some(_),
+                        ..
+                    }
+                );
+                if !is_menu_loading {
+                    return;
+                }
+                match result {
+                    Ok(outcome) => {
+                        // Close the menu
+                        self.popup = PopupState::None;
+                        match outcome {
+                            popup::MenuAsyncResult::CopyToClipboard(url) => {
+                                if let Err(e) = Platform::copy_to_clipboard(&url) {
+                                    self.popup = PopupState::Message {
+                                        title: "Error".to_string(),
+                                        message: format!("{}", e),
+                                        kind: MessageKind::Error,
+                                    };
+                                }
                             }
-                        }
-                        popup::MenuAsyncResult::OpenUrl(url) => {
-                            if let Err(e) = Platform::open_file(&url) {
-                                self.popup = PopupState::Message {
-                                    title: "Error".to_string(),
-                                    message: format!("{}", e),
-                                    kind: MessageKind::Error,
-                                };
+                            popup::MenuAsyncResult::OpenUrl(url) => {
+                                if let Err(e) = Platform::open_file(&url) {
+                                    self.popup = PopupState::Message {
+                                        title: "Error".to_string(),
+                                        message: format!("{}", e),
+                                        kind: MessageKind::Error,
+                                    };
+                                }
                             }
                         }
                     }
-                }
-                Err(e) => {
-                    self.popup = PopupState::Message {
-                        title: "No PR found".to_string(),
-                        message: format!("{}", e),
-                        kind: MessageKind::Info,
-                    };
+                    Err(e) => {
+                        self.popup = PopupState::Message {
+                            title: "No PR found".to_string(),
+                            message: format!("{}", e),
+                            kind: MessageKind::Info,
+                        };
+                    }
                 }
             }
         }
@@ -3065,8 +3336,13 @@ impl Gui {
 
     /// Request diff loading on a background thread if selection changed.
     fn maybe_request_diff(&mut self) {
-        // Rebase mode has no diff to load
+        // Rebase mode has no diff to load — clear any pending diff state so a
+        // queued refresh can't keep has_background_activity true for the
+        // whole rebase.
         if self.rebase_mode.active {
+            self.needs_diff_refresh = false;
+            self.diff_loading = false;
+            self.diff_loading_since = None;
             return;
         }
 
@@ -3816,6 +4092,9 @@ impl Gui {
 
         // Refresh
         if matches_key(key, &keybindings.universal.refresh) {
+            // Manual refresh re-probes remote tags (ls-remote) — the user
+            // asked for ground truth, not the cached set.
+            self.pending_remote_tags = true;
             self.needs_refresh = true;
             return Ok(());
         }
@@ -6643,7 +6922,23 @@ impl Gui {
                         // Switch to the selected repo
                         let new_git = crate::git::GitCommands::new(std::path::Path::new(&p))?;
                         let new_model = new_git.load_model()?;
+                        // The blocking load queried remotes — seed the cache
+                        // so the next background refresh can skip ls-remote.
+                        gui.remote_tag_names = new_model
+                            .tags
+                            .iter()
+                            .filter(|t| t.on_remote)
+                            .map(|t| t.name.clone())
+                            .collect();
                         gui.git = std::sync::Arc::new(new_git);
+                        // Redirect the external-change watcher to the new repo
+                        // and re-baseline its snapshot.
+                        if let Ok(mut watched) = gui.external_change_git.lock() {
+                            *watched = std::sync::Arc::clone(&gui.git);
+                        }
+                        if let Some(tx) = &gui.external_change_reseed_tx {
+                            let _ = tx.send(());
+                        }
                         *gui.model.lock().unwrap() = new_model;
                         gui.commit_list_cache = presentation::commits::CommitListCache::default();
                         gui.commit_stats_cache.lock().unwrap().clear();
@@ -8483,10 +8778,19 @@ impl Gui {
         self.needs_refresh = false;
         self.reset_commit_pagination();
         self.diff_preview_cache.retain_immutable();
+        // ls-remote is a network probe — only run it when remote refs may
+        // actually have changed (manual refresh, post-fetch/remote-op). Every
+        // other refresh reuses the tag names captured from the last Tags part.
+        let remote_tags = if self.pending_remote_tags {
+            self.pending_remote_tags = false;
+            RemoteTagMode::Query
+        } else {
+            RemoteTagMode::Cached(self.remote_tag_names.clone())
+        };
         let git = Arc::clone(&self.git);
         let commit_filter = self.commit_filter_for_load();
         std::thread::spawn(move || {
-            git.load_model_streaming(&tx, commit_filter);
+            git.load_model_streaming(&tx, commit_filter, remote_tags);
         });
     }
 
@@ -8501,19 +8805,8 @@ impl Gui {
         })
     }
 
-    fn refresh(&mut self) -> Result<()> {
-        self.reset_commit_pagination();
-        self.diff_preview_cache.retain_immutable();
-        let new_model = self.git.load_model()?;
-        {
-            let mut model = self.model.lock().unwrap();
-            model.replace_keeping_file_order(new_model);
-        }
-        self.after_model_refresh()
-    }
-
-    /// Re-apply selection-dependent views after the model was reloaded
-    /// (blocking `refresh` or background streaming refresh).
+    /// Re-apply selection-dependent views after the model was reloaded by a
+    /// background streaming refresh.
     fn after_model_refresh(&mut self) -> Result<()> {
         // Commits arrive already filtered via load_model_streaming(commit_filter)
         // or reload_filtered_commits_async — don't re-fetch here.
@@ -8614,28 +8907,6 @@ impl Gui {
         // rebase (or new conflict) can auto-open the InProgress view again.
         if !is_rebasing && self.rebase_mode.in_progress_dismissed {
             self.rebase_mode.in_progress_dismissed = false;
-        }
-
-        Ok(())
-    }
-
-    /// Lightweight refresh that only reloads files and diff stats.
-    /// Prefer the async status-only path after stage/unstage; this full
-    /// variant is kept for callers that need numstat immediately.
-    fn refresh_files_only(&mut self) -> Result<()> {
-        self.diff_preview_cache.retain_immutable();
-        // Status-only is enough for staging correctness; skip expensive
-        // numstat/hunk subprocesses on this hot path.
-        let files = self.git.load_files_status_only()?;
-        let mut model = self.model.lock().unwrap();
-        model.set_files(files);
-
-        if self.show_file_tree {
-            self.file_tree_nodes = build_file_tree(&model.files, &self.collapsed_dirs);
-            self.context_mgr.files_list_len_override = Some(self.file_tree_nodes.len());
-        } else {
-            self.file_tree_nodes.clear();
-            self.context_mgr.files_list_len_override = None;
         }
 
         Ok(())
@@ -9307,29 +9578,39 @@ mod terminal_mouse_tests {
 
     #[test]
     fn prefetch_workers_always_deliver_a_result() {
-        // begin_diff_request skips spawning an interactive job while a
-        // prefetch for the key is in flight, so a lost result would leave the
-        // pane loading forever.
+        // Every job — including stale-generation ones whose load is skipped —
+        // must produce a result, or the inflight bookkeeping would leak and a
+        // waiter would hang forever.
         let (job_tx, job_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
-        spawn_diff_prefetch_workers(job_rx, result_tx);
+        let latest = Arc::new(AtomicU64::new(1));
+        spawn_diff_prefetch_workers(job_rx, result_tx, Arc::clone(&latest));
 
         for index in 0..8 {
             job_tx
                 .send(DiffPrefetchJob {
+                    prefetch_gen: 1,
                     diff_key: format!("Commits:{index}"),
                     load: Box::new(|| DiffPayload::Empty),
                 })
                 .unwrap();
         }
+        // A stale-generation job still delivers a result without running load.
+        job_tx
+            .send(DiffPrefetchJob {
+                prefetch_gen: 0,
+                diff_key: "Commits:stale".to_string(),
+                load: Box::new(|| panic!("stale job must not run")),
+            })
+            .unwrap();
 
         let mut keys = HashSet::new();
-        for _ in 0..8 {
+        for _ in 0..9 {
             let result = result_rx.recv_timeout(Duration::from_secs(1)).unwrap();
             assert!(result.is_prefetch);
             keys.insert(result.diff_key);
         }
-        assert_eq!(keys.len(), 8);
+        assert_eq!(keys.len(), 9);
     }
 }
 

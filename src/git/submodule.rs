@@ -12,6 +12,12 @@ pub struct Submodule {
 
 impl GitCommands {
     pub fn load_submodules(&self) -> Result<Vec<Submodule>> {
+        // `git submodule` is a shell script that forks sed/basename even when
+        // the repo has none — skip the spawn entirely when there's no
+        // .gitmodules (the only way submodules can exist).
+        if !self.repo_path().join(".gitmodules").exists() {
+            return Ok(Vec::new());
+        }
         let result = self.git().args(&["submodule", "status"]).run()?;
         if !result.success || result.stdout.trim().is_empty() {
             return Ok(Vec::new());

@@ -179,48 +179,6 @@ impl GitCommands {
         }
     }
 
-    /// Get total insertions/deletions across tracked working tree changes.
-    /// Uses `git diff HEAD` for the combined staged+unstaged delta from HEAD.
-    /// Untracked files are omitted (matching lazygit) — reading every untracked
-    /// path is prohibitively slow on large trees like node_modules.
-    pub fn diff_shortstat(&self) -> Result<(usize, usize)> {
-        // Unborn HEAD (no commits yet): fall back to index vs empty tree / worktree.
-        let result = if self
-            .git()
-            .args(&["rev-parse", "--verify", "HEAD"])
-            .run()
-            .is_ok_and(|r| r.success)
-        {
-            self.git().args(&["diff", "HEAD", "--shortstat"]).run()?
-        } else {
-            // No HEAD: only staged changes have a meaningful shortstat.
-            self.git()
-                .args(&["diff", "--cached", "--shortstat"])
-                .run()?
-        };
-
-        fn parse_stat(s: &str) -> (usize, usize) {
-            let mut added = 0usize;
-            let mut deleted = 0usize;
-            // Format: " 3 files changed, 10 insertions(+), 2 deletions(-)"
-            for part in s.split(',') {
-                let part = part.trim();
-                if part.contains("insertion") {
-                    if let Some(n) = part.split_whitespace().next().and_then(|w| w.parse().ok()) {
-                        added = n;
-                    }
-                } else if part.contains("deletion")
-                    && let Some(n) = part.split_whitespace().next().and_then(|w| w.parse().ok())
-                {
-                    deleted = n;
-                }
-            }
-            (added, deleted)
-        }
-
-        Ok(parse_stat(&result.stdout))
-    }
-
     /// Get the list of files changed in a commit with their change status.
     /// Uses `hash^1..hash` to correctly handle merge commits (including stashes).
     /// Falls back to single-arg diff-tree for root commits (no parent).

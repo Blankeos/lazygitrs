@@ -149,13 +149,17 @@ impl GitCommands {
     /// Non-interactive fetch for the periodic auto-fetch loop. Suppresses any
     /// terminal/credential prompts so a missing SSH passphrase or stored
     /// credential can't hang the TUI.
+    ///
+    /// Returns true iff the fetch actually moved refs (lazygit compares
+    /// `git show-ref` before/after; stdout/stderr heuristics can't tell a
+    /// no-op fetch from one that updated remote-tracking branches).
     pub fn fetch_all_background(&self) -> Result<bool> {
-        let result = self
-            .git()
+        let before = self.refs_snapshot();
+        self.git()
             .args(&["fetch", "--all", "--no-write-fetch-head"])
             .env("GIT_TERMINAL_PROMPT", "0")
             .run_expecting_success()?;
-        Ok(!result.stdout.trim().is_empty() || !result.stderr.trim().is_empty())
+        Ok(self.refs_snapshot() != before)
     }
 
     pub fn pull(&self) -> Result<()> {

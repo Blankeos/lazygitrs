@@ -282,8 +282,11 @@ impl GitCommands {
         if unpushed_hashes.is_empty() {
             return;
         }
+        // HashSet lookup: Vec::contains made this O(unpushed × commits) on
+        // every page/filter load.
+        let unpushed: HashSet<&str> = unpushed_hashes.iter().map(String::as_str).collect();
         for commit in commits {
-            commit.status = if unpushed_hashes.contains(&commit.hash) {
+            commit.status = if unpushed.contains(commit.hash.as_str()) {
                 CommitStatus::Unpushed
             } else {
                 CommitStatus::Pushed
@@ -370,14 +373,7 @@ impl GitCommands {
     pub fn commit_diff(&self, hash: &str) -> Result<String> {
         let result = self
             .git()
-            .args(&[
-                "show",
-                "--format=",
-                "--find-renames",
-                "--find-copies",
-                "--binary",
-                hash,
-            ])
+            .args(&["show", "--format=", "--find-renames", "--binary", hash])
             .run_expecting_success()?;
         Ok(result.stdout)
     }

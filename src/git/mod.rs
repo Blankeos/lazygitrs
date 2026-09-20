@@ -53,6 +53,10 @@ pub enum ModelPart {
     },
     RepoUrl(String),
     Contributors(Vec<(String, usize)>),
+    /// A part whose git command failed. The stream always delivers exactly
+    /// MODEL_PART_COUNT parts so the GUI can count completion without
+    /// touching the model on failure.
+    Skipped,
 }
 
 /// Number of commits to load in the normal commits panel.
@@ -67,12 +71,16 @@ pub const MODEL_PART_COUNT: usize = 14;
 struct RepoPaths {
     worktree_path: PathBuf,
     repo_path: PathBuf,
+    /// `--absolute-git-dir`: the real git dir (a file-indirection target for
+    /// linked worktrees, `.git/modules/…` for submodules).
+    git_dir: PathBuf,
 }
 
 /// Facade for all git operations. Mirrors lazygit's GitCommand.
 pub struct GitCommands {
     repo_path: PathBuf,
     repo_name: String,
+    git_dir: PathBuf,
 }
 
 impl GitCommands {
@@ -87,6 +95,7 @@ impl GitCommands {
         Ok(Self {
             repo_path: paths.worktree_path,
             repo_name,
+            git_dir: paths.git_dir,
         })
     }
 
@@ -107,6 +116,7 @@ impl GitCommands {
 
         if !result.success {
             return Ok(RepoPaths {
+                git_dir: fallback.join(".git"),
                 worktree_path: fallback.clone(),
                 repo_path: fallback,
             });
@@ -115,6 +125,7 @@ impl GitCommands {
         let lines: Vec<&str> = result.stdout_trimmed().lines().collect();
         if lines.len() < 4 || lines[0].is_empty() {
             return Ok(RepoPaths {
+                git_dir: fallback.join(".git"),
                 worktree_path: fallback.clone(),
                 repo_path: fallback,
             });
@@ -135,11 +146,35 @@ impl GitCommands {
         Ok(RepoPaths {
             worktree_path,
             repo_path,
+            git_dir: repo_git_dir_path,
         })
     }
 
     pub fn repo_path(&self) -> &Path {
         &self.repo_path
+    }
+
+    /// Snapshot of all refs plus HEAD, for cheap "did anything move?" polls.
+    ///
+    /// lazygit polls `for-each-ref` on a short timer and only triggers a full
+    /// refresh when refs change; we use `git show-ref` (all refs incl.
+    /// remotes/tags) concatenated with the HEAD file contents so checkouts
+    /// and detached-HEAD moves are also caught. Empty output on failure or
+    /// an empty repo — a failed snapshot just compares unequal once.
+    pub fn refs_snapshot(&self) -> String {
+        let mut out = self
+            .git()
+            .args(&["show-ref"])
+            .run()
+            .map(|r| r.stdout)
+            .unwrap_or_default();
+        if let Ok(head) = std::fs::read_to_string(self.git_dir.join("HEAD")) {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(head.trim());
+        }
+        out
     }
 
     fn git(&self) -> CmdBuilder {
@@ -156,30 +191,34 @@ impl GitCommands {
     /// Git commands are run in parallel using scoped threads since they are
     /// all independent reads against the same repo.
     pub fn load_model(&self) -> Result<Model> {
+        let (head_hash, head_branch) = self.head_info().unwrap_or_default();
         let mut model = Model {
             repo_name: self.repo_name(),
-            head_hash: self.head_hash().unwrap_or_default(),
-            head_branch_name: self.current_branch_name().unwrap_or_default(),
+            head_hash,
+            head_branch_name: head_branch,
             ..Model::default()
         };
 
         // Run all independent git loads in parallel.
         std::thread::scope(|s| {
-            let h_files = s.spawn(|| self.load_files());
+            // Files + repo-wide diff totals come from one `git diff` run.
+            let h_files = s.spawn(|| self.load_files_with_stats());
             let h_branches = s.spawn(|| self.load_branches());
             let h_commits = s.spawn(|| self.load_commits(DEFAULT_COMMIT_LIMIT));
             let h_stash = s.spawn(|| self.load_stash());
             let h_remotes = s.spawn(|| self.load_remotes());
-            let h_tags = s.spawn(|| self.load_tags());
+            let h_tags = s.spawn(|| self.load_tags(&tag::RemoteTagMode::Query));
             let h_worktrees = s.spawn(|| self.load_worktrees());
             let h_submodules = s.spawn(|| self.load_submodules());
             let h_reflog = s.spawn(|| self.load_reflog(100));
-            let h_shortstat = s.spawn(|| self.diff_shortstat());
             let h_status = s.spawn(|| self.repo_status());
             let h_repo_url = s.spawn(|| self.load_repo_url());
             let h_contribs = s.spawn(|| self.load_contributors(500, 10));
 
-            model.files = h_files.join().unwrap()?;
+            let (files, added, deleted) = h_files.join().unwrap()?;
+            model.files = files;
+            model.total_additions = added;
+            model.total_deletions = deleted;
             model.branches = h_branches.join().unwrap()?;
             model.set_commits(h_commits.join().unwrap()?);
             model.stash_entries = h_stash.join().unwrap()?;
@@ -188,11 +227,6 @@ impl GitCommands {
             model.worktrees = h_worktrees.join().unwrap().unwrap_or_default();
             model.submodules = h_submodules.join().unwrap().unwrap_or_default();
             model.reflog_commits = h_reflog.join().unwrap().unwrap_or_default();
-
-            if let Ok((added, deleted)) = h_shortstat.join().unwrap() {
-                model.total_additions = added;
-                model.total_deletions = deleted;
-            }
 
             if let Ok(status) = h_status.join().unwrap() {
                 model.is_rebasing = status.is_rebasing;
@@ -218,36 +252,62 @@ impl GitCommands {
     /// receive an updated `ModelPart::Head`.
     /// Stream model parts in parallel. When `commit_filter` is set (e.g. `-f`),
     /// the Commits part loads the filtered page immediately — no unfiltered log
-    /// first, matching lazygit's startup path filter.
+    /// first, matching lazygit's startup path filter. `remote_tags` selects
+    /// whether the Tags part probes remotes via `ls-remote` (Query) or reuses
+    /// a caller-cached set (Cached) so periodic refreshes stay offline-cheap.
     pub fn load_model_streaming(
         self: &Arc<Self>,
         tx: &mpsc::Sender<ModelPart>,
         commit_filter: Option<crate::git::commit::CommitFilter>,
+        remote_tags: tag::RemoteTagMode,
     ) {
+        // Every spawned thread sends exactly one part per logical slot —
+        // ModelPart::Skipped on failure — so the GUI can count
+        // MODEL_PART_COUNT arrivals instead of timing out on silent drops.
         macro_rules! spawn_part {
             ($tx:expr, $self:expr, $variant:ident, $expr:expr) => {{
                 let tx = $tx.clone();
                 let git = Arc::clone($self);
                 std::thread::spawn(move || {
-                    if let Ok(data) = $expr(&git) {
-                        let _ = tx.send(ModelPart::$variant(data));
-                    }
+                    let part = match $expr(&git) {
+                        Ok(data) => ModelPart::$variant(data),
+                        Err(_) => ModelPart::Skipped,
+                    };
+                    let _ = tx.send(part);
                 });
             }};
         }
 
-        spawn_part!(tx, self, Files, |g: &GitCommands| g.load_files());
+        // Files and DiffStats share one thread: load_files_with_stats derives
+        // both from a single `git diff HEAD` run.
+        {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || match git.load_files_with_stats() {
+                Ok((files, added, deleted)) => {
+                    let _ = tx.send(ModelPart::Files(files));
+                    let _ = tx.send(ModelPart::DiffStats { added, deleted });
+                }
+                Err(_) => {
+                    let _ = tx.send(ModelPart::Skipped);
+                    let _ = tx.send(ModelPart::Skipped);
+                }
+            });
+        }
         spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
         if let Some(filter) = commit_filter {
             let tx = tx.clone();
             let git = Arc::clone(self);
             std::thread::spawn(move || {
                 let unpushed = git.unpushed_commit_hashes().unwrap_or_default();
-                if let Ok(mut commits) =
-                    git.load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, 0)
-                {
-                    Self::apply_unpushed_status(&mut commits, &unpushed);
-                    let _ = tx.send(ModelPart::Commits(commits));
+                match git.load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, 0) {
+                    Ok(mut commits) => {
+                        Self::apply_unpushed_status(&mut commits, &unpushed);
+                        let _ = tx.send(ModelPart::Commits(commits));
+                    }
+                    Err(_) => {
+                        let _ = tx.send(ModelPart::Skipped);
+                    }
                 }
             });
         } else {
@@ -256,7 +316,17 @@ impl GitCommands {
         }
         spawn_part!(tx, self, Stash, |g: &GitCommands| g.load_stash());
         spawn_part!(tx, self, Remotes, |g: &GitCommands| g.load_remotes());
-        spawn_part!(tx, self, Tags, |g: &GitCommands| g.load_tags());
+        {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || {
+                let part = match git.load_tags(&remote_tags) {
+                    Ok(tags) => ModelPart::Tags(tags),
+                    Err(_) => ModelPart::Skipped,
+                };
+                let _ = tx.send(part);
+            });
+        }
         spawn_part!(tx, self, Worktrees, |g: &GitCommands| g
             .load_worktrees()
             .or_else(|_| Ok::<_, anyhow::Error>(Vec::new())));
@@ -267,23 +337,13 @@ impl GitCommands {
             .load_reflog(100)
             .or_else(|_| Ok::<_, anyhow::Error>(Vec::new())));
 
-        // DiffStats, Head, RepoUrl, Contributors, RepoStatus have different
-        // shapes — spawn them directly.
+        // Head, RepoUrl, Contributors, RepoStatus have different shapes —
+        // spawn them directly.
         {
             let tx = tx.clone();
             let git = Arc::clone(self);
             std::thread::spawn(move || {
-                if let Ok((added, deleted)) = git.diff_shortstat() {
-                    let _ = tx.send(ModelPart::DiffStats { added, deleted });
-                }
-            });
-        }
-        {
-            let tx = tx.clone();
-            let git = Arc::clone(self);
-            std::thread::spawn(move || {
-                let hash = git.head_hash().unwrap_or_default();
-                let branch_name = git.current_branch_name().unwrap_or_default();
+                let (hash, branch_name) = git.head_info().unwrap_or_default();
                 let _ = tx.send(ModelPart::Head { hash, branch_name });
             });
         }
@@ -305,15 +365,17 @@ impl GitCommands {
             let tx = tx.clone();
             let git = Arc::clone(self);
             std::thread::spawn(move || {
-                if let Ok(status) = git.repo_status() {
-                    let _ = tx.send(ModelPart::RepoStatus {
+                let part = match git.repo_status() {
+                    Ok(status) => ModelPart::RepoStatus {
                         is_rebasing: status.is_rebasing,
                         is_merging: status.is_merging,
                         is_cherry_picking: status.is_cherry_picking,
                         is_bisecting: status.is_bisecting,
                         rebase_onto_hash: status.rebase_onto_hash,
-                    });
-                }
+                    },
+                    Err(_) => ModelPart::Skipped,
+                };
+                let _ = tx.send(part);
             });
         }
     }
@@ -376,11 +438,25 @@ impl GitCommands {
 
     /// Get the HEAD commit hash.
     pub fn head_hash(&self) -> Result<String> {
+        Ok(self.head_info()?.0)
+    }
+
+    /// HEAD hash + branch name in one `rev-parse` spawn (the streaming Head
+    /// part used to run `rev-parse HEAD` and `branch --show-current`
+    /// separately). Detached HEAD reports "HEAD" from --abbrev-ref; map it to
+    /// the empty string to match `branch --show-current` semantics.
+    pub fn head_info(&self) -> Result<(String, String)> {
         let result = self
             .git()
-            .args(&["rev-parse", "HEAD"])
+            .args(&["rev-parse", "HEAD", "--abbrev-ref", "HEAD"])
             .run_expecting_success()?;
-        Ok(result.stdout_trimmed().to_string())
+        let mut lines = result.stdout_trimmed().lines();
+        let hash = lines.next().unwrap_or_default().to_string();
+        let branch = match lines.next().unwrap_or_default() {
+            "HEAD" | "" => String::new(),
+            name => name.to_string(),
+        };
+        Ok((hash, branch))
     }
 
     /// Resolve a ref (branch name, tag, hash) to a full commit hash.

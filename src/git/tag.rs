@@ -5,8 +5,19 @@ use anyhow::Result;
 use super::GitCommands;
 use crate::model::Tag;
 
+/// How `load_tags` should determine which tags exist on a remote.
+///
+/// `Query` probes every configured remote with `git ls-remote --tags`
+/// (network I/O, bounded per remote). `Cached` reuses a set captured by an
+/// earlier query — used by periodic refreshes so an offline remote can't
+/// stall the model stream.
+pub enum RemoteTagMode {
+    Query,
+    Cached(HashSet<String>),
+}
+
 impl GitCommands {
-    pub fn load_tags(&self) -> Result<Vec<Tag>> {
+    pub fn load_tags(&self, mode: &RemoteTagMode) -> Result<Vec<Tag>> {
         // Peel annotated tags to the commit they point at.
         let format = "%(refname:short)|%(if)%(*objectname)%(then)%(*objectname:short)%(else)%(objectname:short)%(end)|%(subject)";
         let result = self
@@ -23,7 +34,14 @@ impl GitCommands {
             return Ok(Vec::new());
         }
 
-        let remote_tags = self.remote_tag_names();
+        let queried;
+        let remote_tags = match mode {
+            RemoteTagMode::Query => {
+                queried = self.remote_tag_names();
+                &queried
+            }
+            RemoteTagMode::Cached(set) => set,
+        };
 
         let tags = result
             .stdout
@@ -86,22 +104,55 @@ impl GitCommands {
         names
     }
 
+    /// `git ls-remote --tags <remote>` with a hard wall-clock timeout.
+    ///
+    /// The child is spawned directly (not via CmdBuilder) so we can poll
+    /// `try_wait` and `kill` on timeout — a detached thread + `wait_with_output`
+    /// would leak the process past the deadline. A reader thread drains stdout
+    /// so a tag list larger than the pipe buffer can't stall the child.
     fn ls_remote_tags(&self, remote: &str) -> Option<String> {
         const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-        let repo_path = self.repo_path.clone();
-        let remote = remote.to_string();
+        const POLL: std::time::Duration = std::time::Duration::from_millis(25);
+
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(self.repo_path())
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .args(["ls-remote", "--tags", remote]);
+        let mut child = crate::os::cmd::spawn_non_interactive(&mut cmd).ok()?;
+
+        let Some(mut stdout) = child.stdout.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        };
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = crate::os::cmd::CmdBuilder::git_no_optional_locks()
-                .cwd_path(&repo_path)
-                .env("GIT_TERMINAL_PROMPT", "0")
-                .args(&["ls-remote", "--tags", &remote])
-                .run();
-            let _ = tx.send(result);
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut stdout, &mut buf);
+            let _ = tx.send(buf);
         });
-        match rx.recv_timeout(TIMEOUT) {
-            Ok(Ok(result)) if result.success => Some(result.stdout),
-            _ => None,
+
+        let deadline = std::time::Instant::now() + TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        return None;
+                    }
+                    let buf = rx.recv().unwrap_or_default();
+                    return Some(String::from_utf8_lossy(&buf).into_owned());
+                }
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(POLL);
+                }
+                _ => {
+                    // Timeout or wait error: kill and reap so no git/ssh child
+                    // is left running past the budget.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+            }
         }
     }
 

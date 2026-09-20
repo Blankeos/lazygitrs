@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -11,9 +13,29 @@ use super::highlight::FileHighlighter;
 use super::{ChangeType, DiffLine, InlineSegment};
 
 /// A section of a multi-file diff with its own highlighters.
+///
+/// Highlighters are `Arc` so identical old/new content (unchanged files,
+/// rename-only diffs) shares one tree-sitter parse instead of two.
 pub struct FileSection {
-    pub old_highlighter: FileHighlighter,
-    pub new_highlighter: FileHighlighter,
+    pub old_highlighter: Arc<FileHighlighter>,
+    pub new_highlighter: Arc<FileHighlighter>,
+}
+
+/// Build a `FileSection`, sharing a single highlighter when both sides
+/// have identical content (the common unchanged/rename-only case).
+fn file_section(old: &str, new: &str, filename: &str) -> FileSection {
+    if old == new {
+        let shared = Arc::new(FileHighlighter::new(old, filename));
+        FileSection {
+            old_highlighter: shared.clone(),
+            new_highlighter: shared,
+        }
+    } else {
+        FileSection {
+            old_highlighter: Arc::new(FileHighlighter::new(old, filename)),
+            new_highlighter: Arc::new(FileHighlighter::new(new, filename)),
+        }
+    }
 }
 
 /// Pre-parsed diff data that can be sent across threads.
@@ -428,11 +450,14 @@ impl DiffViewState {
             DiffPanel::Old => dl.old_line.as_ref()?.0,
             DiffPanel::New => dl.new_line.as_ref()?.0,
         };
-        let offset = self
+        // Offsets are sorted by start_idx; binary search for the last entry
+        // at or before this line instead of rescanning per visible row.
+        let pos = self
             .hunk_line_offsets
-            .iter()
-            .rev()
-            .find(|(start_idx, _, _)| *start_idx <= line_idx)
+            .partition_point(|(start_idx, _, _)| *start_idx <= line_idx);
+        let offset = pos
+            .checked_sub(1)
+            .and_then(|i| self.hunk_line_offsets.get(i))
             .map(|(_, old_off, new_off)| match panel {
                 DiffPanel::Old => *old_off,
                 DiffPanel::New => *new_off,
@@ -567,12 +592,15 @@ impl DiffViewState {
         tab_width: usize,
         file_exists_on_disk: bool,
     ) -> ParsedDiff {
-        let lines = super::diff_algo::compute_side_by_side(old, new, tab_width);
+        // Identical content is all-Equal rows by definition — skip the Myers
+        // diff and the second tree-sitter parse entirely.
+        let lines = if old == new {
+            equal_lines_for_content(old, tab_width)
+        } else {
+            super::diff_algo::compute_side_by_side(old, new, tab_width)
+        };
         let hunk_starts = super::diff_algo::find_hunk_starts(&lines);
-        let sections = vec![FileSection {
-            old_highlighter: FileHighlighter::new(old, filename),
-            new_highlighter: FileHighlighter::new(new, filename),
-        }];
+        let sections = vec![file_section(old, new, filename)];
         ParsedDiff {
             filename: filename.to_string(),
             old_content: old.to_string(),
@@ -629,16 +657,14 @@ impl DiffViewState {
         lines: &[DiffLine],
         hunk_line_offsets: &[(usize, usize, usize)],
     ) -> Vec<BlockSpan> {
+        // hunk_line_offsets is sorted by start_idx; binary search for the
+        // last entry at or before idx instead of scanning from the front.
         let offsets_at = |idx: usize| {
-            let mut offsets = (0usize, 0usize);
-            for &(start_idx, old_off, new_off) in hunk_line_offsets {
-                if start_idx <= idx {
-                    offsets = (old_off, new_off);
-                } else {
-                    break;
-                }
-            }
-            offsets
+            let pos = hunk_line_offsets.partition_point(|&(start_idx, _, _)| start_idx <= idx);
+            pos.checked_sub(1)
+                .and_then(|i| hunk_line_offsets.get(i))
+                .map(|&(_, old_off, new_off)| (old_off, new_off))
+                .unwrap_or((0, 0))
         };
         let file_num = |idx: usize, new_side: bool| -> Option<usize> {
             let (old_off, new_off) = offsets_at(idx);
@@ -729,10 +755,7 @@ impl DiffViewState {
             let hunk_starts = super::diff_algo::find_hunk_starts(&lines);
             let hunks = parse_hunk_headers(diff_output);
             let hunk_line_offsets = build_hunk_line_offsets(&hunks, &lines, 0);
-            let sections = vec![FileSection {
-                old_highlighter: FileHighlighter::new(&old, actual_name),
-                new_highlighter: FileHighlighter::new(&new, actual_name),
-            }];
+            let sections = vec![file_section(&old, &new, actual_name)];
             ParsedDiff {
                 filename: actual_name.to_string(),
                 old_content: old,
@@ -870,10 +893,7 @@ impl DiffViewState {
         };
         // Preserve side_view across reloads so periodic refresh doesn't reset it
         // Single section with index 0
-        self.sections = vec![FileSection {
-            old_highlighter: FileHighlighter::new(old, filename),
-            new_highlighter: FileHighlighter::new(new, filename),
-        }];
+        self.sections = vec![file_section(old, new, filename)];
     }
 
     /// Load from raw diff output (git diff).
@@ -900,10 +920,7 @@ impl DiffViewState {
             self.hunk_staged.clear();
             let hunks = parse_hunk_headers(diff_output);
             self.hunk_line_offsets = build_hunk_line_offsets(&hunks, &self.lines, 0);
-            self.sections = vec![FileSection {
-                old_highlighter: FileHighlighter::new(&old, actual_name),
-                new_highlighter: FileHighlighter::new(&new, actual_name),
-            }];
+            self.sections = vec![file_section(&old, &new, actual_name)];
             if same_file {
                 let max = self.max_scroll();
                 self.scroll_offset = self.scroll_offset.min(max);
@@ -1432,8 +1449,16 @@ impl DiffViewState {
         if self.hunk_staged.len() != self.hunk_starts.len() || self.hunk_starts.is_empty() {
             return None;
         }
-        let staged = self.hunk_staged.iter().filter(|&&s| s).count();
-        Some((staged, self.hunk_starts.len() - staged))
+        let (staged, unstaged) = self
+            .hunk_staged
+            .iter()
+            .fold(
+                (0usize, 0usize),
+                |(s, u), &flag| {
+                    if flag { (s + 1, u) } else { (s, u + 1) }
+                },
+            );
+        Some((staged, unstaged))
     }
 
     /// Zero-based hunk index owning `line_idx`, or `None` for file headers
@@ -1511,7 +1536,7 @@ impl DiffViewState {
     ) -> Option<(&FileHighlighter, &FileHighlighter)> {
         self.sections
             .get(section_index)
-            .map(|s| (&s.old_highlighter, &s.new_highlighter))
+            .map(|s| (s.old_highlighter.as_ref(), s.new_highlighter.as_ref()))
     }
 }
 
@@ -3347,10 +3372,7 @@ fn build_file_sections_parallel(section_meta: &[(&str, &str)]) -> Vec<FileSectio
     if n == 1 {
         let (name, body) = section_meta[0];
         let (old, new) = parse_unified_diff(body);
-        return vec![FileSection {
-            old_highlighter: FileHighlighter::new(&old, name),
-            new_highlighter: FileHighlighter::new(&new, name),
-        }];
+        return vec![file_section(&old, &new, name)];
     }
 
     let workers = std::thread::available_parallelism()
@@ -3378,10 +3400,7 @@ fn build_file_sections_parallel(section_meta: &[(&str, &str)]) -> Vec<FileSectio
                 .into_iter()
                 .map(|(name, body)| {
                     let (old, new) = parse_unified_diff(&body);
-                    FileSection {
-                        old_highlighter: FileHighlighter::new(&old, &name),
-                        new_highlighter: FileHighlighter::new(&new, &name),
-                    }
+                    file_section(&old, &new, &name)
                 })
                 .collect::<Vec<_>>()
         }));
@@ -3629,6 +3648,60 @@ fn head_blocks_staged_flags(head_diff: &str, unstaged_diff: &str, tab_width: usi
         .collect()
 }
 
+/// All-`Equal` DiffLines for content that is identical on both sides.
+///
+/// Replicates `compute_side_by_side`'s output for the `old == new` case
+/// without running Myers: line splitting matches `similar`'s
+/// `tokenize_lines` (`\n`, `\r\n`, and lone `\r` are all terminators) and
+/// each line gets the same `trim_end` + `expand_tabs` treatment.
+fn equal_lines_for_content(content: &str, tab_width: usize) -> Vec<DiffLine> {
+    let bytes = content.as_bytes();
+    let mut lines = Vec::new();
+    let mut last = 0usize;
+    let mut i = 0usize;
+    let mut num = 1usize;
+
+    let push_line = |lines: &mut Vec<DiffLine>, text: &str, num: &mut usize| {
+        let text = super::expand_tabs(text.trim_end(), tab_width);
+        lines.push(DiffLine {
+            old_line: Some((*num, text.clone())),
+            new_line: Some((*num, text)),
+            change_type: ChangeType::Equal,
+            old_segments: None,
+            new_segments: None,
+            file_header: None,
+            section_index: 0,
+        });
+        *num += 1;
+    };
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' => {
+                // \r\n is one terminator; a lone \r also ends the line.
+                let end = if bytes.get(i + 1) == Some(&b'\n') {
+                    i + 2
+                } else {
+                    i + 1
+                };
+                push_line(&mut lines, &content[last..end], &mut num);
+                last = end;
+                i = end;
+            }
+            b'\n' => {
+                push_line(&mut lines, &content[last..=i], &mut num);
+                i += 1;
+                last = i;
+            }
+            _ => i += 1,
+        }
+    }
+    if last < content.len() {
+        push_line(&mut lines, &content[last..], &mut num);
+    }
+    lines
+}
+
 /// Build the hunk line offset table from parsed hunk headers and
 /// computed DiffLines. Each entry is `(first_diff_line_idx, old_offset, new_offset)`.
 fn build_hunk_line_offsets(
@@ -3640,9 +3713,12 @@ fn build_hunk_line_offsets(
         return Vec::new();
     }
 
-    let mut offsets = Vec::new();
+    let mut offsets = Vec::with_capacity(hunks.len());
     let mut cumulative_old = 0usize; // content-relative old line count before this hunk
     let mut cumulative_new = 0usize;
+    // Hunks and DiffLines are both in order, so a single forward cursor
+    // replaces the per-hunk rescan (was O(hunks × lines)).
+    let mut cursor = file_header_count;
 
     for (hunk_idx, &(old_start, new_start, old_count, new_count)) in hunks.iter().enumerate() {
         // The content line numbers for this hunk start at cumulative + 1
@@ -3656,24 +3732,27 @@ fn build_hunk_line_offsets(
             file_header_count
         } else {
             // Find the first DiffLine whose old_line or new_line number
-            // matches the content start of this hunk.
-            lines
-                .iter()
-                .enumerate()
-                .skip(file_header_count)
-                .find(|(_, dl)| {
-                    dl.old_line
-                        .as_ref()
-                        .map(|(n, _)| *n >= content_old_start)
-                        .unwrap_or(false)
-                        || dl
-                            .new_line
-                            .as_ref()
-                            .map(|(n, _)| *n >= content_new_start)
-                            .unwrap_or(false)
-                })
-                .map(|(idx, _)| idx)
-                .unwrap_or(0)
+            // matches the content start of this hunk. The cursor only moves
+            // forward: content line numbers are non-decreasing, so no earlier
+            // line can satisfy a later hunk's (larger) thresholds.
+            while cursor < lines.len() {
+                let dl = &lines[cursor];
+                let old_reached = dl
+                    .old_line
+                    .as_ref()
+                    .map(|(n, _)| *n >= content_old_start)
+                    .unwrap_or(false);
+                let new_reached = dl
+                    .new_line
+                    .as_ref()
+                    .map(|(n, _)| *n >= content_new_start)
+                    .unwrap_or(false);
+                if old_reached || new_reached {
+                    break;
+                }
+                cursor += 1;
+            }
+            if cursor < lines.len() { cursor } else { 0 }
         };
 
         // Offset: actual file line - content line

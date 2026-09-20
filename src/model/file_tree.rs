@@ -100,24 +100,34 @@ pub fn build_file_tree(files: &[File], collapsed_dirs: &HashSet<String>) -> Vec<
         return Vec::new();
     }
 
-    // Collect (path_parts, file_index) and sort with directories before files
-    let mut entries: Vec<(Vec<&str>, usize)> = files
+    // Collect (path_parts, file_index) and sort with directories before files.
+    // `paths` keeps each file's tree path alive so directory prefixes can be
+    // borrowed as &str slices instead of re-joining parts per depth.
+    let paths: Vec<&str> = files.iter().map(|f| tree_path_for_name(&f.name)).collect();
+    let mut entries: Vec<(Vec<&str>, usize)> = paths
         .iter()
         .enumerate()
-        .map(|(i, f)| {
-            let parts: Vec<&str> = tree_path_for_name(&f.name).split('/').collect();
-            (parts, i)
-        })
+        .map(|(i, path)| (path.split('/').collect(), i))
         .collect();
     entries.sort_by(|a, b| sort_dirs_first(&a.0, &b.0));
 
-    // First pass: collect child file indices per directory path
-    let mut dir_children: std::collections::HashMap<String, Vec<usize>> =
+    // First pass: collect child file indices per directory path.
+    // Keys are borrowed prefixes of `paths` — the dir path at depth d is the
+    // slice up to the (d+1)-th '/', so no String is allocated per level.
+    let mut dir_children: std::collections::HashMap<&str, Vec<usize>> =
         std::collections::HashMap::new();
     for (parts, file_idx) in &entries {
-        for depth in 0..parts.len().saturating_sub(1) {
-            let dir_path = parts[..=depth].join("/");
-            dir_children.entry(dir_path).or_default().push(*file_idx);
+        let path = paths[*file_idx];
+        let mut slash_count = 0usize;
+        for (byte_idx, _) in path.match_indices('/') {
+            if slash_count >= parts.len() - 1 {
+                break;
+            }
+            dir_children
+                .entry(&path[..byte_idx])
+                .or_default()
+                .push(*file_idx);
+            slash_count += 1;
         }
     }
 
@@ -140,18 +150,25 @@ pub fn build_file_tree(files: &[File], collapsed_dirs: &HashSet<String>) -> Vec<
         return nodes;
     }
 
-    let mut last_dirs: Vec<String> = Vec::new();
+    // Dir parts of the previous entry, borrowed — entries are sorted so only
+    // the suffix past the common prefix needs new dir nodes.
+    let mut last_dir_parts: Vec<&str> = Vec::new();
 
     for (parts, file_idx) in &entries {
+        let path = paths[*file_idx];
         let dir_parts = &parts[..parts.len() - 1];
         let file_name = rename_leaf_name(&files[*file_idx].name)
             .unwrap_or_else(|| parts[parts.len() - 1].to_string());
 
+        // Byte offset of each '/' in this path: the directory path at depth d
+        // is the borrowed slice path[..slashes[d]] — no per-level join.
+        let slashes: Vec<usize> = path.match_indices('/').map(|(i, _)| i).collect();
+        let dir_path_at = |depth: usize| -> &str { &path[..slashes[depth]] };
+
         // Check if any ancestor directory is collapsed — if so, skip this file
         let mut hidden = false;
         for depth in 0..dir_parts.len() {
-            let ancestor_path = parts[..=depth].join("/");
-            if collapsed_dirs.contains(&ancestor_path) {
+            if collapsed_dirs.contains(dir_path_at(depth)) {
                 // Only hide if this file is deeper than the collapsed dir itself
                 // (the collapsed dir node is still shown)
                 hidden = true;
@@ -160,28 +177,25 @@ pub fn build_file_tree(files: &[File], collapsed_dirs: &HashSet<String>) -> Vec<
         }
 
         // Emit directory nodes for any new directories
-        let common_prefix = last_dirs
+        let common_prefix = last_dir_parts
             .iter()
             .zip(dir_parts.iter())
-            .take_while(|(a, b)| a.as_str() == **b)
+            .take_while(|(a, b)| a == b)
             .count();
 
         // Add new directory levels (but only if not hidden by a collapsed ancestor)
         for (depth, dir) in dir_parts.iter().enumerate().skip(common_prefix) {
-            let dir_path = parts[..=depth].join("/");
+            let dir_path = dir_path_at(depth);
 
             // Check if THIS directory is hidden by a collapsed ancestor above it
-            let dir_hidden = (0..depth).any(|d| {
-                let ancestor = parts[..=d].join("/");
-                collapsed_dirs.contains(&ancestor)
-            });
+            let dir_hidden = (0..depth).any(|d| collapsed_dirs.contains(dir_path_at(d)));
 
             if !dir_hidden {
-                let children = dir_children.get(&dir_path).cloned().unwrap_or_default();
+                let children = dir_children.get(dir_path).cloned().unwrap_or_default();
                 nodes.push(FileTreeNode {
                     depth: depth + 1, // +1 for root node
                     name: dir.to_string(),
-                    path: dir_path.clone(),
+                    path: dir_path.to_string(),
                     file_index: None,
                     is_dir: true,
                     child_file_indices: children,
@@ -189,7 +203,7 @@ pub fn build_file_tree(files: &[File], collapsed_dirs: &HashSet<String>) -> Vec<
             }
 
             // If this directory is collapsed, don't process deeper dirs
-            if collapsed_dirs.contains(&dir_path) {
+            if collapsed_dirs.contains(dir_path) {
                 break;
             }
         }
@@ -198,14 +212,14 @@ pub fn build_file_tree(files: &[File], collapsed_dirs: &HashSet<String>) -> Vec<
             nodes.push(FileTreeNode {
                 depth: dir_parts.len() + 1, // +1 for root node
                 name: file_name,
-                path: parts.join("/"),
+                path: path.to_string(),
                 file_index: Some(*file_idx),
                 is_dir: false,
                 child_file_indices: Vec::new(),
             });
         }
 
-        last_dirs = dir_parts.iter().map(|s| s.to_string()).collect();
+        last_dir_parts = dir_parts.to_vec();
     }
 
     compress_single_child_dirs(&mut nodes);
@@ -223,48 +237,89 @@ pub fn build_file_tree(files: &[File], collapsed_dirs: &HashSet<String>) -> Vec<
 
     nodes
 }
-
 /// Compress single-child directory chains into combined path nodes.
 /// e.g., `apps` → `nextjs` → `src` becomes `apps/nextjs/src` as one node.
+///
+/// Single pass over a fresh Vec: subtree ends are precomputed once with a
+/// depth stack, so each merge is O(1) instead of the old remove() +
+/// descendant re-walk (O(n²) on deep chains).
 fn compress_single_child_dirs(nodes: &mut Vec<FileTreeNode>) {
-    let mut i = 0;
-    while i < nodes.len() {
-        if !nodes[i].is_dir {
-            i += 1;
-            continue;
-        }
-
-        let d = nodes[i].depth;
-
-        // Check if next node is a single dir child at depth d+1
-        if i + 1 < nodes.len() && nodes[i + 1].is_dir && nodes[i + 1].depth == d + 1 {
-            // Ensure no sibling at depth d+1 (only one direct child)
-            let has_sibling = (i + 2..nodes.len())
-                .take_while(|&j| nodes[j].depth > d)
-                .any(|j| nodes[j].depth == d + 1);
-
-            if !has_sibling {
-                let child = nodes.remove(i + 1);
-                if nodes[i].name == "." {
-                    nodes[i].name = child.name;
-                } else {
-                    nodes[i].name = format!("{}/{}", nodes[i].name, child.name);
-                }
-                nodes[i].path = child.path;
-                nodes[i].child_file_indices = child.child_file_indices;
-
-                // Decrease depth of all descendants by 1
-                let mut j = i + 1;
-                while j < nodes.len() && nodes[j].depth > d {
-                    nodes[j].depth -= 1;
-                    j += 1;
-                }
-                continue; // re-check same node for further merges
+    // subtree_end[i] = first index after i whose depth <= nodes[i].depth,
+    // i.e. the exclusive end of i's subtree (nodes.len() when it runs to EOF).
+    let n = nodes.len();
+    let mut subtree_end = vec![n; n];
+    let mut stack: Vec<usize> = Vec::new();
+    for i in 0..n {
+        while let Some(&top) = stack.last() {
+            if nodes[top].depth >= nodes[i].depth {
+                subtree_end[top] = i;
+                stack.pop();
+            } else {
+                break;
             }
         }
-
-        i += 1;
+        stack.push(i);
     }
+
+    fn compress_range(
+        nodes: &[FileTreeNode],
+        subtree_end: &[usize],
+        start: usize,
+        end: usize,
+        depth_shift: usize,
+        out: &mut Vec<FileTreeNode>,
+    ) {
+        let mut i = start;
+        while i < end {
+            let node = &nodes[i];
+            if !node.is_dir {
+                let mut node = node.clone();
+                node.depth -= depth_shift;
+                out.push(node);
+                i += 1;
+                continue;
+            }
+
+            // Absorb a chain of single-child directories: the next node must
+            // be a dir at depth d+1 whose subtree runs to the end of this
+            // node's subtree (no sibling at that level).
+            let mut merged = node.clone();
+            merged.depth -= depth_shift;
+            let mut absorbed = 0usize;
+            let mut child = i + 1;
+            let sub_end = subtree_end[i];
+            while child < sub_end
+                && nodes[child].is_dir
+                && nodes[child].depth == node.depth + 1 + absorbed
+                && subtree_end[child] == sub_end
+            {
+                let c = &nodes[child];
+                if merged.name == "." {
+                    merged.name = c.name.clone();
+                } else {
+                    merged.name = format!("{}/{}", merged.name, c.name);
+                }
+                merged.path = c.path.clone();
+                merged.child_file_indices = c.child_file_indices.clone();
+                absorbed += 1;
+                child += 1;
+            }
+            out.push(merged);
+            compress_range(
+                nodes,
+                subtree_end,
+                i + 1 + absorbed,
+                sub_end,
+                depth_shift + absorbed,
+                out,
+            );
+            i = sub_end;
+        }
+    }
+
+    let mut out = Vec::with_capacity(n);
+    compress_range(nodes, &subtree_end, 0, n, 0, &mut out);
+    *nodes = out;
 }
 
 /// Sort path parts so directories appear before files at each level,

@@ -9,9 +9,17 @@ impl GitCommands {
     /// Full load: porcelain status + per-file numstat/hunk counts.
     /// Prefer [`load_files_status_only`] on the Space-toggle hot path.
     pub fn load_files(&self) -> Result<Vec<File>> {
-        let mut files = self.load_files_status_only()?;
-        self.populate_file_diff_stats(&mut files);
+        let (files, _, _) = self.load_files_with_stats()?;
         Ok(files)
+    }
+
+    /// Full load plus repo-wide insertion/deletion totals, using a single
+    /// `git diff` run for both per-file stats and the totals (the streaming
+    /// model sends Files and DiffStats from the same thread).
+    pub fn load_files_with_stats(&self) -> Result<(Vec<File>, usize, usize)> {
+        let mut files = self.load_files_status_only()?;
+        let totals = self.populate_file_diff_stats(&mut files);
+        Ok((files, totals.0, totals.1))
     }
 
     /// Fast status-only load (no numstat / hunk-count subprocesses).
@@ -70,10 +78,12 @@ impl GitCommands {
         Ok(files)
     }
 
-    /// Populate final working-tree stats relative to HEAD. Failures are
-    /// intentionally non-fatal: status remains useful even when a diff cannot
-    /// be produced (for example, during unusual index states).
-    fn populate_file_diff_stats(&self, files: &mut [File]) {
+    /// Populate final working-tree stats relative to HEAD and return the
+    /// repo-wide (additions, deletions) totals. Failures are intentionally
+    /// non-fatal: status remains useful even when a diff cannot be produced
+    /// (for example, during unusual index states), so a failed diff yields
+    /// zeroed stats rather than an error.
+    fn populate_file_diff_stats(&self, files: &mut [File]) -> (usize, usize) {
         let diff_base = if self
             .git()
             .args(&["rev-parse", "--verify", "HEAD"])
@@ -85,26 +95,18 @@ impl GitCommands {
             vec!["diff", "--cached"]
         };
 
-        let mut numstat_args = diff_base.clone();
-        numstat_args.extend(["--numstat", "-z", "--find-renames", "--no-color"]);
-        let line_stats = self
-            .git()
-            .args(&numstat_args)
-            .run()
-            .ok()
-            .filter(|result| result.success)
-            .map(|result| parse_numstat_z(&result.stdout))
-            .unwrap_or_default();
-
+        // One patch run yields per-file add/del, hunk counts, and totals —
+        // previously this was a `--numstat -z` run plus a separate
+        // `--unified=0` run, plus a third `diff --shortstat` for the totals.
         let mut patch_args = diff_base;
         patch_args.extend(["--unified=0", "--find-renames", "--no-color", "--no-prefix"]);
-        let hunk_counts = self
+        let (line_stats, hunk_counts, totals) = self
             .git()
             .args(&patch_args)
             .run()
             .ok()
             .filter(|result| result.success)
-            .map(|result| parse_hunk_counts(&result.stdout))
+            .map(|result| parse_patch_stats(&result.stdout))
             .unwrap_or_default();
 
         // Match lazygit: only attach numstat/hunk counts for tracked paths.
@@ -121,6 +123,8 @@ impl GitCommands {
             }
             file.hunk_count = hunk_counts.get(&path).copied().unwrap_or(0);
         }
+
+        totals
     }
 
     pub fn stage_file(&self, path: &str) -> Result<()> {
@@ -386,6 +390,114 @@ pub(super) fn parse_hunk_counts(output: &str) -> HashMap<String, usize> {
     counts
 }
 
+/// Parse a `--unified=0 --find-renames --no-color --no-prefix` patch into
+/// (per-file (additions, deletions), per-file hunk counts, repo-wide totals).
+///
+/// One patch run replaces the old `--numstat -z` + `--unified=0` pair plus the
+/// separate `diff --shortstat` for totals. Only `+`/`-` lines inside `@@`
+/// hunks count as content — `---`/`+++` header lines and `diff --git` /
+/// `rename from`/`rename to` metadata do not. `+++ /dev/null` (deletion)
+/// attributes stats to the `---` path; pure renames (no hunks) record (0,0)
+/// under the `rename to` path, matching numstat's `-` entries being skipped.
+///
+/// Hunk bodies are bounded by the counts declared in the `@@ -a,b +c,d @@`
+/// header, so a content line that happens to look like `--- path` is still
+/// counted as a deletion rather than misparsed as the next file's header.
+pub(super) fn parse_patch_stats(
+    output: &str,
+) -> (
+    HashMap<String, (usize, usize)>,
+    HashMap<String, usize>,
+    (usize, usize),
+) {
+    let mut line_stats: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut hunk_counts: HashMap<String, usize> = HashMap::new();
+    let mut totals = (0usize, 0usize);
+
+    let mut current_path: Option<String> = None;
+    let mut old_path: Option<String> = None;
+    // Lines remaining in the current hunk body per its `@@` header counts.
+    let mut hunk_remaining = 0usize;
+
+    for line in output.lines() {
+        if hunk_remaining > 0 && !line.starts_with("diff --git ") {
+            // Inside a hunk body every line is content; `--- `/`+++ ` here are
+            // deleted/added lines, not file headers. `\ No newline at end of
+            // file` doesn't consume a declared line.
+            match line.as_bytes().first() {
+                Some(b'+') => {
+                    totals.0 += 1;
+                    hunk_remaining -= 1;
+                    if let Some(path) = &current_path {
+                        line_stats.entry(path.clone()).or_insert((0, 0)).0 += 1;
+                    }
+                }
+                Some(b'-') => {
+                    totals.1 += 1;
+                    hunk_remaining -= 1;
+                    if let Some(path) = &current_path {
+                        line_stats.entry(path.clone()).or_insert((0, 0)).1 += 1;
+                    }
+                }
+                Some(b' ') => hunk_remaining -= 1, // context line
+                _ => {}
+            }
+            continue;
+        }
+
+        if line.starts_with("diff --git ") {
+            current_path = None;
+            old_path = None;
+            hunk_remaining = 0;
+        } else if let Some(path) = line.strip_prefix("rename to ") {
+            // Pure renames emit no `---`/`+++`/`@@` lines; record (0,0) under
+            // the new path so the file still shows up in the stats maps.
+            let path = unquote_porcelain_path(path);
+            line_stats.entry(path.clone()).or_insert((0, 0));
+            current_path = Some(path);
+        } else if let Some(path) = line.strip_prefix("--- ") {
+            old_path = (path != "/dev/null").then(|| unquote_porcelain_path(path));
+        } else if let Some(path) = line.strip_prefix("+++ ") {
+            current_path = if path == "/dev/null" {
+                old_path.clone()
+            } else {
+                Some(unquote_porcelain_path(path))
+            };
+            if let Some(path) = &current_path {
+                line_stats.entry(path.clone()).or_insert((0, 0));
+            }
+        } else if line.starts_with("@@") {
+            hunk_remaining = hunk_body_len(line);
+            if let Some(path) = &current_path {
+                *hunk_counts.entry(path.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    (line_stats, hunk_counts, totals)
+}
+
+/// Number of body lines declared by an `@@ -old[,n] +new[,m] @@` header.
+/// With `--unified=0` there is no context, so this is exactly the count of
+/// `-`/`+` lines that follow. Missing counts default to 1 (`@@ -3 +5 @@`).
+fn hunk_body_len(header: &str) -> usize {
+    fn count(part: &str) -> usize {
+        // part is like "-3,2" or "+5" — number after the sign, optional ,count
+        part.split_once(',')
+            .map(|(_, n)| n.parse().unwrap_or(0))
+            .unwrap_or(1)
+    }
+
+    let mut ranges = header
+        .trim_start_matches('@')
+        .trim_start()
+        .split_whitespace()
+        .take(2);
+    let old = ranges.next().map(count).unwrap_or(0);
+    let new = ranges.next().map(count).unwrap_or(0);
+    old + new
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -603,6 +715,70 @@ mod tests {
         assert_eq!(counts.get("src/lib.rs"), Some(&2));
         assert_eq!(counts.get("new.rs"), Some(&1));
         assert_eq!(counts.get("removed.rs"), Some(&1));
+    }
+
+    #[test]
+    fn parses_patch_stats_for_modified_renamed_and_deleted_files() {
+        // `git diff --unified=0 --no-prefix` shape: headers + hunk bodies.
+        let output = concat!(
+            "diff --git src/lib.rs src/lib.rs\n",
+            "index 111..222 100644\n",
+            "--- src/lib.rs\n+++ src/lib.rs\n",
+            "@@ -1 +1 @@\n-old\n+new\n",
+            "@@ -8 +8,2 @@\n-old8\n+new8\n+extra\n",
+            "diff --git old.rs new.rs\n",
+            "similarity index 90%\nrename from old.rs\nrename to new.rs\n",
+            "--- old.rs\n+++ new.rs\n@@ -2 +2 @@\n-x\n+y\n",
+            "diff --git removed.rs /dev/null-ish\n",
+            "--- removed.rs\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-gone\n-gone2\n",
+        );
+
+        let (stats, hunks, totals) = parse_patch_stats(output);
+
+        assert_eq!(stats.get("src/lib.rs"), Some(&(3, 2)));
+        assert_eq!(stats.get("new.rs"), Some(&(1, 1)));
+        assert_eq!(stats.get("removed.rs"), Some(&(0, 2)));
+        assert_eq!(hunks.get("src/lib.rs"), Some(&2));
+        assert_eq!(hunks.get("new.rs"), Some(&1));
+        assert_eq!(hunks.get("removed.rs"), Some(&1));
+        assert_eq!(totals, (4, 5));
+    }
+
+    #[test]
+    fn parses_patch_stats_pure_rename_and_binary_as_zero() {
+        // Pure rename: no `---`/`+++`/`@@` lines at all.
+        // Binary: `Binary files ... differ`, also no hunks.
+        let output = concat!(
+            "diff --git old name.rs new name.rs\n",
+            "similarity index 100%\nrename from old name.rs\nrename to new name.rs\n",
+            "diff --git image.png image.png\n",
+            "index 111..222 100644\n",
+            "Binary files image.png and image.png differ\n",
+        );
+
+        let (stats, hunks, totals) = parse_patch_stats(output);
+
+        assert_eq!(stats.get("new name.rs"), Some(&(0, 0)));
+        assert_eq!(stats.get("image.png"), None);
+        assert!(hunks.is_empty());
+        assert_eq!(totals, (0, 0));
+    }
+
+    #[test]
+    fn parses_patch_stats_content_lines_that_look_like_headers() {
+        // A deleted line "--- not a header" inside a hunk body must count as
+        // a deletion, not reset the current file.
+        let output = concat!(
+            "diff --git a.md a.md\n",
+            "--- a.md\n+++ a.md\n",
+            "@@ -1,2 +1 @@\n--- not a header\n-removed\n+added\n",
+        );
+
+        let (stats, hunks, totals) = parse_patch_stats(output);
+
+        assert_eq!(stats.get("a.md"), Some(&(1, 2)));
+        assert_eq!(hunks.get("a.md"), Some(&1));
+        assert_eq!(totals, (1, 2));
     }
 }
 
