@@ -5538,7 +5538,11 @@ impl Gui {
         for commit in model.commits.iter().skip(1) {
             items.push(ListPickerItem {
                 value: commit.hash.clone(),
-                label: format!("{} {}", commit.short_hash(), commit.name),
+                label: format!(
+                    "{} {}",
+                    commit.short_hash(),
+                    presentation::text::plain_text(&commit.name)
+                ),
                 category: "Commits".to_string(),
                 description: None,
             });

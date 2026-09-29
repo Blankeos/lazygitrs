@@ -2098,9 +2098,13 @@ fn get_info_content<'a>(model: &Model, ctx_mgr: &ContextManager) -> Vec<Line<'a>
                     Line::from(format!(" Commit: {}", commit.short_hash())),
                     Line::from(format!(
                         " Author: {} <{}>",
-                        commit.author_name, commit.author_email
+                        super::presentation::text::plain_text(&commit.author_name),
+                        super::presentation::text::plain_text(&commit.author_email)
                     )),
-                    Line::from(format!(" Message: {}", commit.name)),
+                    Line::from(format!(
+                        " Message: {}",
+                        super::presentation::text::plain_text(&commit.name)
+                    )),
                 ]
             } else {
                 vec![Line::from(" No commit selected")]
