@@ -518,7 +518,7 @@ fn handle_diff_exploration_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
                         .map(|(line_idx, _, panel)| (line_idx, panel))
                         .unwrap_or_else(|| {
                             (
-                                gui.diff_view.scroll_offset + (top_row - pl.inner_y) as usize,
+                                gui.diff_view.fallback_line_idx_for_row(top_row, &pl),
                                 sel_ref.panel,
                             )
                         })

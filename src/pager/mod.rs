@@ -20,6 +20,8 @@ pub struct DiffLine {
     pub new_segments: Option<Vec<InlineSegment>>,
     /// If set, this line is a file header separator (multi-file diffs).
     pub file_header: Option<String>,
+    /// Non-source placeholder row. Space-only labels provide vertical padding without source content.
+    pub preview_placeholder: Option<&'static str>,
     /// Index of the file section this line belongs to (for multi-file highlighting).
     pub section_index: usize,
 }

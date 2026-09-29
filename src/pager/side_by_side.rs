@@ -456,6 +456,127 @@ impl DiffViewState {
         &self.filename
     }
 
+    /// True when this diff contains per-file separator lines (multi-file diff).
+    pub fn has_file_headers(&self) -> bool {
+        self.lines.iter().any(|l| l.file_header.is_some())
+    }
+
+    fn header_idx_at_or_before(&self, line_idx: usize) -> Option<usize> {
+        if self.lines.is_empty() {
+            return None;
+        }
+        let clamped = line_idx.min(self.lines.len().saturating_sub(1));
+        for i in (0..=clamped).rev() {
+            if self
+                .lines
+                .get(i)
+                .and_then(|l| l.file_header.as_ref())
+                .is_some()
+            {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Sticky header for a given DiffLine index.
+    /// Returns `(header_line_idx, header_text)` when `line_idx` is content
+    /// scrolled past its file header (so the header is no longer visible).
+    /// Returns `None` when the top row already is a header or when this
+    /// is a single-file diff with no separators.
+    pub fn sticky_header_for_line(&self, line_idx: usize) -> Option<(usize, &str)> {
+        if !self.has_file_headers() {
+            return None;
+        }
+        let line = self.lines.get(line_idx)?;
+        if line.file_header.is_some() {
+            return None;
+        }
+        let h_idx = self.header_idx_at_or_before(line_idx)?;
+        let header = self.lines.get(h_idx)?.file_header.as_ref()?;
+        Some((h_idx, header.as_str()))
+    }
+
+    fn sticky_for_unified_with_width(&self, content_width: usize) -> Option<(usize, &str)> {
+        let w = content_width.max(1);
+        let (line_idx, _, _) = self.unified_line_at_visual_row(self.scroll_offset, w)?;
+        self.sticky_header_for_line(line_idx)
+    }
+
+    /// Header text to pin to the first row of the viewport, if any.
+    /// Split layouts use `scroll_offset` directly; unified maps the visual
+    /// scroll row back to a DiffLine first.
+    pub fn sticky_file_header(&self) -> Option<&str> {
+        if self.view_layout == DiffViewLayout::Unified {
+            let w = self.last_content_width.max(1);
+            self.sticky_for_unified_with_width(w).map(|(_, h)| h)
+        } else {
+            self.sticky_header_for_line(self.scroll_offset)
+                .map(|(_, h)| h)
+        }
+    }
+
+    /// DiffLine index of the header currently pinned by [`Self::sticky_file_header`].
+    pub fn sticky_header_line_idx(&self) -> Option<usize> {
+        if self.view_layout == DiffViewLayout::Unified {
+            let w = self.last_content_width.max(1);
+            self.sticky_for_unified_with_width(w).map(|(idx, _)| idx)
+        } else {
+            self.sticky_header_for_line(self.scroll_offset)
+                .map(|(idx, _)| idx)
+        }
+    }
+
+    /// True when `row` is the pinned sticky header row for this layout.
+    /// Used to skip highlight/selection work on the pinned row and to
+    /// adjust row -> line mapping for the reserved top row.
+    pub fn is_sticky_row(&self, row: u16, layout: &DiffPanelLayout) -> bool {
+        if row != layout.inner_y {
+            return false;
+        }
+        if self.view_layout == DiffViewLayout::Unified {
+            let content_width = layout
+                .new_content_end_x
+                .saturating_sub(layout.new_content_x) as usize;
+            self.sticky_for_unified_with_width(content_width.max(1))
+                .is_some()
+        } else {
+            self.sticky_header_for_line(self.scroll_offset).is_some()
+        }
+    }
+
+    /// Best-effort DiffLine index for a terminal row when hit-testing fails
+    /// (past end of diff). Mirrors [`Self::line_chunk_at_row`] including the
+    /// reserved sticky row so callers don't drift by one.
+    pub fn fallback_line_idx_for_row(&self, row: u16, layout: &DiffPanelLayout) -> usize {
+        if row < layout.inner_y {
+            return 0;
+        }
+        let raw_off = (row - layout.inner_y) as usize;
+        if self.view_layout == DiffViewLayout::Unified {
+            let content_width = layout
+                .new_content_end_x
+                .saturating_sub(layout.new_content_x) as usize;
+            let sticky = self
+                .sticky_for_unified_with_width(content_width.max(1))
+                .is_some();
+            let adj = raw_off.saturating_sub(if sticky { 1 } else { 0 });
+            // Map the adjusted visual offset precisely instead of guessing.
+            if let Some((line_idx, _, _)) =
+                self.unified_line_chunk_panel_from(self.scroll_offset, adj, content_width.max(1))
+            {
+                return line_idx;
+            }
+            return self.lines.len();
+        }
+        let sticky = self.sticky_header_for_line(self.scroll_offset).is_some();
+        let adj = raw_off.saturating_sub(if sticky { 1 } else { 0 });
+        if sticky && raw_off == 0 {
+            return self.sticky_header_line_idx().unwrap_or(self.scroll_offset);
+        }
+        self.scroll_offset.saturating_add(adj)
+    }
+
     /// Activate search mode with an empty query.
     pub fn start_search(&mut self) {
         self.search_active = true;
@@ -765,6 +886,7 @@ impl DiffViewState {
                     old_segments: None,
                     new_segments: None,
                     file_header: Some((*file_name).clone()),
+                    preview_placeholder: None,
                     section_index: section_idx,
                 });
 
@@ -953,6 +1075,7 @@ impl DiffViewState {
                     old_segments: None,
                     new_segments: None,
                     file_header: Some((*file_name).clone()),
+                    preview_placeholder: None,
                     section_index: section_idx,
                 });
 
@@ -1278,17 +1401,64 @@ impl DiffViewState {
         if row < layout.inner_y || row >= layout.inner_end_y {
             return None;
         }
-        let target_off = (row - layout.inner_y) as usize;
 
         if self.view_layout == DiffViewLayout::Unified {
             let content_width = layout
                 .new_content_end_x
                 .saturating_sub(layout.new_content_x) as usize;
+            if let Some((h_idx, _)) = self.sticky_for_unified_with_width(content_width.max(1)) {
+                if row == layout.inner_y {
+                    return Some((h_idx, 0));
+                }
+                let target_off = (row - layout.inner_y - 1) as usize;
+                return self
+                    .unified_line_chunk_panel_at_offset(target_off, content_width)
+                    .map(|(line_idx, chunk_idx, _)| (line_idx, chunk_idx));
+            }
+            let target_off = (row - layout.inner_y) as usize;
             return self
                 .unified_line_chunk_panel_at_offset(target_off, content_width)
                 .map(|(line_idx, chunk_idx, _)| (line_idx, chunk_idx));
         }
 
+        // Split layouts: the first row may be a pinned sticky header.
+        if let Some((h_idx, _)) = self.sticky_header_for_line(self.scroll_offset) {
+            if row == layout.inner_y {
+                return Some((h_idx, 0));
+            }
+            let target_off = (row - layout.inner_y - 1) as usize;
+            if !self.wrap {
+                let idx = self.scroll_offset + target_off;
+                return if idx < self.lines.len() {
+                    Some((idx, 0))
+                } else {
+                    None
+                };
+            }
+            let panel_width = layout
+                .old_content_end_x
+                .saturating_sub(layout.old_content_x) as usize;
+            let right_content_width = layout
+                .new_content_end_x
+                .saturating_sub(layout.new_content_x)
+                as usize;
+            let mut acc = 0usize;
+            // Guard when scroll_offset is past the end (e.g. transient reload).
+            if self.scroll_offset >= self.lines.len() {
+                return None;
+            }
+            for (offset, diff_line) in self.lines[self.scroll_offset..].iter().enumerate() {
+                let line_idx = self.scroll_offset + offset;
+                let num_rows = line_visual_height(diff_line, panel_width, right_content_width);
+                if target_off < acc + num_rows {
+                    return Some((line_idx, target_off - acc));
+                }
+                acc += num_rows;
+            }
+            return None;
+        }
+
+        let target_off = (row - layout.inner_y) as usize;
         if !self.wrap {
             let idx = self.scroll_offset + target_off;
             return if idx < self.lines.len() {
@@ -1306,6 +1476,9 @@ impl DiffViewState {
             .saturating_sub(layout.new_content_x) as usize;
 
         let mut acc = 0usize;
+        if self.scroll_offset >= self.lines.len() {
+            return None;
+        }
         for (offset, diff_line) in self.lines[self.scroll_offset..].iter().enumerate() {
             let line_idx = self.scroll_offset + offset;
             let num_rows = line_visual_height(diff_line, panel_width, right_content_width);
@@ -1326,15 +1499,29 @@ impl DiffViewState {
         layout: &DiffPanelLayout,
         fallback_panel: DiffPanel,
     ) -> Option<(usize, usize, DiffPanel)> {
-        let (line_idx, chunk_idx) = self.line_chunk_at_row(row, layout)?;
-        if self.view_layout != DiffViewLayout::Unified {
-            return Some((line_idx, chunk_idx, fallback_panel));
+        if row < layout.inner_y || row >= layout.inner_end_y {
+            return None;
         }
-
-        let content_width = layout
-            .new_content_end_x
-            .saturating_sub(layout.new_content_x) as usize;
-        self.unified_line_chunk_panel_at_offset((row - layout.inner_y) as usize, content_width)
+        if self.view_layout == DiffViewLayout::Unified {
+            let content_width = layout
+                .new_content_end_x
+                .saturating_sub(layout.new_content_x) as usize;
+            if self
+                .sticky_for_unified_with_width(content_width.max(1))
+                .is_some()
+            {
+                if row == layout.inner_y {
+                    let (h_idx, _) = self.sticky_for_unified_with_width(content_width.max(1))?;
+                    return Some((h_idx, 0, fallback_panel));
+                }
+                let adj = (row - layout.inner_y - 1) as usize;
+                return self.unified_line_chunk_panel_at_offset(adj, content_width);
+            }
+            let off = (row - layout.inner_y) as usize;
+            return self.unified_line_chunk_panel_at_offset(off, content_width);
+        }
+        let (line_idx, chunk_idx) = self.line_chunk_at_row(row, layout)?;
+        Some((line_idx, chunk_idx, fallback_panel))
     }
 
     fn unified_line_chunk_panel_at_offset(
@@ -1622,6 +1809,25 @@ pub fn render_diff(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    // Only a lone unavailable file fills the viewport. In multi-file buffers,
+    // the five placeholder rows below remain ordinary scrollable rows.
+    if state
+        .lines
+        .iter()
+        .all(|line| line.preview_placeholder.is_some())
+    {
+        let message = state
+            .lines
+            .iter()
+            .find_map(|line| {
+                line.preview_placeholder
+                    .filter(|message| !message.trim().is_empty())
+            })
+            .unwrap_or("");
+        render_preview_placeholder(frame.buffer_mut(), inner, message, theme);
+        return;
+    }
+
     if inner.width < 10 || inner.height < 2 {
         return;
     }
@@ -1659,17 +1865,36 @@ pub fn render_diff(
         let show_panel = single_side.unwrap_or(DiffPanel::New); // new-file defaults to New
         let content_width = inner.width.saturating_sub(gutter_width);
 
+        // Sticky file header: pin the current file's separator to the first
+        // row when scrolled past it in a multi-file diff.
+        let sticky = state.sticky_file_header().map(|s| s.to_string());
         let mut row = 0usize;
-        for (idx_offset, diff_line) in state.lines[state.scroll_offset..].iter().enumerate() {
+        if let Some(ref header) = sticky {
+            render_file_header(buf, inner.x, inner.y, inner.width, header, theme);
+            row = 1;
+        }
+        let start = state.scroll_offset.min(state.lines.len());
+        for (idx_offset, diff_line) in state.lines[start..].iter().enumerate() {
             if row >= visible_height {
                 break;
             }
-            let line_idx = state.scroll_offset + idx_offset;
+            let line_idx = start + idx_offset;
 
             // Handle file header separator lines
             if let Some(ref header) = diff_line.file_header {
                 let y = inner.y + row as u16;
                 render_file_header(buf, inner.x, y, inner.width, header, theme);
+                row += 1;
+                continue;
+            }
+
+            if let Some(message) = diff_line.preview_placeholder {
+                render_preview_placeholder(
+                    buf,
+                    Rect::new(inner.x, inner.y + row as u16, inner.width, 1),
+                    message,
+                    theme,
+                );
                 row += 1;
                 continue;
             }
@@ -1823,12 +2048,20 @@ pub fn render_diff(
 
         let mut hover_tooltip_y: Option<u16> = None;
 
+        // Sticky file header: pin the current file's separator to the first
+        // row when scrolled past it in a multi-file diff.
+        let sticky = state.sticky_file_header().map(|s| s.to_string());
         let mut row = 0usize;
-        for (idx_offset, diff_line) in state.lines[state.scroll_offset..].iter().enumerate() {
+        if let Some(ref header) = sticky {
+            render_file_header(buf, inner.x, inner.y, inner.width, header, theme);
+            row = 1;
+        }
+        let start = state.scroll_offset.min(state.lines.len());
+        for (idx_offset, diff_line) in state.lines[start..].iter().enumerate() {
             if row >= visible_height {
                 break;
             }
-            let line_idx = state.scroll_offset + idx_offset;
+            let line_idx = start + idx_offset;
 
             // Handle file header separator lines
             if let Some(ref header) = diff_line.file_header {
@@ -1842,6 +2075,17 @@ pub fn render_diff(
             let (old_highlighter, new_highlighter) = state
                 .highlighters_for_section(diff_line.section_index)
                 .unwrap_or((&default_hl, &default_hl));
+
+            if let Some(message) = diff_line.preview_placeholder {
+                render_preview_placeholder(
+                    buf,
+                    Rect::new(inner.x, inner.y + row as u16, inner.width, 1),
+                    message,
+                    theme,
+                );
+                row += 1;
+                continue;
+            }
 
             let staged = state.is_staged_line(line_idx);
             let (left_bg, right_bg) = line_bg_colors(diff_line.change_type, theme, staged);
@@ -2184,7 +2428,16 @@ fn render_unified_diff_body(
     // (all deletes in a change block, then all inserts) so mid-block scrolling
     // does not drop earlier paired lines.
     let mut skip = state.scroll_offset;
+    // Sticky file header: pin the current file's separator to the first row
+    // when scrolled past it in a multi-file diff.
+    let sticky = state
+        .sticky_for_unified_with_width(content_width as usize)
+        .map(|(_, h)| h.to_string());
     let mut row = 0usize;
+    if let Some(ref header) = sticky {
+        render_file_header(buf, inner.x, inner.y, inner.width, header, theme);
+        row = 1;
+    }
     let mut line_idx = 0usize;
     while line_idx < state.lines.len() {
         if row >= visible_height {
@@ -2201,6 +2454,22 @@ fn render_unified_diff_body(
             let y = inner.y + row as u16;
             render_file_header(buf, inner.x, y, inner.width, header, theme);
             row += 1;
+            line_idx += 1;
+            continue;
+        }
+
+        if let Some(message) = diff_line.preview_placeholder {
+            if skip > 0 {
+                skip -= 1;
+            } else {
+                render_preview_placeholder(
+                    buf,
+                    Rect::new(inner.x, inner.y + row as u16, inner.width, 1),
+                    message,
+                    theme,
+                );
+                row += 1;
+            }
             line_idx += 1;
             continue;
         }
@@ -2564,6 +2833,48 @@ fn render_revert_tooltip(
 }
 
 /// Render a file header separator line spanning the full width.
+/// The same diagonal glyph and muted foreground used for absent diff sides.
+fn render_preview_placeholder(buf: &mut Buffer, area: Rect, message: &str, theme: &Theme) {
+    let area = area.intersection(buf.area);
+    if area.is_empty() {
+        return;
+    }
+    let hatch = "╱".repeat(area.width as usize);
+    let hatch_style = Style::reset().fg(theme.diff_line_number);
+    for y in area.y..area.bottom() {
+        buf.set_stringn(area.x, y, &hatch, area.width as usize, hatch_style);
+    }
+    if message.is_empty() {
+        return;
+    }
+    // Keep the reason on one row even in narrow terminals; never wrap it into
+    // the next file's header. ASCII labels make clipping cell-width safe.
+    let label = if area.width as usize >= message.len() + 4 {
+        format!("  {message}  ")
+    } else {
+        message.chars().take(area.width as usize).collect()
+    };
+    let x = area.x + (area.width - label.len() as u16) / 2;
+    let y = area.y + area.height / 2;
+    let padding = " ".repeat(label.len());
+    for padding_y in y.saturating_sub(1).max(area.y)..=(y + 1).min(area.bottom() - 1) {
+        buf.set_stringn(
+            x,
+            padding_y,
+            &padding,
+            label.len(),
+            Style::reset().fg(theme.text_dimmed),
+        );
+    }
+    buf.set_stringn(
+        x,
+        y,
+        label,
+        area.width as usize,
+        Style::reset().fg(theme.text_dimmed),
+    );
+}
+
 fn render_file_header(buf: &mut Buffer, x: u16, y: u16, width: u16, filename: &str, theme: &Theme) {
     let buf_area = buf.area();
     if y < buf_area.y || y >= buf_area.y + buf_area.height {
@@ -3066,10 +3377,14 @@ pub fn render_diff_search_highlights(
         if y >= pl.inner_end_y || y >= buf_area.y + buf_area.height {
             break;
         }
+        // Never highlight the pinned sticky header row.
+        if state.is_sticky_row(y, &pl) {
+            continue;
+        }
         let line_idx = state
             .line_chunk_at_row(y, &pl)
             .map(|(line_idx, _)| line_idx)
-            .unwrap_or(state.scroll_offset + row_offset);
+            .unwrap_or_else(|| state.fallback_line_idx_for_row(y, &pl));
 
         let is_current_line = current_match_line == Some(line_idx);
 
@@ -3365,7 +3680,7 @@ fn parse_unified_diff(diff: &str) -> (String, String) {
 
 fn diff_lines_from_unified_or_rename_only(diff: &str, tab_width: usize) -> Vec<DiffLine> {
     if is_binary_diff(diff) {
-        return binary_file_placeholder_lines(tab_width);
+        return binary_file_placeholder_lines();
     }
     if let Some((old_path, new_path)) = rename_only_paths(diff) {
         return rename_only_lines(&old_path, &new_path, tab_width);
@@ -3377,24 +3692,33 @@ fn diff_lines_from_unified_or_rename_only(diff: &str, tab_width: usize) -> Vec<D
 /// Git emits `Binary files A and B differ` (and similar) instead of hunks.
 fn is_binary_diff(diff: &str) -> bool {
     diff.lines().any(|line| {
-        let t = line.trim_start();
-        t.starts_with("Binary files ")
-            || t.starts_with("Binary file ")
-            || t.starts_with("GIT binary patch")
+        // Do not trim: a leading space marks ordinary hunk context, not metadata.
+        line.starts_with("Binary files ")
+            || line.starts_with("Binary file ")
+            || line.starts_with("GIT binary patch")
     })
 }
 
-fn binary_file_placeholder_lines(tab_width: usize) -> Vec<DiffLine> {
-    let msg = super::expand_tabs("Binary file (not viewable)", tab_width);
-    vec![DiffLine {
-        old_line: Some((1, msg.clone())),
-        new_line: Some((1, msg)),
+fn binary_file_placeholder_lines() -> Vec<DiffLine> {
+    [
+        "",
+        "                          ",
+        "Binary cannot be previewed",
+        "                          ",
+        "",
+    ]
+    .into_iter()
+    .map(|message| DiffLine {
+        old_line: None,
+        new_line: None,
         change_type: ChangeType::Equal,
         old_segments: None,
         new_segments: None,
         file_header: None,
+        preview_placeholder: Some(message),
         section_index: 0,
-    }]
+    })
+    .collect()
 }
 
 /// True when git emitted a rename/copy with no content hunks (pure move).
@@ -3432,6 +3756,7 @@ fn rename_only_lines(old_path: &str, new_path: &str, tab_width: usize) -> Vec<Di
         old_segments: None,
         new_segments: None,
         file_header: None,
+        preview_placeholder: None,
         section_index: 0,
     }]
 }
@@ -3611,6 +3936,7 @@ mod tests {
             old_segments: None,
             new_segments: None,
             file_header: None,
+            preview_placeholder: None,
             section_index: 0,
         }
     }
@@ -3976,15 +4302,213 @@ mod tests {
                     index 0000000..e8ef7b2\n\
                     Binary files /dev/null and b/foo.png differ\n";
         let parsed = DiffViewState::parse_diff_output("foo.png", diff, 4, true);
-        assert!(!parsed.lines.is_empty());
-        let text = parsed.lines[0]
-            .new_line
-            .as_ref()
-            .map(|(_, s)| s.as_str())
-            .unwrap_or("");
-        assert!(
-            text.contains("not viewable") || text.contains("Binary file"),
-            "got {text:?}"
+        assert_eq!(parsed.lines.len(), 5);
+        assert_eq!(
+            parsed.lines[2].preview_placeholder,
+            Some("Binary cannot be previewed")
         );
+        assert!(
+            parsed
+                .lines
+                .iter()
+                .all(|line| line.old_line.is_none() && line.new_line.is_none())
+        );
+        assert!(parsed.hunk_starts.is_empty());
+        assert!(parsed.hunk_line_offsets.is_empty());
+    }
+
+    const BINARY_DIFF: &str =
+        "diff --git a/foo.png b/foo.png\nBinary files a/foo.png and b/foo.png differ\n";
+    const TEXT_DIFF: &str = "diff --git a/text.txt b/text.txt\n--- a/text.txt\n+++ b/text.txt\n@@ -1 +1 @@\n-old\n+new\n";
+
+    fn render_preview(state: &mut DiffViewState, width: u16, height: u16) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_diff(
+                    frame,
+                    Rect::new(0, 0, width, height),
+                    state,
+                    &Theme::dark(),
+                    true,
+                    false,
+                    true,
+                );
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_row(buf: &Buffer, y: u16) -> String {
+        (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[test]
+    fn lone_binary_fills_pane_in_every_layout() {
+        for layout in [DiffViewLayout::SideBySide, DiffViewLayout::Unified] {
+            for side in [
+                DiffSideView::Both,
+                DiffSideView::OldOnly,
+                DiffSideView::NewOnly,
+            ] {
+                let mut state = DiffViewState::new();
+                state.load_from_diff_output("foo.png", BINARY_DIFF);
+                state.view_layout = layout;
+                state.side_view = side;
+                let buf = render_preview(&mut state, 60, 12);
+                assert!(buffer_row(&buf, 6).contains("  Binary cannot be previewed  "));
+                for y in [1, 4, 8, 10] {
+                    assert_eq!(
+                        (1..59).map(|x| buf[(x, y)].symbol()).collect::<String>(),
+                        "╱".repeat(58)
+                    );
+                }
+                for y in [5, 7] {
+                    assert_eq!(
+                        buffer_row(&buf, y),
+                        format!("│{}{}{}│", "╱".repeat(14), " ".repeat(30), "╱".repeat(14))
+                    );
+                }
+                assert_eq!(buf[(1, 1)].fg, Theme::dark().diff_line_number);
+                assert!(state.file_line_number(1, DiffPanel::New).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_binary_placeholder_is_compact_in_every_layout() {
+        let diff = format!("{BINARY_DIFF}{TEXT_DIFF}{BINARY_DIFF}");
+        for layout in [DiffViewLayout::SideBySide, DiffViewLayout::Unified] {
+            for side in [
+                DiffSideView::Both,
+                DiffSideView::OldOnly,
+                DiffSideView::NewOnly,
+            ] {
+                for wrap in [false, true] {
+                    for width in [24, 80] {
+                        let mut state = DiffViewState::new();
+                        state.apply_parsed(DiffViewState::parse_diff_output(
+                            "mixed", &diff, 4, true,
+                        ));
+                        state.view_layout = layout;
+                        state.side_view = side;
+                        state.wrap = wrap;
+                        let buf = render_preview(&mut state, width, 18);
+                        assert!(buffer_row(&buf, 1).contains("foo.png"));
+                        assert!(buffer_row(&buf, 4).contains("Binary"));
+                        for y in [2, 6] {
+                            assert_eq!(
+                                (1..width - 1)
+                                    .map(|x| buf[(x, y)].symbol())
+                                    .collect::<String>(),
+                                "╱".repeat(width as usize - 2)
+                            );
+                        }
+                        for y in [3, 5] {
+                            let row = buffer_row(&buf, y);
+                            assert!(row.contains(&" ".repeat(30.min(width as usize - 2))));
+                            if width == 80 {
+                                assert!(row.contains('╱'));
+                            }
+                        }
+                        assert!(buffer_row(&buf, 7).contains("text.txt"));
+                        assert!(
+                            buffer_row(&buf, 8).contains(if side == DiffSideView::NewOnly {
+                                "new"
+                            } else {
+                                "old"
+                            })
+                        );
+                        // Exactly five rows per binary, not viewport-sized blocks.
+                        assert_eq!(
+                            state
+                                .lines
+                                .iter()
+                                .filter(|line| line.preview_placeholder.is_some())
+                                .count(),
+                            10
+                        );
+                        assert_eq!(state.hunk_starts, vec![7]);
+                        assert_eq!(state.file_line_number(7, DiffPanel::New), Some(1));
+                        let panel = DiffPanelLayout::compute(buf.area, &state);
+                        assert_eq!(state.line_chunk_at_row(7, &panel), Some((6, 0)));
+                        state.start_search();
+                        state.search_query = "Binary".to_string();
+                        state.update_search();
+                        assert!(state.search_matches.is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scrolling_into_binary_keeps_sticky_header_and_next_file_aligned() {
+        for layout in [DiffViewLayout::SideBySide, DiffViewLayout::Unified] {
+            for wrap in [false, true] {
+                let mut state = DiffViewState::new();
+                state.load_from_diff_output("mixed", &format!("{BINARY_DIFF}{TEXT_DIFF}"));
+                state.view_layout = layout;
+                state.wrap = wrap;
+                state.scroll_offset = 3; // Middle row of the binary placeholder.
+                let buf = render_preview(&mut state, 80, 10);
+                assert!(buffer_row(&buf, 1).contains("foo.png"));
+                assert!(buffer_row(&buf, 2).contains("Binary cannot be previewed"));
+                assert!(buffer_row(&buf, 3).contains('╱'));
+                assert_eq!(
+                    (1..79).map(|x| buf[(x, 4)].symbol()).collect::<String>(),
+                    "╱".repeat(78)
+                );
+                assert!(buffer_row(&buf, 5).contains("text.txt"));
+                let panel = DiffPanelLayout::compute(buf.area, &state);
+                assert_eq!(state.line_chunk_at_row(5, &panel), Some((6, 0)));
+            }
+        }
+    }
+
+    #[test]
+    fn placeholder_clips_to_tiny_offset_areas() {
+        for width in 0..32 {
+            for height in 0..4 {
+                let mut buf = Buffer::empty(Rect::new(0, 0, 40, 8));
+                let area = Rect::new(3, 2, width, height);
+                render_preview_placeholder(
+                    &mut buf,
+                    area,
+                    "Binary cannot be previewed",
+                    &Theme::dark(),
+                );
+                for y in 0..8 {
+                    for x in 0..40 {
+                        if x < area.x || x >= area.right() || y < area.y || y >= area.bottom() {
+                            assert_eq!(buf[(x, y)].symbol(), " ");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn binary_patch_is_placeholder_but_binary_words_in_source_are_not() {
+        let parsed = DiffViewState::parse_diff_output(
+            "foo.png",
+            "diff --git a/foo.png b/foo.png\nGIT binary patch\nliteral 3\nabc\n",
+            4,
+            true,
+        );
+        assert_eq!(
+            parsed.lines[2].preview_placeholder,
+            Some("Binary cannot be previewed")
+        );
+        let text = "diff --git a/text.txt b/text.txt\n--- a/text.txt\n+++ b/text.txt\n@@ -1,2 +1,2 @@\n Binary files are normal text here\n-old\n+new\n";
+        let parsed = DiffViewState::parse_diff_output("text.txt", text, 4, true);
+        assert!(
+            parsed
+                .lines
+                .iter()
+                .all(|line| line.preview_placeholder.is_none())
+        );
+        assert!(!parsed.hunk_starts.is_empty());
     }
 }

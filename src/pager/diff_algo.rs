@@ -28,6 +28,7 @@ pub fn compute_side_by_side(old: &str, new: &str, tab_width: usize) -> Vec<DiffL
                     old_segments: None,
                     new_segments: None,
                     file_header: None,
+                    preview_placeholder: None,
                     section_index: 0,
                 });
                 old_num += 1;
@@ -92,6 +93,7 @@ pub fn compute_side_by_side(old: &str, new: &str, tab_width: usize) -> Vec<DiffL
                         old_segments,
                         new_segments,
                         file_header: None,
+                        preview_placeholder: None,
                         section_index: 0,
                     });
                 }
@@ -104,6 +106,7 @@ pub fn compute_side_by_side(old: &str, new: &str, tab_width: usize) -> Vec<DiffL
                     old_segments: None,
                     new_segments: None,
                     file_header: None,
+                    preview_placeholder: None,
                     section_index: 0,
                 });
                 new_num += 1;
@@ -166,6 +169,7 @@ pub fn compute_side_by_side_from_unified_diff(diff: &str, tab_width: usize) -> V
                 old_segments,
                 new_segments,
                 file_header: None,
+                preview_placeholder: None,
                 section_index: 0,
             });
         }
@@ -204,6 +208,7 @@ pub fn compute_side_by_side_from_unified_diff(diff: &str, tab_width: usize) -> V
                 old_segments: None,
                 new_segments: None,
                 file_header: None,
+                preview_placeholder: None,
                 section_index: 0,
             });
             old_num += 1;

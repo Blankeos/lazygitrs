@@ -816,7 +816,7 @@ fn synthesize_new_file_diff(filename: &str, content: &str) -> String {
     diff
 }
 
-/// Placeholder so the pager shows "Binary file (not viewable)".
+/// Synthetic binary diff so the pager renders its unavailable-preview placeholder.
 fn synthesize_binary_file_diff(filename: &str) -> String {
     format!(
         "diff --git a/{f} b/{f}\n\
@@ -3827,7 +3827,7 @@ impl Gui {
                             .map(|(line_idx, _, panel)| (line_idx, panel))
                             .unwrap_or_else(|| {
                                 (
-                                    self.diff_view.scroll_offset + (top_row - pl.inner_y) as usize,
+                                    self.diff_view.fallback_line_idx_for_row(top_row, &pl),
                                     sel_ref.panel,
                                 )
                             })
@@ -7034,6 +7034,13 @@ impl Gui {
                         self.diff_focused = true;
                         return;
                     }
+                    // Clicks on the pinned sticky file header don't start a
+                    // text selection — there is no content to select there.
+                    if self.diff_view.is_sticky_row(mouse.row, &pl) {
+                        self.diff_view.selection = None;
+                        self.diff_focused = true;
+                        return;
+                    }
                     if let Some(panel) = pl.panel_at_x(mouse.column) {
                         self.diff_view.selection = Some(TextSelection {
                             panel,
@@ -7342,6 +7349,11 @@ impl Gui {
                 if rect_contains(diff_rect, col, row) && !self.diff_view.is_empty() {
                     let pl = DiffPanelLayout::compute(diff_rect, &self.diff_view);
                     if self.try_handle_revert_block_click(diff_rect, pl, col, row) {
+                        self.diff_mode.focus = DiffModeFocus::DiffExploration;
+                        return;
+                    }
+                    if self.diff_view.is_sticky_row(row, &pl) {
+                        self.diff_view.selection = None;
                         self.diff_mode.focus = DiffModeFocus::DiffExploration;
                         return;
                     }
@@ -8905,6 +8917,7 @@ mod terminal_mouse_tests {
                 old_segments: None,
                 new_segments: None,
                 file_header: None,
+                preview_placeholder: None,
                 section_index: 0,
             });
             cache.insert(format!("key-{index}"), view);
@@ -8951,6 +8964,7 @@ mod terminal_mouse_tests {
                 old_segments: None,
                 new_segments: None,
                 file_header: None,
+                preview_placeholder: None,
                 section_index: 0,
             });
             cache.insert(key.to_string(), view);

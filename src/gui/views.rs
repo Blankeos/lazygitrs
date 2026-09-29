@@ -2488,7 +2488,7 @@ pub fn render_selection_overlay(
             .map(|(line_idx, _, panel)| (line_idx, panel))
             .unwrap_or_else(|| {
                 (
-                    diff_view.scroll_offset + (top_row - pl.inner_y) as usize,
+                    diff_view.fallback_line_idx_for_row(top_row, &pl),
                     selection.panel,
                 )
             });
@@ -2580,7 +2580,7 @@ pub fn render_selection_overlay(
         let line_idx = diff_view
             .line_chunk_at_row(row, &pl)
             .map(|(line_idx, _)| line_idx)
-            .unwrap_or_else(|| diff_view.scroll_offset + (row - pl.inner_y) as usize);
+            .unwrap_or_else(|| diff_view.fallback_line_idx_for_row(row, &pl));
         if let Some(diff_line) = diff_view.lines.get(line_idx) {
             // Skip file header separator lines.
             if diff_line.file_header.is_some() {
