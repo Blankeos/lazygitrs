@@ -3,6 +3,7 @@ pub mod bisect;
 pub mod branch;
 pub mod commit;
 pub mod diff;
+pub(crate) mod diff_paths;
 pub mod file;
 pub mod loader;
 pub mod rebase;

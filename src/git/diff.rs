@@ -486,7 +486,7 @@ impl GitCommands {
     }
 }
 
-fn diff_paths_for_label(path: &str) -> Vec<&str> {
+pub(crate) fn diff_paths_for_label(path: &str) -> Vec<&str> {
     match path.split_once(" -> ") {
         Some((old, new)) => vec![old, new],
         None => vec![path],

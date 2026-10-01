@@ -731,6 +731,24 @@ pub fn maybe_request_diff(gui: &mut Gui, generation: u64, diff_key: String) {
                 Ok(diff) if diff.is_empty() => DiffPayload::Empty,
                 Ok(diff) => {
                     let exists = git.repo_path().join(&current_path).exists();
+                    use crate::pager::image_preview::ImageSource;
+                    let paths = crate::git::diff::diff_paths_for_label(&name);
+                    if let Some(parsed) = super::super::image_diff_payload(
+                        &git,
+                        &name,
+                        &diff,
+                        exists,
+                        ImageSource::Revision {
+                            revision: &ref_a,
+                            path: paths[0],
+                        },
+                        ImageSource::Revision {
+                            revision: &ref_b,
+                            path: &current_path,
+                        },
+                    ) {
+                        return DiffPayload::Parsed(parsed);
+                    }
                     // Pure renames between refs: show file content at ref_b.
                     if crate::pager::side_by_side::is_rename_only_diff(&diff) {
                         if let Ok(content) = git.file_content_at_commit(&ref_b, &current_path) {
@@ -778,12 +796,17 @@ pub fn maybe_request_diff(gui: &mut Gui, generation: u64, diff_key: String) {
                     if combined_diff.is_empty() {
                         DiffPayload::Empty
                     } else {
-                        DiffPayload::Parsed(DiffViewState::parse_diff_output(
-                            &dir_name,
+                        let mut parsed =
+                            DiffViewState::parse_diff_output(&dir_name, &combined_diff, 4, true);
+                        super::super::attach_inline_image_previews(
+                            &mut parsed,
+                            &git,
                             &combined_diff,
-                            4,
-                            true,
-                        ))
+                            &ref_a,
+                            Some(&ref_b),
+                            &std::collections::HashSet::new(),
+                        );
+                        DiffPayload::Parsed(parsed)
                     }
                 });
             } else {

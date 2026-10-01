@@ -74,6 +74,30 @@ lazygitrs upgrade 0.0.32   # specific version
   - [x] 🎨 Themes + Theme-Picker!
 - [x] **Grep diff contents** — `Ctrl-F` in Files / Commit Files / Compare searches hunk lines in-context, `Enter` jumps to the file in the current list.
 
+### Image diffs
+
+Selecting a PNG, JPEG, GIF (first frame), WebP, BMP, ICO, or TIFF file shows
+**Before / After** previews in Kitty and Ghostty. Added/deleted files show the
+available image full-width, labeled **Added** or **Deleted**. Staged previews use the index;
+commit-file and ref comparisons use the corresponding Git blobs.
+
+Other binaries, unsupported/corrupt images, files over 20 MiB, and unsupported
+terminal environments keep the striped binary placeholder. Images are decoded
+with memory/dimension limits and resized in the background. SVG and video
+previews are not included yet.
+
+Folder previews in the file tree mix text diffs with inline image sections.
+Each image section is capped at 12 rows; visible sections load in the background
+(two at a time) and offscreen pixels are released. This works in split/unified
+and wrapped views, including commit/stash folders and ref-comparison folders.
+Whole-commit overview buffers still retain binary placeholders. Inline images
+require Kitty/Ghostty placeholder graphics; other terminals keep stripes.
+
+Set `LAZYGITRS_IMAGE_PREVIEW=off` to disable image previews. tmux, screen, and
+Zellij currently fall back to stripes. iTerm2/WezTerm and Sixel are experimental
+(`LAZYGITRS_IMAGE_PREVIEW=experimental`); their overlay cleanup is not yet fully
+verified. Nested editor launches avoid terminal capability queries.
+
 ### Configuration
 
 Config goes in `~/.config/lazygitrs/config.yml` or `~/.config/lazygit/config.yml` — both work, using either only won't break anything so you can reference the [original lazygit config guide](https://github.com/jesseduffield/lazygit/blob/master/docs/Config.md).
