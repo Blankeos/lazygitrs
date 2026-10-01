@@ -170,13 +170,7 @@ fn next_events_interruptible(
             break event;
         }
     };
-    let Event::Key(key) = first else {
-        return Ok(Some(vec![first]));
-    };
-    if key.code != KeyCode::Esc || key.kind != KeyEventKind::Press {
-        return Ok(Some(vec![Event::Key(key)]));
-    }
-    resolve_escape(source).map(Some)
+    resolve_first_event(source, first).map(Some)
 }
 
 /// Blocking read of the next logical event(s).
@@ -189,9 +183,23 @@ fn next_events(source: &mut impl EventSource) -> io::Result<Vec<Event>> {
             break event;
         }
     };
+    resolve_first_event(source, first)
+}
+
+fn resolve_first_event(source: &mut impl EventSource, first: Event) -> io::Result<Vec<Event>> {
     let Event::Key(key) = first else {
         return Ok(vec![first]);
     };
+    // Crossterm parses an intact ESC _ (APC) as Alt+_, not as a control
+    // string. Without this guard, a Kitty reply's G opens Reset and its
+    // remaining `i=31;OK` payload gets typed into the dialog.
+    if key.kind == KeyEventKind::Press
+        && key.modifiers == KeyModifiers::ALT
+        && matches!(key.code, KeyCode::Char(']' | 'P' | '^' | '_'))
+    {
+        consume_control_string(source, Instant::now() + SEQUENCE_DEADLINE)?;
+        return Ok(Vec::new());
+    }
     if key.code != KeyCode::Esc || key.kind != KeyEventKind::Press {
         return Ok(vec![Event::Key(key)]);
     }
@@ -312,7 +320,9 @@ fn consume_control_string(source: &mut impl EventSource, deadline: Instant) -> i
         };
         match key.code {
             KeyCode::Esc => saw_esc = true,
-            KeyCode::Char('\\') if saw_esc => return Ok(()),
+            KeyCode::Char('\\') if saw_esc || key.modifiers == KeyModifiers::ALT => {
+                return Ok(());
+            }
             KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
             _ => saw_esc = false,
         }
@@ -605,5 +615,48 @@ mod tests {
         assert!(is_csi_final('I'));
         assert!(is_csi_final('u'));
         assert!(!is_csi_final('3'));
+    }
+
+    #[test]
+    fn kitty_reply_parsed_as_alt_introducer_is_not_a_shortcut() {
+        for interruptible in [false, true] {
+            let introducer = Event::Key(KeyEvent::new(KeyCode::Char('_'), KeyModifiers::ALT));
+            let terminator = Event::Key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::ALT));
+            let mut items = vec![Some(introducer)];
+            items.extend("Gi=31;OK".chars().map(ch));
+            items.extend([Some(terminator), ch('q')]);
+            let mut source = Scripted::new(items);
+            let read = |source: &mut Scripted| {
+                if interruptible {
+                    next_events_interruptible(source, &AtomicBool::new(false)).map(Option::unwrap)
+                } else {
+                    next_events(source)
+                }
+            };
+            assert!(read(&mut source).unwrap().is_empty());
+            assert_eq!(read(&mut source).unwrap(), vec![key(KeyCode::Char('q'))]);
+        }
+    }
+
+    #[test]
+    fn split_kitty_reply_is_not_a_shortcut() {
+        let mut items = vec![Some(key(KeyCode::Esc)), ch('_')];
+        items.extend("Gi=31;OK".chars().map(ch));
+        items.extend([Some(key(KeyCode::Esc)), ch('\\'), ch('q')]);
+        let mut source = Scripted::new(items);
+        assert!(next_events(&mut source).unwrap().is_empty());
+        assert_eq!(
+            next_events(&mut source).unwrap(),
+            vec![key(KeyCode::Char('q'))]
+        );
+    }
+
+    #[test]
+    fn unrelated_alt_key_still_reaches_the_ui() {
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT));
+        assert_eq!(
+            next_events(&mut Scripted::new(vec![Some(event.clone())])).unwrap(),
+            vec![event]
+        );
     }
 }
