@@ -126,6 +126,8 @@ pub struct UniversalKeybinding {
     pub reset_side_panel: String,
     #[serde(rename = "toggleDiffViewLayout")]
     pub toggle_diff_view_layout: String,
+    #[serde(rename = "customCommandPrompt")]
+    pub custom_command_prompt: String,
 }
 
 impl Default for UniversalKeybinding {
@@ -181,6 +183,7 @@ impl Default for UniversalKeybinding {
             main_panel_full: "<a-j>".into(),
             reset_side_panel: "<a-r>".into(),
             toggle_diff_view_layout: "\\".into(),
+            custom_command_prompt: ":".into(),
         }
     }
 }
