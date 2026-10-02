@@ -197,6 +197,24 @@ pub fn render(
                         );
                     }
                 }
+                ContextId::Worktrees | ContextId::Submodules => {
+                    let items = if ctx_id == ContextId::Worktrees {
+                        render_worktree_list(model, theme)
+                    } else {
+                        render_submodule_list(model, theme)
+                    };
+                    render_list_ctx(
+                        frame,
+                        fl.main_panel,
+                        block,
+                        items,
+                        selected,
+                        true,
+                        theme,
+                        ctx_mgr,
+                        ctx_id,
+                    );
+                }
                 ContextId::Branches => {
                     let items = presentation::branches::render_branch_list(
                         model,
@@ -492,31 +510,10 @@ pub fn render(
                 );
             }
             ContextId::Submodules => {
-                if model.submodules.is_empty() {
-                    let widget = Paragraph::new(" (no submodules)").block(block);
-                    frame.render_widget(widget, rect);
-                } else {
-                    let items: Vec<ListItem> = model
-                        .submodules
-                        .iter()
-                        .map(|sub| {
-                            let line = Line::from(vec![
-                                Span::styled(
-                                    format!("  {} ", sub.name),
-                                    Style::default().fg(theme.accent),
-                                ),
-                                Span::styled(
-                                    sub.path.clone(),
-                                    Style::default().fg(theme.text_dimmed),
-                                ),
-                            ]);
-                            ListItem::new(line)
-                        })
-                        .collect();
-                    render_list_ctx(
-                        frame, rect, block, items, selected, is_active, theme, ctx_mgr, ctx_id,
-                    );
-                }
+                let items = render_submodule_list(model, theme);
+                render_list_ctx(
+                    frame, rect, block, items, selected, is_active, theme, ctx_mgr, ctx_id,
+                );
             }
             ContextId::Branches => {
                 // If BranchCommits or BranchCommitFiles is active, render that instead
@@ -1216,6 +1213,22 @@ fn wrap_popup_lines(message: &str, width: usize) -> Vec<String> {
         .collect()
 }
 
+fn render_submodule_list<'a>(model: &Model, theme: &Theme) -> Vec<ListItem<'a>> {
+    model
+        .submodules
+        .iter()
+        .map(|sub| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("  {} ", sub.name),
+                    Style::default().fg(theme.accent),
+                ),
+                Span::styled(sub.path.clone(), Style::default().fg(theme.text_dimmed)),
+            ]))
+        })
+        .collect()
+}
+
 fn visible_popup_lines(wrapped: &[String], max_lines: usize) -> Vec<String> {
     if wrapped.len() <= max_lines {
         return wrapped.to_vec();
@@ -1332,6 +1345,171 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
+
+    fn render_tab(
+        model: &crate::model::Model,
+        context: super::ContextId,
+        mode: super::ScreenMode,
+    ) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        let mut contexts = super::ContextManager::new();
+        contexts.set_active(context);
+        terminal
+            .draw(|frame| {
+                super::render(
+                    frame,
+                    model,
+                    &mut contexts,
+                    &super::LayoutState::default(),
+                    &PopupState::None,
+                    &crate::config::AppConfig {
+                        debug: false,
+                        version: String::new(),
+                        user_config: Default::default(),
+                        app_state: Default::default(),
+                        config_dir: Default::default(),
+                        state_dir: Default::default(),
+                        state_path: Default::default(),
+                    },
+                    &Theme::default(),
+                    &mut super::DiffViewState::default(),
+                    &mut super::presentation::commits::CommitListCache::default(),
+                    mode,
+                    false,
+                    &[],
+                    &Default::default(),
+                    false,
+                    None,
+                    None,
+                    &[],
+                    false,
+                    &[],
+                    false,
+                    &[],
+                    &Default::default(),
+                    "",
+                    "",
+                    "",
+                    "",
+                    super::ContextId::Commits,
+                    0,
+                    None,
+                    false,
+                    &[],
+                    None,
+                    false,
+                    false,
+                    &Default::default(),
+                    &Default::default(),
+                    &mut 0,
+                    &mut String::new(),
+                    false,
+                    false,
+                    false,
+                );
+            })
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(160)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect()
+    }
+
+    fn sample_worktree(
+        path: &str,
+        branch: &str,
+        current: bool,
+        main: bool,
+    ) -> crate::model::Worktree {
+        crate::model::Worktree {
+            path: path.into(),
+            branch: branch.into(),
+            hash: String::new(),
+            is_current: current,
+            is_main: main,
+        }
+    }
+
+    #[test]
+    fn worktrees_render_names_branches_and_main_label_in_every_mode() {
+        let model = crate::model::Model {
+            worktrees: vec![
+                sample_worktree("/repos/quarta", "feat/main", true, true),
+                sample_worktree(
+                    "/repos/worktree-pfparser",
+                    "experiment/parser",
+                    false,
+                    false,
+                ),
+            ],
+            ..Default::default()
+        };
+        for mode in [
+            super::ScreenMode::Normal,
+            super::ScreenMode::Half,
+            super::ScreenMode::Full,
+        ] {
+            let rows = render_tab(&model, super::ContextId::Worktrees, mode);
+            let main = rows.iter().find(|row| row.contains("* quarta")).unwrap();
+            assert!(main.contains("* quarta"));
+            assert!(main.contains("feat/main (main worktree)"));
+            assert!(!main.contains("/repos/"));
+            let linked = rows
+                .iter()
+                .find(|row| row.contains("worktree-pfparser experiment/parser"))
+                .unwrap();
+            assert!(linked.contains("worktree-pfparser experiment/parser"));
+            assert!(!linked.contains("(main worktree)"));
+            assert!(!linked.contains("/repos/"));
+            assert_eq!(main.find("feat/main"), linked.find("experiment/parser"));
+        }
+    }
+
+    #[test]
+    fn worktree_columns_use_unicode_display_width() {
+        let model = crate::model::Model {
+            worktrees: vec![
+                sample_worktree("/repos/树", "branch-one", false, false),
+                sample_worktree("/repos/abc", "branch-two", true, false),
+            ],
+            ..Default::default()
+        };
+        let rows = render_tab(&model, super::ContextId::Worktrees, super::ScreenMode::Full);
+        assert!(rows.iter().any(|row| row.contains("树   branch-one")));
+        assert!(rows.iter().any(|row| row.contains("* abc branch-two")));
+    }
+
+    #[test]
+    fn submodules_render_in_every_mode_and_empty_lists_stay_blank() {
+        let mut model = crate::model::Model::default();
+        for mode in [
+            super::ScreenMode::Normal,
+            super::ScreenMode::Half,
+            super::ScreenMode::Full,
+        ] {
+            let rows = render_tab(&model, super::ContextId::Submodules, mode);
+            assert!(!rows.join("\n").contains("(no submodules)"));
+        }
+        model.submodules.push(crate::git::submodule::Submodule {
+            name: "shared-lib".into(),
+            path: "vendor/shared-lib".into(),
+            url: String::new(),
+        });
+        for mode in [
+            super::ScreenMode::Normal,
+            super::ScreenMode::Half,
+            super::ScreenMode::Full,
+        ] {
+            let rows = render_tab(&model, super::ContextId::Submodules, mode);
+            assert!(
+                rows.iter()
+                    .any(|row| row.contains("shared-lib vendor/shared-lib"))
+            );
+        }
+    }
 
     #[test]
     fn command_log_is_hidden_when_main_panel_is_absent() {
@@ -1822,17 +2000,31 @@ fn render_status_main<'a>(
 }
 
 fn render_worktree_list<'a>(model: &Model, theme: &Theme) -> Vec<ListItem<'a>> {
-    model
+    let names: Vec<_> = model
         .worktrees
         .iter()
         .map(|wt| {
+            std::path::Path::new(&wt.path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&wt.path)
+        })
+        .collect();
+    let name_width = names.iter().map(|name| name.width()).max().unwrap_or(0);
+    model
+        .worktrees
+        .iter()
+        .zip(names)
+        .map(|(wt, name)| {
             let marker = if wt.is_current { "* " } else { "  " };
             let line = Line::from(vec![
                 Span::styled(marker.to_string(), Style::default().fg(theme.accent)),
+                Span::styled(name.to_string(), Style::default().fg(theme.text)),
+                Span::raw(" ".repeat(name_width - name.width() + 1)),
                 Span::styled(wt.branch.clone(), Style::default().fg(theme.ref_head)),
                 Span::styled(
-                    format!(" {}", wt.path),
-                    Style::default().fg(theme.text_dimmed),
+                    if wt.is_main { " (main worktree)" } else { "" },
+                    Style::default().fg(theme.text),
                 ),
             ]);
             ListItem::new(line)
