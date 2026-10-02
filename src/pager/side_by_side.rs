@@ -4,6 +4,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
+use std::collections::HashMap;
 
 use crate::config::Theme;
 
@@ -19,6 +20,8 @@ pub struct FileSection {
 /// Pre-parsed diff data that can be sent across threads.
 /// Contains all the expensive-to-compute results (diff algorithm, tree-sitter highlighting).
 pub struct ParsedDiff {
+    pub image_preview: Option<super::image_preview::ImagePreview>,
+    pub inline_images: HashMap<usize, super::image_preview::InlineImagePreview>,
     pub filename: String,
     pub old_content: String,
     pub new_content: String,
@@ -37,6 +40,86 @@ pub struct ParsedDiff {
 pub enum DiffPanel {
     Old, // Left panel (deleted / original code)
     New, // Right panel (added / new code)
+}
+
+/// Inline-image row expansion for multi-file diffs.
+///
+/// Each key in `images` is a file-section index whose content is replaced by
+/// `INLINE_IMAGE_ROWS` placeholder rows. Headers are preserved; text hunks in
+/// later sections are remapped via an old-index -> new-index table.
+impl ParsedDiff {
+    pub fn attach_inline_images(
+        &mut self,
+        images: HashMap<usize, super::image_preview::InlineImagePreview>,
+    ) {
+        if images.is_empty() {
+            return;
+        }
+        let sections: std::collections::HashSet<usize> = images.keys().copied().collect();
+        self.expand_lines_for_image_sections(&sections);
+        self.inline_images = images;
+    }
+
+    /// Expand placeholder rows for the given file-section indices.
+    ///
+    /// Testable without constructing image values: callers pass section ids,
+    /// this replaces each section's non-header content with
+    /// [`inline_image_placeholder_rows`] and remaps text hunks.
+    fn expand_lines_for_image_sections(&mut self, sections: &std::collections::HashSet<usize>) {
+        if sections.is_empty() {
+            return;
+        }
+        let old_lines = std::mem::take(&mut self.lines);
+        let mut old_to_new = vec![None; old_lines.len()];
+        let mut expanded = std::collections::HashSet::new();
+        for (old_index, line) in old_lines.iter().enumerate() {
+            if line.file_header.is_some() {
+                old_to_new[old_index] = Some(self.lines.len());
+                self.lines.push(line.clone());
+                // Headers exist even for rename-only sections with no body.
+                if sections.contains(&line.section_index) && expanded.insert(line.section_index) {
+                    self.lines
+                        .extend(inline_image_placeholder_rows(line.section_index));
+                }
+            } else if sections.contains(&line.section_index) {
+                if expanded.insert(line.section_index) {
+                    self.lines
+                        .extend(inline_image_placeholder_rows(line.section_index));
+                }
+            } else {
+                old_to_new[old_index] = Some(self.lines.len());
+                self.lines.push(line.clone());
+            }
+        }
+        // A single-file pure rename may have no source rows or header at all.
+        if old_lines.is_empty() && sections.contains(&0) {
+            self.lines.extend(inline_image_placeholder_rows(0));
+        }
+        let had_staged = !self.hunk_staged.is_empty();
+        let mut staged = Vec::new();
+        self.hunk_starts = self
+            .hunk_starts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, old_start)| {
+                let new_start = old_to_new.get(*old_start).copied().flatten()?;
+                if had_staged {
+                    staged.push(self.hunk_staged.get(index).copied().unwrap_or(false));
+                }
+                Some(new_start)
+            })
+            .collect();
+        if had_staged {
+            self.hunk_staged = staged;
+        }
+        self.hunk_line_offsets = self
+            .hunk_line_offsets
+            .iter()
+            .filter_map(|(index, old, new)| {
+                Some((old_to_new.get(*index).copied().flatten()?, *old, *new))
+            })
+            .collect();
+    }
 }
 
 /// Mouse text selection state in the diff view.
@@ -297,6 +380,10 @@ pub const REVERT_UNDO_STACK_CAP: usize = 20;
 
 /// State for the diff view panel.
 pub struct DiffViewState {
+    pub image_preview: Option<super::image_preview::ImagePreview>,
+    pub inline_images: HashMap<usize, super::image_preview::InlineImagePreview>,
+    /// Graphics are suppressed while an overlay covers the diff pane.
+    pub image_preview_hidden: bool,
     pub scroll_offset: usize,
     pub horizontal_scroll: usize,
     pub lines: Vec<DiffLine>,
@@ -356,6 +443,9 @@ pub struct DiffViewState {
 impl Default for DiffViewState {
     fn default() -> Self {
         Self {
+            image_preview: None,
+            inline_images: HashMap::new(),
+            image_preview_hidden: false,
             scroll_offset: 0,
             horizontal_scroll: 0,
             lines: Vec::new(),
@@ -698,6 +788,8 @@ impl DiffViewState {
             new_highlighter: FileHighlighter::new(new, filename),
         }];
         ParsedDiff {
+            image_preview: None,
+            inline_images: HashMap::new(),
             filename: filename.to_string(),
             old_content: old.to_string(),
             new_content: new.to_string(),
@@ -858,6 +950,8 @@ impl DiffViewState {
                 new_highlighter: FileHighlighter::new(&new, actual_name),
             }];
             ParsedDiff {
+                image_preview: None,
+                inline_images: HashMap::new(),
                 filename: actual_name.to_string(),
                 old_content: old,
                 new_content: new,
@@ -910,6 +1004,8 @@ impl DiffViewState {
             let hunk_starts = super::diff_algo::find_hunk_starts(&lines);
 
             ParsedDiff {
+                image_preview: None,
+                inline_images: HashMap::new(),
                 filename: new_filename,
                 old_content: String::new(),
                 new_content: String::new(),
@@ -925,6 +1021,8 @@ impl DiffViewState {
 
     /// Apply a pre-parsed diff result, preserving scroll position for same-file reloads.
     pub fn apply_parsed(&mut self, parsed: ParsedDiff) {
+        self.image_preview = parsed.image_preview;
+        self.inline_images = parsed.inline_images;
         let same_file = self.filename == parsed.filename;
         let prev_selected_revert_hunk = self.selected_revert_hunk;
         let prev_hovered_revert_hunk = self.hovered_revert_hunk;
@@ -960,6 +1058,8 @@ impl DiffViewState {
 
     /// Load a diff from old/new content (single file).
     pub fn load(&mut self, filename: &str, old: &str, new: &str) {
+        self.image_preview = None;
+        self.inline_images.clear();
         // Preserve scroll position when reloading the same file (e.g. periodic refresh)
         let same_file = self.filename == filename;
         let prev_selected_revert_hunk = self.selected_revert_hunk;
@@ -1002,6 +1102,8 @@ impl DiffViewState {
     /// Load from raw diff output (git diff).
     /// Automatically detects multi-file diffs and splits into per-file sections.
     pub fn load_from_diff_output(&mut self, filename: &str, diff_output: &str) {
+        self.image_preview = None;
+        self.inline_images.clear();
         let file_diffs = parse_multi_file_diff(diff_output);
 
         if file_diffs.len() <= 1 {
@@ -1809,12 +1911,21 @@ pub fn render_diff(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    if !state.image_preview_hidden {
+        if let Some(preview) = &mut state.image_preview {
+            super::image_preview::render(frame, inner, preview, state.side_view, theme);
+            return;
+        }
+    }
+
     // Only a lone unavailable file fills the viewport. In multi-file buffers,
     // the five placeholder rows below remain ordinary scrollable rows.
-    if state
-        .lines
-        .iter()
-        .all(|line| line.preview_placeholder.is_some())
+    // Inline images use compact rows even when lone; never take the fallback.
+    if state.inline_images.is_empty()
+        && state
+            .lines
+            .iter()
+            .all(|line| line.preview_placeholder.is_some())
     {
         let message = state
             .lines
@@ -1846,19 +1957,22 @@ pub fn render_diff(
     };
 
     let visible_height = inner.height as usize;
-    let buf = frame.buffer_mut();
-
     if state.view_layout == DiffViewLayout::Unified {
-        render_unified_diff_body(
-            buf,
-            inner,
-            state,
-            theme,
-            visible_height,
-            show_revert_markers,
-        );
+        {
+            let buf = frame.buffer_mut();
+            render_unified_diff_body(
+                buf,
+                inner,
+                state,
+                theme,
+                visible_height,
+                show_revert_markers,
+            );
+        }
+        render_inline_image_regions(frame, area, inner, state, theme);
         return;
     }
+    let buf = frame.buffer_mut();
 
     if single_side.is_some() || is_new_file {
         // Single-panel mode: new file, old-only, or new-only
@@ -1889,12 +2003,17 @@ pub fn render_diff(
             }
 
             if let Some(message) = diff_line.preview_placeholder {
-                render_preview_placeholder(
-                    buf,
-                    Rect::new(inner.x, inner.y + row as u16, inner.width, 1),
-                    message,
-                    theme,
-                );
+                // Inline images overlay these rows; skip stripes when visible.
+                let has_inline = !state.image_preview_hidden
+                    && state.inline_images.contains_key(&diff_line.section_index);
+                if !has_inline {
+                    render_preview_placeholder(
+                        buf,
+                        Rect::new(inner.x, inner.y + row as u16, inner.width, 1),
+                        message,
+                        theme,
+                    );
+                }
                 row += 1;
                 continue;
             }
@@ -2077,12 +2196,17 @@ pub fn render_diff(
                 .unwrap_or((&default_hl, &default_hl));
 
             if let Some(message) = diff_line.preview_placeholder {
-                render_preview_placeholder(
-                    buf,
-                    Rect::new(inner.x, inner.y + row as u16, inner.width, 1),
-                    message,
-                    theme,
-                );
+                // Inline images overlay these rows; skip stripes when visible.
+                let has_inline = !state.image_preview_hidden
+                    && state.inline_images.contains_key(&diff_line.section_index);
+                if !has_inline {
+                    render_preview_placeholder(
+                        buf,
+                        Rect::new(inner.x, inner.y + row as u16, inner.width, 1),
+                        message,
+                        theme,
+                    );
+                }
                 row += 1;
                 continue;
             }
@@ -2405,6 +2529,75 @@ pub fn render_diff(
             );
         }
     }
+    render_inline_image_regions(frame, area, inner, state, theme);
+}
+
+/// Overlay inline images onto their placeholder rows (viewport only).
+///
+/// Gathers contiguous visible placeholder rows per file section via
+/// `line_chunk_at_row` (which already accounts for wrap, sticky headers and
+/// layout), then draws each section's image into its visible region. Text and
+/// sticky header rows never join a region; partially scrolled sections use
+/// only the visible sub-region so following content is never overwritten.
+fn render_inline_image_regions(
+    frame: &mut Frame,
+    area: Rect,
+    inner: Rect,
+    state: &mut DiffViewState,
+    theme: &Theme,
+) {
+    if state.image_preview_hidden || state.inline_images.is_empty() {
+        return;
+    }
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let layout = DiffPanelLayout::compute(area, state);
+    // Group adjacent visible image rows; headers and wrapped text stay outside
+    // these rectangles, so graphics cannot overwrite their source content.
+    let mut runs: Vec<(usize, u16, u16)> = Vec::new();
+    for y in inner.y..inner.bottom() {
+        if state.is_sticky_row(y, &layout) {
+            continue;
+        }
+        let Some((line_index, _)) = state.line_chunk_at_row(y, &layout) else {
+            continue;
+        };
+        let Some(line) = state.lines.get(line_index) else {
+            continue;
+        };
+        if line.file_header.is_some()
+            || line.preview_placeholder.is_none()
+            || !state.inline_images.contains_key(&line.section_index)
+        {
+            continue;
+        }
+        if let Some((section, _, end)) = runs.last_mut() {
+            if *section == line.section_index && *end == y {
+                *end = y + 1;
+                continue;
+            }
+        }
+        runs.push((line.section_index, y, y + 1));
+    }
+    let visible: std::collections::HashSet<_> =
+        runs.iter().map(|(section, _, _)| *section).collect();
+    for (section, preview) in &mut state.inline_images {
+        if !visible.contains(section) {
+            preview.unload();
+        }
+    }
+    let side = state.side_view;
+    for (sec, start_y, end_y) in runs {
+        let h = end_y.saturating_sub(start_y);
+        if h == 0 {
+            continue;
+        }
+        let rect = Rect::new(inner.x, start_y, inner.width, h);
+        if let Some(preview) = state.inline_images.get_mut(&sec) {
+            preview.render(frame, rect, side, theme);
+        }
+    }
 }
 
 fn render_unified_diff_body(
@@ -2462,12 +2655,17 @@ fn render_unified_diff_body(
             if skip > 0 {
                 skip -= 1;
             } else {
-                render_preview_placeholder(
-                    buf,
-                    Rect::new(inner.x, inner.y + row as u16, inner.width, 1),
-                    message,
-                    theme,
-                );
+                // Inline images overlay these rows; skip stripes when visible.
+                let has_inline = !state.image_preview_hidden
+                    && state.inline_images.contains_key(&diff_line.section_index);
+                if !has_inline {
+                    render_preview_placeholder(
+                        buf,
+                        Rect::new(inner.x, inner.y + row as u16, inner.width, 1),
+                        message,
+                        theme,
+                    );
+                }
                 row += 1;
             }
             line_idx += 1;
@@ -3514,7 +3712,7 @@ pub fn render_diff_search_bar(frame: &mut Frame, area: Rect, state: &DiffViewSta
 
 /// Parse a multi-file unified diff into per-file sections.
 /// Returns Vec of (filename, raw_diff_slice) without re-joining bodies.
-fn parse_multi_file_diff(diff: &str) -> Vec<(String, &str)> {
+pub(crate) fn parse_multi_file_diff(diff: &str) -> Vec<(String, &str)> {
     let bytes = diff.as_bytes();
     let mut sections: Vec<(String, &str)> = Vec::new();
     let mut current_filename = String::new();
@@ -3538,12 +3736,9 @@ fn parse_multi_file_diff(diff: &str) -> Vec<(String, &str)> {
                 ));
             }
             current_filename = extract_filename_from_diff_header(line);
-            let after = if line_end < bytes.len() {
-                line_end + 1
-            } else {
-                line_end
-            };
-            section_start = Some(after);
+            // Keep the header: binary sections have no ---/+++ paths, and
+            // delayed image loads need the exact old/new source identities.
+            section_start = Some(line_start);
         }
 
         if line_end >= bytes.len() {
@@ -3620,15 +3815,8 @@ fn build_file_sections_parallel(section_meta: &[(&str, &str)]) -> Vec<FileSectio
 }
 
 /// Extract the filename from a "diff --git a/path b/path" header line.
-fn extract_filename_from_diff_header(line: &str) -> String {
-    // Format: "diff --git a/some/path b/some/path"
-    // We want "some/path" (the b/ side, which is the new name)
-    if let Some(b_part) = line.split(" b/").last() {
-        b_part.to_string()
-    } else {
-        // Fallback: strip "diff --git " prefix
-        line.trim_start_matches("diff --git ").to_string()
-    }
+fn extract_filename_from_diff_header(header: &str) -> String {
+    crate::git::diff_paths::new_path_from_header(header).unwrap_or_default()
 }
 
 /// Parse a unified diff into old/new content for side-by-side display.
@@ -3719,6 +3907,37 @@ fn binary_file_placeholder_lines() -> Vec<DiffLine> {
         section_index: 0,
     })
     .collect()
+}
+
+/// Placeholder rows backing one inline-image section.
+///
+/// Uses the existing `DiffLine` placeholder model (no new field): all rows are
+/// hatch stripes, the middle row carries the fallback label so hidden images
+/// still read usefully. Length is `INLINE_IMAGE_ROWS`.
+fn inline_image_placeholder_rows(section_index: usize) -> Vec<DiffLine> {
+    let total_rows = super::image_preview::INLINE_IMAGE_ROWS;
+    let mid = total_rows / 2;
+    (0..total_rows)
+        .map(|r| {
+            let message: &'static str = if r == mid {
+                "Binary cannot be previewed"
+            } else if r + 1 == mid || r == mid + 1 {
+                "                          "
+            } else {
+                ""
+            };
+            DiffLine {
+                old_line: None,
+                new_line: None,
+                change_type: ChangeType::Equal,
+                old_segments: None,
+                new_segments: None,
+                file_header: None,
+                preview_placeholder: Some(message),
+                section_index,
+            }
+        })
+        .collect()
 }
 
 /// True when git emitted a rename/copy with no content hunks (pure move).
@@ -4510,5 +4729,211 @@ mod tests {
                 .all(|line| line.preview_placeholder.is_none())
         );
         assert!(!parsed.hunk_starts.is_empty());
+    }
+
+    #[test]
+    fn inline_rows_match_const_and_middle_label() {
+        assert_eq!(super::super::image_preview::INLINE_IMAGE_ROWS, 12);
+        let rows = super::inline_image_placeholder_rows(3);
+        assert_eq!(rows.len(), 12);
+        assert!(rows.iter().all(|l| l.file_header.is_none()));
+        assert!(rows.iter().all(|l| l.section_index == 3));
+        assert!(
+            rows.iter()
+                .all(|l| l.old_line.is_none() && l.new_line.is_none())
+        );
+        let mid = 12 / 2;
+        assert_eq!(
+            rows[mid].preview_placeholder,
+            Some("Binary cannot be previewed")
+        );
+        // Neighbours are blank padding, rest are empty hatch rows.
+        assert_eq!(
+            rows[mid - 1].preview_placeholder,
+            Some("                          ")
+        );
+        assert_eq!(
+            rows[mid + 1].preview_placeholder,
+            Some("                          ")
+        );
+        assert_eq!(rows[0].preview_placeholder, Some(""));
+    }
+
+    #[test]
+    fn attach_empty_is_noop() {
+        let mut parsed = DiffViewState::parse_diff_output("foo.png", BINARY_DIFF, 4, true);
+        let before = parsed.lines.len();
+        parsed.attach_inline_images(std::collections::HashMap::<
+            usize,
+            super::super::image_preview::InlineImagePreview,
+        >::new());
+        assert_eq!(parsed.lines.len(), before);
+        assert!(parsed.inline_images.is_empty());
+    }
+
+    #[test]
+    fn image_expansion_replaces_binary_and_remaps_text_hunks() {
+        let diff = format!("{BINARY_DIFF}{TEXT_DIFF}");
+        let mut parsed = DiffViewState::parse_diff_output("mixed", &diff, 4, true);
+        // Preconditions: 2 file headers + 5 binary rows + text hunk.
+        let headers: Vec<usize> = parsed
+            .lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| l.file_header.as_ref().map(|_| i))
+            .collect();
+        assert_eq!(headers.len(), 2);
+        let binary_section = parsed.lines[headers[0] + 1].section_index;
+        let text_section = parsed.lines[headers[1] + 1].section_index;
+        assert_ne!(binary_section, text_section);
+        let binary_rows = parsed
+            .lines
+            .iter()
+            .filter(|l| l.preview_placeholder.is_some())
+            .count();
+        assert_eq!(binary_rows, 5);
+        let old_hunk = parsed.hunk_starts[0];
+        let old_offsets = parsed.hunk_line_offsets.clone();
+        let text_header = parsed.lines[headers[1]]
+            .file_header
+            .clone()
+            .expect("text file header");
+
+        let mut sections = std::collections::HashSet::new();
+        sections.insert(binary_section);
+        parsed.expand_lines_for_image_sections(&sections);
+
+        // Binary block grew 5 -> 12 (+7); header preserved.
+        assert!(parsed.lines[headers[0]].file_header.is_some());
+        let new_binary_rows: Vec<_> = parsed
+            .lines
+            .iter()
+            .filter(|l| l.preview_placeholder.is_some() && l.section_index == binary_section)
+            .collect();
+        assert_eq!(new_binary_rows.len(), 12);
+        assert_eq!(
+            new_binary_rows[6].preview_placeholder,
+            Some("Binary cannot be previewed")
+        );
+        // Text hunks shifted by +7, offsets remapped, staged untouched.
+        assert_eq!(parsed.hunk_starts.len(), 1);
+        assert_eq!(parsed.hunk_starts[0], old_hunk + 7);
+        assert_eq!(parsed.hunk_line_offsets.len(), old_offsets.len());
+        for ((new_idx, _, _), (old_idx, _, _)) in
+            parsed.hunk_line_offsets.iter().zip(old_offsets.iter())
+        {
+            assert_eq!(*new_idx, *old_idx + 7);
+        }
+        assert!(parsed.hunk_staged.is_empty());
+        // Text content still resolves to the same file.
+        let mut state = DiffViewState::new();
+        state.apply_parsed(parsed);
+        assert_eq!(
+            state.file_line_number(state.hunk_starts[0], DiffPanel::New),
+            Some(1)
+        );
+        assert_eq!(state.file_at_line(state.hunk_starts[0]), text_header);
+    }
+
+    #[test]
+    fn rename_only_section_expands_to_image_rows() {
+        let diff = "diff --git a/old.png b/new.png\nsimilarity index 100%\nrename from old.png\nrename to new.png\n";
+        let mut parsed = DiffViewState::parse_diff_output("old.png -> new.png", diff, 4, true);
+        assert_eq!(parsed.lines.len(), 1);
+        let mut sections = std::collections::HashSet::new();
+        sections.insert(0);
+        parsed.expand_lines_for_image_sections(&sections);
+        assert_eq!(parsed.lines.len(), 12);
+        assert!(parsed.lines.iter().all(|l| l.preview_placeholder.is_some()));
+        assert_eq!(
+            parsed.lines[6].preview_placeholder,
+            Some("Binary cannot be previewed")
+        );
+        assert!(parsed.hunk_starts.is_empty());
+        assert!(parsed.hunk_line_offsets.is_empty());
+    }
+
+    #[test]
+    fn image_rows_map_via_line_chunk_and_sticky() {
+        let diff = format!("{BINARY_DIFF}{TEXT_DIFF}");
+        let mut parsed = DiffViewState::parse_diff_output("mixed", &diff, 4, true);
+        let binary_section = parsed.lines[1].section_index;
+        let mut sections = std::collections::HashSet::new();
+        sections.insert(binary_section);
+        parsed.expand_lines_for_image_sections(&sections);
+        let mut state = DiffViewState::new();
+        state.apply_parsed(parsed);
+        for layout in [DiffViewLayout::SideBySide, DiffViewLayout::Unified] {
+            for wrap in [false, true] {
+                state.view_layout = layout;
+                state.wrap = wrap;
+                state.scroll_offset = 0;
+                let area = Rect::new(0, 0, 80, 18);
+                let panel = DiffPanelLayout::compute(area, &state);
+                // First content row after the header is an image placeholder.
+                // Header at row 1, image rows follow; sticky only when scrolled.
+                assert_eq!(state.line_chunk_at_row(1, &panel), Some((0, 0)));
+                // Image block rows map to placeholder lines in the image section.
+                let mapped = state.line_chunk_at_row(2, &panel).expect("image row maps");
+                let line = &state.lines[mapped.0];
+                assert!(line.preview_placeholder.is_some());
+                assert_eq!(line.section_index, binary_section);
+                // Scroll into the middle of the image block: sticky pins header,
+                // next file stays aligned and text hunks still resolve.
+                state.scroll_offset = if layout == DiffViewLayout::Unified {
+                    3
+                } else {
+                    3
+                };
+                let buf = render_preview(&mut state, 80, 10);
+                assert!(buffer_row(&buf, 1).contains("foo.png"));
+                // No text row is mistaken for an image row.
+                let panel2 = DiffPanelLayout::compute(buf.area, &state);
+                for y in panel2.inner_y..panel2.inner_end_y {
+                    if state.is_sticky_row(y, &panel2) {
+                        continue;
+                    }
+                    if let Some((idx, _)) = state.line_chunk_at_row(y, &panel2) {
+                        let l = &state.lines[idx];
+                        if l.file_header.is_some() {
+                            continue;
+                        }
+                        if l.preview_placeholder.is_none() {
+                            assert_ne!(l.section_index, binary_section);
+                        }
+                    }
+                }
+                state.scroll_offset = 0;
+            }
+        }
+    }
+
+    #[test]
+    fn inline_regions_noop_when_hidden_or_empty() {
+        let mut state = DiffViewState::new();
+        state.load_from_diff_output("foo.png", BINARY_DIFF);
+        // Empty inline map: normal stripes still render, overlay is a noop.
+        let buf = render_preview(&mut state, 60, 12);
+        assert!(buffer_row(&buf, 6).contains("Binary cannot be previewed"));
+        // Hidden flag with empty map also renders stripes without panic.
+        state.image_preview_hidden = true;
+        let buf2 = render_preview(&mut state, 60, 12);
+        assert!(buffer_row(&buf2, 6).contains("Binary cannot be previewed"));
+    }
+    #[test]
+    fn split_binary_sections_keep_paths_for_lazy_image_loading() {
+        let diff = "diff --git a/assets/old name.png b/assets/new name.png\n\
+                    similarity index 90%\nrename from assets/old name.png\n\
+                    rename to assets/new name.png\n\
+                    Binary files a/assets/old name.png and b/assets/new name.png differ\n\
+                    diff --git a/text.txt b/text.txt\n--- a/text.txt\n+++ b/text.txt\n\
+                    @@ -1 +1 @@\n-old\n+new\n";
+        let sections = parse_multi_file_diff(diff);
+        assert_eq!(sections.len(), 2);
+        assert!(sections[0].1.starts_with("diff --git "));
+        let paths = crate::git::diff_paths::paths_from_diff(sections[0].1).unwrap();
+        assert_eq!(paths.old.as_deref(), Some("assets/old name.png"));
+        assert_eq!(paths.new.as_deref(), Some("assets/new name.png"));
+        assert_eq!(sections[1].0, "text.txt");
     }
 }
