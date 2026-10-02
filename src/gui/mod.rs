@@ -5851,6 +5851,15 @@ impl Gui {
                         ),
                     );
                 }
+                if self.commit_path_filter.is_some()
+                    || !self.commit_author_filter.is_empty()
+                    || !self.commit_branch_filter.is_empty()
+                {
+                    entries.insert(
+                        0,
+                        CommandEntry::keybinding("<esc>".into(), "Reset commit filter".into()),
+                    );
+                }
                 CommandSection {
                     title: "Commits".into(),
                     entries,
