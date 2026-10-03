@@ -19,12 +19,23 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return super::commits::show_files_filtering_menu(gui);
     }
 
-    // Enter: toggle directory collapse in tree view, or focus diff for files
-    if key.code == KeyCode::Enter {
+    // Enter: focus diff for files/directories, fold_directory explicitly toggles directory collapse
+    let is_fold = matches_key(key, &keybindings.universal.fold_directory);
+    if key.code == KeyCode::Enter || is_fold {
         if gui.show_file_tree {
             let selected = gui.context_mgr.selected_active();
             if let Some(node) = gui.file_tree_nodes.get(selected) {
                 if node.is_dir {
+                    // For any directory, Enter focuses the combined diff view.
+                    // fold_directory explicitly toggles collapse for any directory (including root).
+                    if !is_fold {
+                        if !gui.diff_view.is_empty() {
+                            gui.diff_focused = true;
+                            gui.screen_mode = crate::gui::ScreenMode::Full;
+                        }
+                        return Ok(());
+                    }
+
                     let path = node.path.clone();
                     if gui.collapsed_dirs.contains(&path) {
                         gui.collapsed_dirs.remove(&path);
@@ -36,11 +47,41 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
                 }
             }
         }
+
+        if is_fold {
+            return Ok(());
+        }
+
         // Focus the diff panel for the selected file
         if !gui.diff_view.is_empty() {
             gui.diff_focused = true;
+            gui.screen_mode = crate::gui::ScreenMode::Full;
         }
         return Ok(());
+    }
+
+    // Tree navigation (parent, child, next sibling, prev sibling)
+    if gui.show_file_tree {
+        let selected = gui
+            .context_mgr
+            .selected(crate::gui::context::ContextId::Files);
+        let new_idx = if matches_key(key, &keybindings.universal.tree_parent) {
+            crate::model::file_tree::find_parent_idx(&gui.file_tree_nodes, selected)
+        } else if matches_key(key, &keybindings.universal.tree_child) {
+            crate::model::file_tree::find_first_child_idx(&gui.file_tree_nodes, selected)
+        } else if matches_key(key, &keybindings.universal.tree_next_sibling) {
+            crate::model::file_tree::find_next_sibling_idx(&gui.file_tree_nodes, selected)
+        } else if matches_key(key, &keybindings.universal.tree_prev_sibling) {
+            crate::model::file_tree::find_prev_sibling_idx(&gui.file_tree_nodes, selected)
+        } else {
+            None
+        };
+        if let Some(idx) = new_idx {
+            gui.context_mgr
+                .set_selected(crate::gui::context::ContextId::Files, idx);
+            gui.needs_diff_refresh = true;
+            return Ok(());
+        }
     }
 
     // Stage/unstage toggle with space

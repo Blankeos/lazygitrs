@@ -417,6 +417,8 @@ pub fn render(
             model,
             diff_focused,
             !cherry_pick_clipboard.is_empty(),
+            show_file_tree,
+            show_commit_file_tree,
         );
         // Render text selection highlight overlay and tooltip (must be before popup)
         render_selection_overlay(frame, diff_view, fl.main_panel, theme);
@@ -1076,6 +1078,8 @@ pub fn render(
         model,
         diff_focused,
         !cherry_pick_clipboard.is_empty(),
+        show_file_tree,
+        show_commit_file_tree,
     );
 
     // Render text selection highlight overlay and tooltip
@@ -2401,6 +2405,8 @@ fn render_search_bar_or_status_bar(
     model: &Model,
     diff_focused: bool,
     has_copied_commits: bool,
+    show_file_tree: bool,
+    show_commit_file_tree: bool,
 ) {
     if let Some((query, match_count, current_match)) = search_state {
         let match_info = if match_count > 0 {
@@ -2458,6 +2464,8 @@ fn render_search_bar_or_status_bar(
             model,
             diff_focused,
             has_copied_commits,
+            show_file_tree,
+            show_commit_file_tree,
         );
     }
 }
@@ -2471,6 +2479,8 @@ fn render_status_bar(
     model: &Model,
     diff_focused: bool,
     has_copied_commits: bool,
+    show_file_tree: bool,
+    show_commit_file_tree: bool,
 ) {
     let mut hints: Vec<(&str, &str)> = Vec::new();
     let mut emphasized: Vec<&str> = Vec::new();
@@ -2506,6 +2516,11 @@ fn render_status_bar(
         } else {
             hints.push(("{/}", "prev/next hunk"));
         }
+        if (ctx_mgr.active() == ContextId::Files && show_file_tree)
+            || (ctx_mgr.active() == ContextId::CommitFiles && show_commit_file_tree)
+        {
+            hints.push((",/.", "nav"));
+        }
         hints.push(("[/]", "side view"));
         let view_layout_hint = match diff_view.view_layout {
             DiffViewLayout::SideBySide => "unified view",
@@ -2524,6 +2539,12 @@ fn render_status_bar(
                     ("c", "commit"),
                     ("a", "stage all"),
                     ("space", "toggle"),
+                    ("`", "tree"),
+                ]);
+                if show_file_tree {
+                    hints.extend([("-", "fold"), (",/.", "nav")]);
+                }
+                hints.extend([
                     ("\\", view_layout_hint),
                     ("d", "discard"),
                     ("e", "edit"),
@@ -2531,11 +2552,11 @@ fn render_status_bar(
                 ]);
             }
             ContextId::CommitFiles | ContextId::StashFiles | ContextId::BranchCommitFiles => {
-                hints.extend([
-                    ("enter", "focus diff"),
-                    ("\\", view_layout_hint),
-                    ("y", "copy"),
-                ]);
+                hints.extend([("enter", "focus diff"), ("`", "tree")]);
+                if ctx_mgr.active() == ContextId::CommitFiles && show_commit_file_tree {
+                    hints.extend([("-", "fold"), (",/.", "nav")]);
+                }
+                hints.extend([("\\", view_layout_hint), ("y", "copy")]);
             }
             ContextId::BranchCommits => {
                 hints.extend([
