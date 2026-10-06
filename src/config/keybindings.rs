@@ -126,8 +126,6 @@ pub struct UniversalKeybinding {
     pub reset_side_panel: String,
     #[serde(rename = "toggleDiffViewLayout")]
     pub toggle_diff_view_layout: String,
-    #[serde(rename = "toggleWorkingTreeAndHead")]
-    pub toggle_working_tree_and_head: String,
     #[serde(rename = "foldDirectory")]
     pub fold_directory: String,
     #[serde(rename = "treeParent")]
@@ -193,7 +191,6 @@ impl Default for UniversalKeybinding {
             main_panel_full: "<a-j>".into(),
             reset_side_panel: "<a-r>".into(),
             toggle_diff_view_layout: "\\".into(),
-            toggle_working_tree_and_head: "<c-g>".into(),
             fold_directory: "-".into(),
             tree_parent: ",".into(),
             tree_child: ".".into(),
@@ -470,6 +467,16 @@ pub fn parse_key(s: &str) -> Option<KeyEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_head_toggle_config_does_not_override_ai_generation() {
+        let config: KeybindingConfig =
+            serde_yaml::from_str("universal:\n  toggleWorkingTreeAndHead: '<c-g>'\n").unwrap();
+        assert_eq!(config.files.generate_ai_commit, "<c-g>");
+        assert_eq!(config.commit_message.ai_generate, "<c-g>");
+        let serialized = serde_yaml::to_string(&config).unwrap();
+        assert!(!serialized.contains("toggleWorkingTreeAndHead"));
+    }
 
     #[test]
     fn test_tree_keybindings_defaults_and_deserialization() {
