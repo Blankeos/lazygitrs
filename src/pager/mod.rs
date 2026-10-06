@@ -1,5 +1,6 @@
 pub mod diff_algo;
 pub mod highlight;
+pub mod image_preview;
 pub mod side_by_side;
 pub mod word_diff;
 

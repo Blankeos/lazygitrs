@@ -292,7 +292,10 @@ struct DiffPreviewCache {
 }
 
 impl DiffPreviewCache {
-    fn insert(&mut self, key: String, view: DiffViewState) {
+    fn insert(&mut self, key: String, mut view: DiffViewState) {
+        for image in view.inline_images.values_mut() {
+            image.unload_for_cache();
+        }
         self.remove(&key);
         let estimated_bytes = estimate_diff_view_bytes(&view);
         if estimated_bytes > MAX_CACHED_DIFF_BYTES {
@@ -380,6 +383,17 @@ fn estimate_diff_view_bytes(view: &DiffViewState) -> usize {
         .saturating_add(view.new_content.len())
         .saturating_add(line_bytes)
         .saturating_mul(2)
+        .saturating_add(
+            view.inline_images
+                .values()
+                .map(|image| image.estimated_bytes())
+                .sum::<usize>(),
+        )
+        .saturating_add(
+            view.image_preview
+                .as_ref()
+                .map_or(0, |p| p.estimated_bytes()),
+        )
 }
 
 type BackgroundJob = Box<dyn FnOnce() + Send>;
@@ -866,6 +880,24 @@ fn parse_commit_file_diff_payload(
     current_path: &str,
     diff: &str,
 ) -> DiffPayload {
+    let paths = crate::git::diff::diff_paths_for_label(name);
+    let parent = format!("{hash}^1");
+    if let Some(parsed) = image_diff_payload(
+        git,
+        name,
+        diff,
+        false,
+        crate::pager::image_preview::ImageSource::Revision {
+            revision: &parent,
+            path: paths[0],
+        },
+        crate::pager::image_preview::ImageSource::Revision {
+            revision: hash,
+            path: current_path,
+        },
+    ) {
+        return DiffPayload::Parsed(parsed);
+    }
     if is_rename_only_diff(diff) {
         if let Ok(content) = git.file_content_at_commit(hash, current_path) {
             if !content.is_empty() {
@@ -880,6 +912,41 @@ fn parse_commit_file_diff_payload(
         }
     }
     DiffPayload::Parsed(DiffViewState::parse_diff_output(name, diff, 4, false))
+}
+
+/// Only single raster-file selections are previewed; multi-file buffers retain
+/// their ordinary binary placeholders. Decoding validates the actual bytes.
+fn image_diff_payload(
+    git: &GitCommands,
+    name: &str,
+    diff: &str,
+    exists: bool,
+    old: crate::pager::image_preview::ImageSource<'_>,
+    new: crate::pager::image_preview::ImageSource<'_>,
+) -> Option<crate::pager::side_by_side::ParsedDiff> {
+    let paths = crate::git::diff::diff_paths_for_label(name);
+    if !paths
+        .iter()
+        .any(|p| crate::pager::image_preview::is_image_path(p))
+    {
+        return None;
+    }
+    let preview = crate::pager::image_preview::load(git, old, new)?;
+    // A rename-only image has no binary marker, but must still be a nonempty
+    // diff view without text hunks (image content cannot be staged by hunk).
+    let placeholder = synthesize_binary_file_diff(name);
+    let mut parsed = DiffViewState::parse_diff_output(
+        name,
+        if diff.is_empty() || is_rename_only_diff(diff) {
+            &placeholder
+        } else {
+            diff
+        },
+        4,
+        exists,
+    );
+    parsed.image_preview = Some(preview);
+    Some(parsed)
 }
 
 impl Gui {
@@ -1117,6 +1184,9 @@ impl Gui {
         let mut keyboard_enhanced = keyboard_enhanced;
         let result = self.main_loop(&mut terminal, &input, &mut keyboard_enhanced);
 
+        self.diff_preview_cache.clear();
+        self.diff_view.reset_keep_prefs();
+        self.displayed_diff_key.clear();
         restore_terminal(&mut terminal, keyboard_enhanced)?;
         result
     }
@@ -1154,6 +1224,13 @@ impl Gui {
         // event reader is process-wide and would steal hx/nvim's keystrokes.
         input.pause();
         input.drain();
+        // Dropping the cached protocols queues scoped deletes and ensures they
+        // are freshly transmitted after returning from another alternate screen.
+        self.diff_preview_cache.clear();
+        self.diff_view.reset_keep_prefs();
+        self.displayed_diff_key.clear();
+        self.needs_diff_refresh = true;
+        crate::pager::image_preview::flush_cleanup(terminal.backend_mut());
         restore_terminal(terminal, *keyboard_enhanced)?;
 
         // LeaveAlternateScreen restores the previous buffer; wipe the primary
@@ -1354,6 +1431,18 @@ impl Gui {
 
             // Render
             let theme = self.active_theme();
+            crate::pager::image_preview::flush_cleanup(terminal.backend_mut());
+            self.diff_view.image_preview_hidden = self.popup != PopupState::None
+                || (self.show_command_log
+                    && self
+                        .diff_view
+                        .image_preview
+                        .as_ref()
+                        .is_some_and(|p| !p.uses_placeholders()))
+                || self.ai_commit_generation_active()
+                || self.remote_op_label.is_some()
+                || self.rebase_mode.active
+                || self.patch_building.active;
             terminal.draw(|frame| {
                 if self.rebase_mode.active {
                     presentation::rebase_mode::render(frame, &mut self.rebase_mode, &theme);
@@ -2933,6 +3022,7 @@ impl Gui {
                     let has_staged = file.has_staged_changes;
                     let has_unstaged = file.has_unstaged_changes;
                     let tracked = file.tracked;
+                    let conflicted = file.has_merge_conflicts;
                     drop(model);
 
                     let git = Arc::clone(&self.git);
@@ -2941,6 +3031,39 @@ impl Gui {
                     self.diff_loading_since = Some(Instant::now());
                     self.queue_diff_job(generation, diff_key, move || {
                         let path_refs: Vec<&str> = diff_paths.iter().map(String::as_str).collect();
+                        use crate::pager::image_preview::ImageSource;
+                        let old_path = path_refs[0];
+                        let old = if !tracked {
+                            ImageSource::Missing
+                        } else {
+                            ImageSource::Revision {
+                                revision: if has_staged { "HEAD" } else { "" },
+                                path: old_path,
+                            }
+                        };
+                        let new = if has_staged && !has_unstaged {
+                            ImageSource::Revision {
+                                revision: "",
+                                path: &current_path,
+                            }
+                        } else {
+                            ImageSource::Worktree(&current_path)
+                        };
+                        if let Some(parsed) = (!conflicted)
+                            .then(|| {
+                                image_diff_payload(
+                                    &git,
+                                    &name,
+                                    "",
+                                    git.repo_path().join(&current_path).exists(),
+                                    old,
+                                    new,
+                                )
+                            })
+                            .flatten()
+                        {
+                            return DiffPayload::Parsed(parsed);
+                        }
                         // Single HEAD buffer with coherent line numbers;
                         // hunks are dimmed/tinted staged vs unstaged via
                         // overlap with the unstaged diff. Falls back to the
@@ -3051,6 +3174,13 @@ impl Gui {
                                 .filter(|f| !f.tracked)
                                 .map(|f| f.current_path().to_string())
                                 .collect();
+                            let excluded: std::collections::HashSet<String> = node
+                                .child_file_indices
+                                .iter()
+                                .filter_map(|&i| model.files.get(i))
+                                .filter(|f| f.has_merge_conflicts)
+                                .flat_map(|f| f.diff_paths().into_iter().map(str::to_string))
+                                .collect();
                             let pathspec = pathspec_for_tree_path(&node.path);
                             let dir_name = node.name.clone();
                             drop(model);
@@ -3119,6 +3249,14 @@ impl Gui {
                                     if parsed.hunk_staged.len() != parsed.hunk_starts.len() {
                                         parsed.hunk_staged = vec![false; parsed.hunk_starts.len()];
                                     }
+                                    crate::pager::image_preview::attach_inline_image_previews(
+                                        &mut parsed,
+                                        git.repo_path(),
+                                        &combined_diff,
+                                        "HEAD",
+                                        None,
+                                        &excluded,
+                                    );
                                     if parsed.lines.is_empty() {
                                         DiffPayload::Empty
                                     } else {
@@ -3275,12 +3413,22 @@ impl Gui {
                                 if combined_diff.is_empty() {
                                     DiffPayload::Empty
                                 } else {
-                                    DiffPayload::Parsed(DiffViewState::parse_diff_output(
+                                    let mut parsed = DiffViewState::parse_diff_output(
                                         &dir_name,
                                         &combined_diff,
                                         4,
                                         true,
-                                    ))
+                                    );
+                                    let parent = format!("{hash}^1");
+                                    crate::pager::image_preview::attach_inline_image_previews(
+                                        &mut parsed,
+                                        git.repo_path(),
+                                        &combined_diff,
+                                        &parent,
+                                        Some(&hash),
+                                        &HashSet::new(),
+                                    );
+                                    DiffPayload::Parsed(parsed)
                                 }
                             });
                         } else {
@@ -9080,6 +9228,8 @@ fn setup_terminal() -> Result<(Term, bool)> {
         crossterm::event::EnableBracketedPaste,
         cursor::Hide
     )?;
+    // Detect graphics before Crossterm creates its internal response reader.
+    crate::pager::image_preview::initialize();
     // Helix leaves progressive kitty keyboard enhancement enabled across
     // `:insert-output` and keeps a `/dev/tty` EventStream open. Probing races
     // that reader (blank hang); instead pop leftover stacks and push our flags
@@ -9109,6 +9259,7 @@ fn setup_terminal() -> Result<(Term, bool)> {
 /// process-wide mutex that the input thread holds for the duration of its
 /// blocking read, so any drain from this thread would silently no-op.
 fn restore_terminal(terminal: &mut Term, keyboard_enhanced: bool) -> Result<()> {
+    crate::pager::image_preview::flush_cleanup(terminal.backend_mut());
     // Helix `:insert-output` keeps its own alt-screen / raw mode / mouse / focus
     // / bracketed-paste / kitty stack across the child. If we tear those down
     // here, Helix resumes drawing into a world that no longer exists and the
