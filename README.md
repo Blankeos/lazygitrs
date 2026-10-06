@@ -39,6 +39,34 @@ focused diff). If filters or pagination hide HEAD, it opens a separate HEAD
 history view without clearing your filters. Remap or disable the shortcut with
 `keybinding.universal.toggleWorkingTreeAndHead` (`"<c-g>"` by default; `""` disables it).
 
+### File tree navigation
+
+In Files, commit/stash file lists, and compare mode, press backtick (`` ` ``) to
+toggle the tree view. With a tree active:
+
+- `-` folds/unfolds the selected directory (including the root).
+- `Enter` focuses the selected file or combined directory diff without changing
+  your normal/half/full layout; `Esc` returns to the file list.
+- `,` / `.` select the parent / first visible child.
+- `<` / `>` select the previous / next sibling, skipping nested descendants.
+  Hierarchy navigation also works while the diff is focused.
+
+These shortcuts are configurable under `keybinding.universal` in your config:
+
+```yaml
+keybinding:
+  universal:
+    foldDirectory: "-"
+    treeParent: ","
+    treeChild: "."
+    treePrevSibling: "<"
+    treeNextSibling: ">"
+```
+
+Set a binding to `""` to disable it. Collapsed directories must be unfolded
+before their children can be selected. In a commit-file tree, `.` navigates
+rather than toggling commit details when assigned to a tree-navigation action.
+
 ### Upgrade
 
 Detects how you installed (brew / npm / bun / cargo / install.sh) and upgrades in place:

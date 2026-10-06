@@ -419,6 +419,8 @@ pub fn render(
             !cherry_pick_clipboard.is_empty(),
             &config.user_config.keybinding,
             !active_commit_filters.is_empty(),
+            show_file_tree,
+            show_commit_file_tree,
         );
         // Render text selection highlight overlay and tooltip (must be before popup)
         render_selection_overlay(frame, diff_view, fl.main_panel, theme);
@@ -1080,6 +1082,8 @@ pub fn render(
         !cherry_pick_clipboard.is_empty(),
         &config.user_config.keybinding,
         !active_commit_filters.is_empty(),
+        show_file_tree,
+        show_commit_file_tree,
     );
 
     // Render text selection highlight overlay and tooltip
@@ -1440,6 +1444,56 @@ mod tests {
     }
 
     #[test]
+    fn tree_status_hints_use_custom_keys_across_file_contexts() {
+        use super::{ContextId, ContextManager, DiffViewState, KeybindingConfig, Model};
+        let mut kb = KeybindingConfig::default();
+        kb.universal.fold_directory = "f".into();
+        kb.universal.tree_parent = "p".into();
+        kb.universal.tree_child = "c".into();
+        kb.universal.tree_prev_sibling.clear();
+        kb.universal.tree_next_sibling = "n".into();
+        let mut diff_view = DiffViewState::default();
+        diff_view.load("test", "old\n", "new\n");
+        for ctx in [
+            ContextId::Files,
+            ContextId::CommitFiles,
+            ContextId::BranchCommitFiles,
+            ContextId::StashFiles,
+        ] {
+            for focused in [false, true] {
+                let mut ctx_mgr = ContextManager::new();
+                ctx_mgr.set_active(ctx);
+                let mut terminal = Terminal::new(TestBackend::new(240, 1)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        super::render_status_bar(
+                            frame,
+                            frame.area(),
+                            &ctx_mgr,
+                            &diff_view,
+                            &Theme::default(),
+                            &Model::default(),
+                            focused,
+                            false,
+                            &kb,
+                            false,
+                            true,
+                            true,
+                        )
+                    })
+                    .unwrap();
+                let text: String = (0..240)
+                    .map(|x| terminal.backend().buffer().cell((x, 0)).unwrap().symbol())
+                    .collect();
+                assert!(text.contains("p/c nav"), "{ctx:?} {text}");
+                assert!(text.contains("n siblings"), "{text}");
+                assert_eq!(text.contains("f fold"), !focused, "{text}");
+                assert!(!text.contains(",/."), "{text}");
+            }
+        }
+    }
+
+    #[test]
     fn worktrees_render_names_branches_and_main_label_in_every_mode() {
         let model = crate::model::Model {
             worktrees: vec![
@@ -1573,6 +1627,8 @@ mod tests {
                     false,
                     &keybindings,
                     false,
+                    false,
+                    false,
                 );
             })
             .unwrap();
@@ -1601,6 +1657,8 @@ mod tests {
                     false,
                     false,
                     &keybindings,
+                    false,
+                    false,
                     false,
                 );
             })
@@ -1631,6 +1689,8 @@ mod tests {
                     false,
                     &keybindings,
                     false,
+                    false,
+                    false,
                 );
             })
             .unwrap();
@@ -1660,6 +1720,8 @@ mod tests {
                     false,
                     &keybindings,
                     false,
+                    false,
+                    false,
                 );
             })
             .unwrap();
@@ -1688,6 +1750,8 @@ mod tests {
                     true,
                     false,
                     &keybindings,
+                    false,
+                    false,
                     false,
                 );
             })
@@ -1719,6 +1783,8 @@ mod tests {
                     false,
                     false,
                     &custom_kb,
+                    false,
+                    false,
                     false,
                 );
             })
@@ -1907,6 +1973,8 @@ mod tests {
                     false,
                     &keybindings,
                     true,
+                    false,
+                    false,
                 );
             })
             .expect("should render status bar with active filters");
@@ -1939,6 +2007,8 @@ mod tests {
                     false,
                     false,
                     &keybindings,
+                    false,
+                    false,
                     false,
                 );
             })
@@ -2766,6 +2836,8 @@ fn render_search_bar_or_status_bar(
     has_copied_commits: bool,
     keybindings: &KeybindingConfig,
     has_active_filters: bool,
+    show_file_tree: bool,
+    show_commit_file_tree: bool,
 ) {
     if let Some((query, match_count, current_match)) = search_state {
         let match_info = if match_count > 0 {
@@ -2825,6 +2897,8 @@ fn render_search_bar_or_status_bar(
             has_copied_commits,
             keybindings,
             has_active_filters,
+            show_file_tree,
+            show_commit_file_tree,
         );
     }
 }
@@ -2840,7 +2914,10 @@ fn render_status_bar(
     has_copied_commits: bool,
     keybindings: &KeybindingConfig,
     has_active_filters: bool,
+    show_file_tree: bool,
+    show_commit_file_tree: bool,
 ) {
+    let tree_hints = crate::gui::controller::tree::hints(keybindings, !diff_focused);
     let mut hints: Vec<(&str, &str)> = Vec::new();
     let mut emphasized: Vec<&str> = Vec::new();
     let open_log_menu_key = format_key_hint(&keybindings.commits.open_log_menu);
@@ -2890,6 +2967,14 @@ fn render_status_bar(
             }
             hints.push(("{/}", "prev/next hunk"));
         }
+        if (ctx_mgr.active() == ContextId::Files && show_file_tree)
+            || (matches!(
+                ctx_mgr.active(),
+                ContextId::CommitFiles | ContextId::BranchCommitFiles | ContextId::StashFiles
+            ) && show_commit_file_tree)
+        {
+            hints.extend(tree_hints.iter().map(|(key, label)| (key.as_str(), *label)));
+        }
         hints.push(("[/]", "side view"));
         let view_layout_hint = match diff_view.view_layout {
             DiffViewLayout::SideBySide => "unified view",
@@ -2911,6 +2996,12 @@ fn render_status_bar(
                     ("c", "commit"),
                     ("a", "stage all"),
                     ("space", "toggle"),
+                    ("`", "tree"),
+                ]);
+                if show_file_tree {
+                    hints.extend(tree_hints.iter().map(|(key, label)| (key.as_str(), *label)));
+                }
+                hints.extend([
                     ("\\", view_layout_hint),
                     ("d", "discard"),
                     ("e", "edit"),
@@ -2921,11 +3012,11 @@ fn render_status_bar(
                 if ctx_mgr.active() != ContextId::StashFiles && !toggle_head_key.is_empty() {
                     hints.push((toggle_head_key.as_str(), "files"));
                 }
-                hints.extend([
-                    ("enter", "focus diff"),
-                    ("\\", view_layout_hint),
-                    ("y", "copy"),
-                ]);
+                hints.extend([("enter", "focus diff"), ("`", "tree"), ("y", "copy")]);
+                if show_commit_file_tree {
+                    hints.extend(tree_hints.iter().map(|(key, label)| (key.as_str(), *label)));
+                }
+                hints.push(("\\", view_layout_hint));
             }
             ContextId::BranchCommits => {
                 if !toggle_head_key.is_empty() {

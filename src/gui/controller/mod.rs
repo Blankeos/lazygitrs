@@ -17,3 +17,5 @@ pub mod status;
 pub mod submodules;
 pub mod tags;
 pub mod worktrees;
+
+pub mod tree;

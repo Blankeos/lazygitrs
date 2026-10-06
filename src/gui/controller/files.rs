@@ -19,24 +19,24 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
         return super::commits::show_files_filtering_menu(gui);
     }
 
-    // Enter: toggle directory collapse in tree view, or focus diff for files
-    if key.code == KeyCode::Enter {
+    // Folding is explicit; Enter focuses file or combined directory diffs.
+    if super::tree::matches_key(key, &keybindings.universal.fold_directory) {
         if gui.show_file_tree {
-            let selected = gui.context_mgr.selected_active();
-            if let Some(node) = gui.file_tree_nodes.get(selected) {
+            if let Some(node) = gui.file_tree_nodes.get(gui.context_mgr.selected_active()) {
                 if node.is_dir {
                     let path = node.path.clone();
-                    if gui.collapsed_dirs.contains(&path) {
-                        gui.collapsed_dirs.remove(&path);
-                    } else {
+                    if !gui.collapsed_dirs.remove(&path) {
                         gui.collapsed_dirs.insert(path);
                     }
                     gui.update_file_tree_state();
-                    return Ok(());
+                    gui.context_mgr.viewport_manually_scrolled = false;
+                    gui.needs_diff_refresh = true;
                 }
             }
         }
-        // Focus the diff panel for the selected file
+        return Ok(());
+    }
+    if key.code == KeyCode::Enter {
         if !gui.diff_view.is_empty() {
             gui.diff_focused = true;
         }
