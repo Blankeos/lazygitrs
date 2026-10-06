@@ -975,9 +975,9 @@ pub fn maybe_request_diff(gui: &mut Gui, generation: u64, diff_key: String) {
                     } else {
                         let mut parsed =
                             DiffViewState::parse_diff_output(&dir_name, &combined_diff, 4, true);
-                        super::super::attach_inline_image_previews(
+                        crate::pager::image_preview::attach_inline_image_previews(
                             &mut parsed,
-                            &git,
+                            git.repo_path(),
                             &combined_diff,
                             &ref_a,
                             Some(&ref_b),

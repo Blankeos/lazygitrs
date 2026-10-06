@@ -5,40 +5,39 @@
 //! overlays via `image_preview_hidden`. Only scoped Kitty deletes are
 //! supported here (`ImagePreview::cleanup`); Sixel/iTerm2 have no scoped
 //! delete in ratatui-image 8.0.1 and persist once drawn.
+//!
+//! Private modules own capability probing, bounded source loading, and inline
+//! diff eligibility. This module owns rendering and graphics lifetimes.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
-use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-use image::{DynamicImage, ImageFormat};
+use image::ImageFormat;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratatui_image::picker::cap_parser::{Parser, Response};
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::StatefulProtocolType;
 use ratatui_image::thread::{ResizeRequest, ResizeResponse, ThreadProtocol};
 use ratatui_image::{Resize, ResizeEncodeRender, StatefulImage};
 
+mod capabilities;
+mod inline_diff;
+mod source;
+
+use capabilities::global_picker_ref;
+pub use capabilities::initialize;
+pub(crate) use inline_diff::{attach_inline_image_previews, is_image_path};
+pub use source::ImageSource;
+use source::{DecodedImage, format_label_for, load_one_side};
+
 use super::side_by_side::DiffSideView;
 use crate::config::Theme;
 
-const MAX_COMPRESSED_BYTES: usize = 20 * 1024 * 1024;
-const MAX_IMAGE_DIMENSION: u32 = 16384;
-const MAX_ALLOC_BYTES: u64 = 64 * 1024 * 1024;
-const PREVIEW_MAX_WIDTH: u32 = 1600;
-const PREVIEW_MAX_HEIGHT: u32 = 1200;
-const PROBE_TIMEOUT: Duration = Duration::from_millis(450);
-// Only CSI replies: Kitty/Ghostty are identified by hints, not an APC query.
-// Graphics replies can arrive after the status reply and leak into key input.
-const CAPABILITY_QUERY: &str = "\x1b[c\x1b[16t\x1b[5n";
-const FALLBACK_KITTY_FONT: (u16, u16) = (8, 16);
-
-static GLOBAL_PICKER: OnceLock<Option<Picker>> = OnceLock::new();
 static PENDING_DELETES: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
 
 /// Flush scoped deletes on the UI thread, never on decoding/resize workers.
@@ -49,589 +48,6 @@ pub fn flush_cleanup(out: &mut dyn Write) {
         }
     }
     let _ = out.flush();
-}
-
-fn global_picker_ref() -> Option<&'static Picker> {
-    GLOBAL_PICKER.get().and_then(|o| o.as_ref())
-}
-
-/// Detect capabilities once, before the TUI input reader starts. Only the
-/// first call probes; later calls are no-ops. Never touches stdin/stdout,
-/// never mutates tmux settings.
-pub fn initialize() {
-    if GLOBAL_PICKER.get().is_some() {
-        return;
-    }
-    let picker = detect_picker();
-    let _ = GLOBAL_PICKER.set(picker);
-}
-
-fn preview_disabled_by_env() -> bool {
-    match std::env::var("LAZYGITRS_IMAGE_PREVIEW") {
-        Ok(v) => {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "off" | "0" | "false" | "no" | "disable" | "disabled" | "none"
-            )
-        }
-        Err(_) => false,
-    }
-}
-
-fn in_unsupported_multiplexer() -> bool {
-    if std::env::var_os("TMUX").is_some() {
-        return true;
-    }
-    if std::env::var_os("ZELLIJ").is_some() {
-        return true;
-    }
-    if std::env::var_os("ZELLIJ_SESSION_NAME").is_some() {
-        return true;
-    }
-    if std::env::var("TERM").is_ok_and(|t| t.starts_with("tmux") || t.starts_with("screen")) {
-        return true;
-    }
-    if std::env::var("TERM_PROGRAM").is_ok_and(|p| p == "tmux") {
-        return true;
-    }
-    false
-}
-
-fn is_konsole() -> bool {
-    if std::env::var_os("KONSOLE_VERSION").is_some() {
-        return true;
-    }
-    if std::env::var_os("KONSOLE_DBUS_SESSION").is_some() {
-        return true;
-    }
-    if std::env::var("TERM").is_ok_and(|t| t.to_ascii_lowercase().contains("konsole")) {
-        return true;
-    }
-    false
-}
-
-/// iTerm2/WezTerm hints. `rio` is known-broken and `Hyper` is unverified, so
-/// neither enables graphics here.
-fn iterm2_hint_from_env() -> bool {
-    if let Ok(tp) = std::env::var("TERM_PROGRAM") {
-        if tp.contains("iTerm")
-            || tp.contains("WezTerm")
-            || tp.contains("mintty")
-            || tp.contains("vscode")
-            || tp.contains("Tabby")
-        {
-            return true;
-        }
-    }
-    if std::env::var("LC_TERMINAL").is_ok_and(|v| v.contains("iTerm")) {
-        return true;
-    }
-    if std::env::var("ITERM_SESSION_ID").is_ok_and(|s| !s.is_empty()) {
-        return true;
-    }
-    if std::env::var("WEZTERM_EXECUTABLE").is_ok_and(|s| !s.is_empty()) {
-        return true;
-    }
-    false
-}
-
-fn strong_kitty_ghostty_hint() -> bool {
-    if std::env::var("KITTY_WINDOW_ID").is_ok_and(|s| !s.is_empty()) {
-        return true;
-    }
-    if std::env::var("TERM").is_ok_and(|t| t == "xterm-kitty" || t.contains("kitty")) {
-        return true;
-    }
-    if std::env::var("TERM_PROGRAM")
-        .is_ok_and(|p| p.contains("kitty") || p.contains("ghostty") || p.contains("Ghostty"))
-    {
-        return true;
-    }
-    if std::env::var_os("GHOSTTY_RESOURCES_DIR").is_some() {
-        return true;
-    }
-    if std::env::var("GHOSTTY_BIN_DIR").is_ok_and(|s| !s.is_empty()) {
-        return true;
-    }
-    false
-}
-
-#[cfg(unix)]
-fn font_size_from_fd(fd: std::os::fd::RawFd) -> Option<(u16, u16)> {
-    // SAFETY: ioctl with TIOCGWINSZ on a borrowed fd; `ws` is a plain POD out-param.
-    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-    let ret = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) };
-    if ret != 0 {
-        return None;
-    }
-    if ws.ws_col == 0 || ws.ws_row == 0 || ws.ws_xpixel == 0 || ws.ws_ypixel == 0 {
-        return None;
-    }
-    let w = ws.ws_xpixel / ws.ws_col;
-    let h = ws.ws_ypixel / ws.ws_row;
-    if w == 0 || h == 0 {
-        return None;
-    }
-    if !(4..=100).contains(&w) || !(6..=200).contains(&h) {
-        return None;
-    }
-    Some((w, h))
-}
-
-#[cfg(unix)]
-fn font_size_from_winsize() -> Option<(u16, u16)> {
-    use std::os::fd::AsRawFd;
-    if let Ok(f) = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-    {
-        if let Some(fs) = font_size_from_fd(f.as_raw_fd()) {
-            return Some(fs);
-        }
-    }
-    font_size_from_fd(libc::STDOUT_FILENO)
-}
-
-#[cfg(not(unix))]
-fn font_size_from_winsize() -> Option<(u16, u16)> {
-    None
-}
-
-/// Bounded synchronous capability probe on `/dev/tty`. No threads, no
-/// detached readers; termios is restored via a guard.
-#[cfg(unix)]
-fn probe_tty_responses(timeout: Duration) -> Option<Vec<Response>> {
-    use std::os::fd::AsRawFd;
-
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-        .ok()?;
-    let fd = file.as_raw_fd();
-
-    // SAFETY: tcgetattr on our own open tty fd with a valid out-pointer.
-    let mut orig: libc::termios = unsafe { std::mem::zeroed() };
-    if unsafe { libc::tcgetattr(fd, &mut orig) } != 0 {
-        return None;
-    }
-    struct Guard {
-        fd: i32,
-        orig: libc::termios,
-    }
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            unsafe {
-                libc::tcsetattr(self.fd, libc::TCSANOW, &self.orig);
-            }
-        }
-    }
-    let _guard = Guard { fd, orig };
-
-    // SAFETY: tcsetattr on our own tty fd.
-    let mut raw = _guard.orig;
-    raw.c_lflag &= !(libc::ICANON | libc::ECHO);
-    raw.c_cc[libc::VMIN as usize] = 0;
-    raw.c_cc[libc::VTIME as usize] = 0;
-    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
-        return None;
-    }
-
-    {
-        let mut w = &file;
-        if w.write_all(CAPABILITY_QUERY.as_bytes()).is_err() {
-            return None;
-        }
-        if w.flush().is_err() {
-            return None;
-        }
-    }
-
-    let mut parser = Parser::new();
-    let mut out: Vec<Response> = Vec::new();
-    let deadline = Instant::now() + timeout;
-    let mut buf = [0u8; 512];
-
-    loop {
-        let remain = deadline.saturating_duration_since(Instant::now());
-        if remain.is_zero() {
-            break;
-        }
-        let ms = remain.as_millis().min(100) as libc::c_int;
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: poll on our own tty fd with a valid pollfd pointer.
-        let pr = unsafe { libc::poll(&mut pfd, 1, ms) };
-        if pr < 0 {
-            continue;
-        }
-        if pr == 0 {
-            continue;
-        }
-        if pfd.revents & libc::POLLIN == 0 {
-            if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
-                break;
-            }
-            continue;
-        }
-        // SAFETY: read into a valid stack buffer.
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-        if n <= 0 {
-            continue;
-        }
-        for b in buf.iter().take(n as usize) {
-            for r in parser.push(char::from(*b)) {
-                if r == Response::Status {
-                    return Some(out);
-                }
-                out.push(r);
-            }
-        }
-        if out.len() > 32 {
-            break;
-        }
-    }
-    if out.is_empty() { None } else { Some(out) }
-}
-
-#[cfg(not(unix))]
-fn probe_tty_responses(_timeout: Duration) -> Option<Vec<Response>> {
-    None
-}
-
-fn interpret_probed(
-    responses: Option<Vec<Response>>,
-) -> (Option<ProtocolType>, Option<(u16, u16)>) {
-    let Some(responses) = responses else {
-        return (None, None);
-    };
-    let mut proto: Option<ProtocolType> = None;
-    let mut font: Option<(u16, u16)> = None;
-    for r in &responses {
-        match r {
-            Response::Kitty => {
-                proto = Some(ProtocolType::Kitty);
-            }
-            Response::Sixel => {
-                if proto.is_none() {
-                    proto = Some(ProtocolType::Sixel);
-                }
-            }
-            Response::CellSize(Some((w, h))) => {
-                if *w != 0 && *h != 0 {
-                    font = Some((*w, *h));
-                }
-            }
-            Response::CellSize(None) => {}
-            Response::RectangularOps | Response::CursorPositionReport(..) | Response::Status => {}
-        }
-    }
-    (proto, font)
-}
-
-fn detect_picker() -> Option<Picker> {
-    if preview_disabled_by_env() {
-        return None;
-    }
-    if in_unsupported_multiplexer() {
-        return None;
-    }
-    if is_konsole() {
-        return None;
-    }
-    // Non-placeholder protocols cannot reliably clear graphics under popups
-    // with this widget release. Keep them opt-in until verified end-to-end.
-    let experimental = std::env::var("LAZYGITRS_IMAGE_PREVIEW").is_ok_and(|v| v == "experimental");
-    if !strong_kitty_ghostty_hint() && !experimental {
-        return None;
-    }
-
-    #[cfg(not(unix))]
-    {
-        return None;
-    }
-
-    #[cfg(unix)]
-    {
-        let nested = crate::os::tty::nested_tty_launch();
-        let winsize_font = font_size_from_winsize();
-
-        if nested {
-            // No terminal query under nested launches; hints + ioctl only.
-            if experimental && iterm2_hint_from_env() {
-                let fs = winsize_font?;
-                let mut p = Picker::from_fontsize(fs);
-                p.set_protocol_type(ProtocolType::Iterm2);
-                return Some(p);
-            }
-            if strong_kitty_ghostty_hint() {
-                let fs = winsize_font.unwrap_or(FALLBACK_KITTY_FONT);
-                if fs.0 == 0 || fs.1 == 0 {
-                    return None;
-                }
-                let mut p = Picker::from_fontsize(fs);
-                p.set_protocol_type(ProtocolType::Kitty);
-                return Some(p);
-            }
-            return None;
-        }
-
-        // Known placeholder terminals need no protocol query. In particular,
-        // don't create terminal replies when ioctl already supplies cell size.
-        let probed = if strong_kitty_ghostty_hint() && winsize_font.is_some() {
-            None
-        } else {
-            probe_tty_responses(PROBE_TIMEOUT)
-        };
-        let (probed_proto, probed_font) = interpret_probed(probed);
-        let hint_iterm2 = experimental && iterm2_hint_from_env();
-        let hint_kitty = strong_kitty_ghostty_hint();
-
-        // iTerm2 hints win, then queried Sixel, then Kitty only with a strong
-        // Kitty/Ghostty hint. A bare Kitty query response is not trusted: our
-        // Kitty path needs unicode placeholders, which the query alone does
-        // not guarantee.
-        let proto: Option<ProtocolType> = if hint_iterm2 {
-            Some(ProtocolType::Iterm2)
-        } else if let Some(p) = probed_proto {
-            match p {
-                ProtocolType::Sixel if experimental => Some(ProtocolType::Sixel),
-                ProtocolType::Kitty if hint_kitty => Some(ProtocolType::Kitty),
-                _ => {
-                    if hint_kitty {
-                        Some(ProtocolType::Kitty)
-                    } else {
-                        None
-                    }
-                }
-            }
-        } else if hint_kitty {
-            Some(ProtocolType::Kitty)
-        } else {
-            None
-        };
-
-        let proto = proto?;
-        if proto == ProtocolType::Halfblocks {
-            return None;
-        }
-
-        let font = winsize_font.or(probed_font).or_else(|| {
-            if proto == ProtocolType::Kitty && hint_kitty {
-                Some(FALLBACK_KITTY_FONT)
-            } else {
-                None
-            }
-        })?;
-        if font.0 == 0 || font.1 == 0 {
-            return None;
-        }
-
-        let mut picker = Picker::from_fontsize(font);
-        picker.set_protocol_type(proto);
-        if picker.protocol_type() == ProtocolType::Halfblocks {
-            return None;
-        }
-        Some(picker)
-    }
-}
-
-/// Where one side of the before/after preview comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImageSource<'a> {
-    /// Worktree file at this repo-relative path.
-    Worktree(&'a str),
-    /// `revision:path` via `git cat-file`.
-    Revision { revision: &'a str, path: &'a str },
-    /// Legitimately absent (added/deleted).
-    Missing,
-}
-
-/// Decoded + downsized image with its detected format.
-#[derive(Debug, Clone)]
-pub(crate) struct DecodedImage {
-    /// Downsized to `PREVIEW_MAX_*` (aspect preserved).
-    pub(crate) image: DynamicImage,
-    pub(crate) format: Option<ImageFormat>,
-    pub(crate) orig_width: u32,
-    pub(crate) orig_height: u32,
-}
-
-impl DecodedImage {
-    pub(crate) fn width(&self) -> u32 {
-        self.image.width()
-    }
-    pub(crate) fn height(&self) -> u32 {
-        self.image.height()
-    }
-    pub(crate) fn format_label(&self) -> &'static str {
-        format_label_for(self.format)
-    }
-}
-
-pub(crate) fn format_label_for(format: Option<ImageFormat>) -> &'static str {
-    match format {
-        Some(ImageFormat::Png) => "PNG",
-        Some(ImageFormat::Jpeg) => "JPEG",
-        Some(ImageFormat::Gif) => "GIF",
-        Some(ImageFormat::WebP) => "WEBP",
-        Some(ImageFormat::Bmp) => "BMP",
-        Some(ImageFormat::Ico) => "ICO",
-        Some(ImageFormat::Tiff) => "TIFF",
-        Some(_) => "IMG",
-        None => "IMG",
-    }
-}
-
-/// Decode bounded bytes, then downsize for preview. Returns `None` for empty,
-/// oversize, unsupported, or over-limit inputs.
-pub(crate) fn decode_bytes(bytes: &[u8]) -> Option<DecodedImage> {
-    if bytes.is_empty() || bytes.len() > MAX_COMPRESSED_BYTES {
-        return None;
-    }
-    let cursor = std::io::Cursor::new(bytes);
-    let mut reader = image::ImageReader::new(cursor).with_guessed_format().ok()?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
-    limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
-    limits.max_alloc = Some(MAX_ALLOC_BYTES);
-    reader.limits(limits);
-    let format = reader.format();
-    let decoded = reader.decode().ok()?;
-    let (ow, oh) = (decoded.width(), decoded.height());
-    if ow == 0 || oh == 0 || ow > MAX_IMAGE_DIMENSION || oh > MAX_IMAGE_DIMENSION {
-        return None;
-    }
-    let image = if ow > PREVIEW_MAX_WIDTH || oh > PREVIEW_MAX_HEIGHT {
-        decoded.thumbnail(PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT)
-    } else {
-        decoded
-    };
-    Some(DecodedImage {
-        image,
-        format,
-        orig_width: ow,
-        orig_height: oh,
-    })
-}
-
-enum RevisionRead {
-    Absent,
-    Present(Vec<u8>),
-    Failed,
-}
-
-fn git_env_no_interactive(cmd: &mut std::process::Command) {
-    cmd.env("GIT_OPTIONAL_LOCKS", "0");
-    cmd.env("GIT_TERMINAL_PROMPT", "0");
-    cmd.env("SSH_ASKPASS_REQUIRE", "never");
-    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
-        cmd.env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes");
-    }
-}
-
-fn git_blob_exists(cwd: &Path, spec: &str) -> Option<bool> {
-    use std::process::Stdio;
-    let mut cmd = std::process::Command::new("git");
-    cmd.current_dir(cwd)
-        .args(["cat-file", "-e", spec])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    git_env_no_interactive(&mut cmd);
-    match cmd.status() {
-        Ok(s) => Some(s.success()),
-        Err(_) => None,
-    }
-}
-
-/// Bounded `git cat-file -p` read. Kills the child when the cap is exceeded
-/// so a large blob cannot deadlock on a full pipe.
-fn read_revision_blob(cwd: &Path, revision: &str, path: &str) -> RevisionRead {
-    use std::process::Stdio;
-    if path.is_empty() {
-        return RevisionRead::Failed;
-    }
-    if revision.contains('\0') || path.contains('\0') {
-        return RevisionRead::Failed;
-    }
-    let spec = format!("{revision}:{path}");
-    match git_blob_exists(cwd, &spec) {
-        Some(false) => return RevisionRead::Absent,
-        None => return RevisionRead::Failed,
-        Some(true) => {}
-    }
-    let mut cmd = std::process::Command::new("git");
-    cmd.current_dir(cwd)
-        .args(["cat-file", "-p", &spec])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .stdout(Stdio::piped());
-    git_env_no_interactive(&mut cmd);
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(_) => return RevisionRead::Failed,
-    };
-    let stdout = match child.stdout.take() {
-        Some(s) => s,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return RevisionRead::Failed;
-        }
-    };
-    let mut limited = stdout.take((MAX_COMPRESSED_BYTES as u64) + 1);
-    let mut buf = Vec::with_capacity(8192.min(MAX_COMPRESSED_BYTES));
-    if limited.read_to_end(&mut buf).is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
-        return RevisionRead::Failed;
-    }
-    if buf.len() > MAX_COMPRESSED_BYTES {
-        let _ = child.kill();
-        let _ = child.wait();
-        return RevisionRead::Failed;
-    }
-    match child.wait() {
-        Ok(s) if s.success() => RevisionRead::Present(buf),
-        _ => {
-            if buf.is_empty() {
-                RevisionRead::Absent
-            } else {
-                RevisionRead::Failed
-            }
-        }
-    }
-}
-
-/// Bounded worktree read. `Ok(None)` = legitimately missing; `Err(())` =
-/// present but unreadable/oversize.
-fn read_worktree_bytes(repo_path: &Path, rel: &str) -> Result<Option<Vec<u8>>, ()> {
-    if rel.is_empty() || rel.contains('\0') {
-        return Err(());
-    }
-    let full = repo_path.join(rel);
-    let file = match std::fs::File::open(&full) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(()),
-    };
-    if file.metadata().is_ok_and(|m| m.is_dir()) {
-        return Ok(None);
-    }
-    let mut limited = file.take((MAX_COMPRESSED_BYTES as u64) + 1);
-    let mut buf = Vec::new();
-    if limited.read_to_end(&mut buf).is_err() {
-        return Err(());
-    }
-    if buf.len() > MAX_COMPRESSED_BYTES {
-        return Err(());
-    }
-    Ok(Some(buf))
 }
 
 struct PreviewSide {
@@ -832,34 +248,6 @@ pub fn load(
     new: ImageSource<'_>,
 ) -> Option<ImagePreview> {
     ImagePreview::load(git, old, new)
-}
-
-fn load_one_side(repo: &Path, src: ImageSource<'_>) -> Option<Option<DecodedImage>> {
-    match src {
-        ImageSource::Missing => Some(None),
-        ImageSource::Worktree(rel) => match read_worktree_bytes(repo, rel) {
-            Ok(None) => Some(None),
-            Ok(Some(bytes)) => {
-                if bytes.is_empty() {
-                    return None;
-                }
-                Some(Some(decode_bytes(&bytes)?))
-            }
-            Err(()) => None,
-        },
-        ImageSource::Revision { revision, path } => {
-            match read_revision_blob(repo, revision, path) {
-                RevisionRead::Absent => Some(None),
-                RevisionRead::Present(bytes) => {
-                    if bytes.is_empty() {
-                        return None;
-                    }
-                    Some(Some(decode_bytes(&bytes)?))
-                }
-                RevisionRead::Failed => None,
-            }
-        }
-    }
 }
 
 /// Split `area` into `(old_pane, new_pane)` honoring `side`.
@@ -1102,8 +490,8 @@ const MAX_INLINE_LOADS: usize = 2;
 static INLINE_LOADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Owned source identity; delayed loads must not borrow a diff job's buffers.
-#[derive(Clone)]
-pub(crate) enum InlineImageSource {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InlineImageSource {
     Worktree(String),
     Revision { revision: String, path: String },
     Missing,
@@ -1137,7 +525,7 @@ pub struct InlineImagePreview {
 }
 
 impl InlineImagePreview {
-    pub(crate) fn new(repo: &Path, old: InlineImageSource, new: InlineImageSource) -> Option<Self> {
+    fn new(repo: &Path, old: InlineImageSource, new: InlineImageSource) -> Option<Self> {
         let picker = global_picker_ref()?.clone();
         // Inline overlays need placeholder semantics to clear individual rows
         // without erasing adjacent text. Experimental Sixel/iTerm2 stay striped.
@@ -1300,17 +688,12 @@ fn inline_placeholder(frame: &mut Frame, area: Rect, message: &str, theme: &Them
 
 #[cfg(test)]
 mod tests {
+    use super::source::*;
     use super::*;
+    use image::DynamicImage;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::path::PathBuf;
-
-    #[test]
-    fn startup_query_never_requests_a_graphics_reply() {
-        assert_eq!(CAPABILITY_QUERY, "\x1b[c\x1b[16t\x1b[5n");
-        assert!(!CAPABILITY_QUERY.contains("\x1b_G"));
-        assert!(!CAPABILITY_QUERY.contains("i=31"));
-    }
 
     fn halfblocks_picker() -> Picker {
         let mut p = Picker::from_fontsize((8, 16));

@@ -925,7 +925,10 @@ fn image_diff_payload(
     new: crate::pager::image_preview::ImageSource<'_>,
 ) -> Option<crate::pager::side_by_side::ParsedDiff> {
     let paths = crate::git::diff::diff_paths_for_label(name);
-    if !paths.iter().any(|p| is_image_path(p)) {
+    if !paths
+        .iter()
+        .any(|p| crate::pager::image_preview::is_image_path(p))
+    {
         return None;
     }
     let preview = crate::pager::image_preview::load(git, old, new)?;
@@ -944,74 +947,6 @@ fn image_diff_payload(
     );
     parsed.image_preview = Some(preview);
     Some(parsed)
-}
-
-/// Attach source metadata, not pixels. Inline sections decode on viewport entry.
-fn attach_inline_image_previews(
-    parsed: &mut crate::pager::side_by_side::ParsedDiff,
-    git: &GitCommands,
-    diff: &str,
-    old_revision: &str,
-    new_revision: Option<&str>,
-    excluded_paths: &std::collections::HashSet<String>,
-) {
-    use crate::pager::image_preview::{InlineImagePreview, InlineImageSource};
-    let mut images = std::collections::HashMap::new();
-    for (section, (_, file_diff)) in crate::pager::side_by_side::parse_multi_file_diff(diff)
-        .iter()
-        .enumerate()
-    {
-        let Some(paths) = crate::git::diff_paths::paths_from_diff(file_diff) else {
-            continue;
-        };
-        if paths
-            .old
-            .iter()
-            .chain(&paths.new)
-            .any(|p| excluded_paths.contains(p))
-        {
-            continue;
-        }
-        if !paths.old.iter().chain(&paths.new).any(|p| is_image_path(p)) {
-            continue;
-        }
-        // No textual hunk data may be replaced by graphics (attributes can
-        // force a PNG-looking file to be diffed as ordinary source text).
-        if file_diff.lines().any(|line| line.starts_with("@@")) {
-            continue;
-        }
-        let old = paths.old.map_or(InlineImageSource::Missing, |path| {
-            InlineImageSource::Revision {
-                revision: old_revision.to_string(),
-                path,
-            }
-        });
-        let new = paths
-            .new
-            .map_or(InlineImageSource::Missing, |path| match new_revision {
-                Some(revision) => InlineImageSource::Revision {
-                    revision: revision.to_string(),
-                    path,
-                },
-                None => InlineImageSource::Worktree(path),
-            });
-        if let Some(image) = InlineImagePreview::new(git.repo_path(), old, new) {
-            images.insert(section, image);
-        }
-    }
-    parsed.attach_inline_images(images);
-}
-
-fn is_image_path(path: &str) -> bool {
-    std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| {
-            matches!(
-                e.to_ascii_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "tif" | "tiff"
-            )
-        })
 }
 
 impl Gui {
@@ -3314,9 +3249,9 @@ impl Gui {
                                     if parsed.hunk_staged.len() != parsed.hunk_starts.len() {
                                         parsed.hunk_staged = vec![false; parsed.hunk_starts.len()];
                                     }
-                                    attach_inline_image_previews(
+                                    crate::pager::image_preview::attach_inline_image_previews(
                                         &mut parsed,
-                                        &git,
+                                        git.repo_path(),
                                         &combined_diff,
                                         "HEAD",
                                         None,
@@ -3485,9 +3420,9 @@ impl Gui {
                                         true,
                                     );
                                     let parent = format!("{hash}^1");
-                                    attach_inline_image_previews(
+                                    crate::pager::image_preview::attach_inline_image_previews(
                                         &mut parsed,
-                                        &git,
+                                        git.repo_path(),
                                         &combined_diff,
                                         &parent,
                                         Some(&hash),
