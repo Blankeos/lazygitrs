@@ -33,11 +33,10 @@ Then run:
 lazygitrs
 ```
 
-Use `lazygitrs --commits` to start at the checked-out HEAD commit. Press
-`Ctrl+G` to toggle between working-tree changes and HEAD (including from a
-focused diff). If filters or pagination hide HEAD, it opens a separate HEAD
-history view without clearing your filters. Remap or disable the shortcut with
-`keybinding.universal.toggleWorkingTreeAndHead` (`"<c-g>"` by default; `""` disables it).
+Use `lazygitrs --commits` to start at the checked-out HEAD commit. If filters
+or pagination hide HEAD, it opens a separate HEAD history view without clearing
+your filters. Use `2` and `4` to navigate between Files and Commits; `Ctrl+G`
+in Files generates a commit message using `git.commit.generateCommand`.
 
 ### File tree navigation
 
