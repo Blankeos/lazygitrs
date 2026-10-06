@@ -722,6 +722,8 @@ pub struct Gui {
     pub show_commit_file_tree: bool,
     /// Name of the branch/tag whose commits are being viewed in BranchCommits context.
     pub branch_commits_name: String,
+    /// Select HEAD once startup history arrives, unless the user navigates first.
+    pending_startup_head: bool,
     /// Name of the remote whose branches are being viewed in RemoteBranches context.
     pub remote_branches_name: String,
     /// Parent context to return to when pressing Esc from BranchCommits.
@@ -958,7 +960,12 @@ impl Gui {
         };
     }
 
-    pub fn new(config: AppConfig, git: GitCommands, filter_path: Option<PathBuf>) -> Result<Self> {
+    pub fn new(
+        config: AppConfig,
+        git: GitCommands,
+        filter_path: Option<PathBuf>,
+        start_in_commits: bool,
+    ) -> Result<Self> {
         let (diff_tx, diff_rx) = mpsc::channel();
         let (diff_scheduler_tx, diff_scheduler_rx) = mpsc::channel();
         let (diff_prefetch_tx, diff_prefetch_rx) = mpsc::channel();
@@ -1050,8 +1057,9 @@ impl Gui {
             .unwrap_or(0);
 
         let mut context_mgr = ContextManager::new();
-        if startup_path_filter.is_some() {
+        if startup_path_filter.is_some() || start_in_commits {
             context_mgr.set_active(ContextId::Commits);
+            context_mgr.set_selection_for(ContextId::Commits, 0);
         }
 
         Ok(Self {
@@ -1137,6 +1145,7 @@ impl Gui {
             commit_files_collapsed_dirs: HashSet::new(),
             show_commit_file_tree: show_file_tree,
             branch_commits_name: String::new(),
+            pending_startup_head: start_in_commits,
             remote_branches_name: String::new(),
             sub_commits_parent_context: context::ContextId::Branches,
             commit_files_parent_context: None,
@@ -1296,6 +1305,7 @@ impl Gui {
             // Drain any model parts that have arrived from the background load.
             if let Some(rx) = &self.initial_load_rx {
                 let mut got_files = false;
+                let mut got_commits = false;
                 let mut got_rebase_in_progress = false;
                 let received_before = self.initial_load_received;
                 while let Ok(part) = rx.try_recv() {
@@ -1307,6 +1317,7 @@ impl Gui {
                         }
                         ModelPart::Branches(v) => model.branches = v,
                         ModelPart::Commits(v) => {
+                            got_commits = true;
                             // Stream already applies the active filter when one is set
                             // (`load_model_streaming(commit_filter)`), so always take it.
                             self.commit_history_complete = v.len() < DEFAULT_COMMIT_LIMIT;
@@ -1346,6 +1357,11 @@ impl Gui {
                         ModelPart::Contributors(c) => model.contributors = c,
                     }
                     self.initial_load_received += 1;
+                }
+                if got_commits {
+                    if let Err(err) = self.select_startup_head() {
+                        self.show_error("Could not select HEAD", err);
+                    }
                 }
                 // Enter the InProgress rebase view as soon as we know a rebase
                 // is on disk — don't wait for a future `refresh()` tick (focus
@@ -3523,6 +3539,7 @@ impl Gui {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        self.pending_startup_head = false;
         if self.handle_ai_commit_cancel_key(key) {
             return Ok(());
         }
@@ -3586,6 +3603,11 @@ impl Gui {
         }
         if self.diff_focused {
             return self.handle_diff_focused_key(key);
+        }
+
+        // Toggle between working-tree changes and the actual checked-out HEAD.
+        if matches_key(key, &keybindings.universal.toggle_working_tree_and_head) {
+            return self.toggle_working_tree_and_head();
         }
 
         // Global keybindings
@@ -4106,6 +4128,11 @@ impl Gui {
                 }
             }
             return Ok(());
+        }
+
+        // Respect the configured binding in the diff pane too.
+        if matches_key(key, &keybindings.universal.toggle_working_tree_and_head) {
+            return self.toggle_working_tree_and_head();
         }
 
         // Toggle command log (;)
@@ -5774,6 +5801,10 @@ impl Gui {
                     kb.universal.create_patch_options_menu.clone(),
                     "Patch options".into(),
                 ),
+                CommandEntry::keybinding(
+                    kb.universal.toggle_working_tree_and_head.clone(),
+                    "Toggle files / commit HEAD".into(),
+                ),
                 CommandEntry::keybinding("{/}".into(), "Previous/next hunk".into()),
                 CommandEntry::keybinding(";".into(), "Toggle command log".into()),
                 CommandEntry::keybinding("W".into(), "Compare / Diff mode".into()),
@@ -6190,6 +6221,15 @@ impl Gui {
                     .toggle_diff_view_layout
                     .clone(),
                 "Toggle unified / side-by-side view".into(),
+            ),
+            CommandEntry::keybinding(
+                self.config
+                    .user_config
+                    .keybinding
+                    .universal
+                    .toggle_working_tree_and_head
+                    .clone(),
+                "Toggle files / commit HEAD".into(),
             ),
             CommandEntry::keybinding("z".into(), "Toggle line wrap".into()),
             CommandEntry::keybinding("g/G".into(), "Go to top / bottom".into()),
@@ -8720,6 +8760,62 @@ impl Gui {
         }
     }
 
+    fn select_startup_head(&mut self) -> Result<()> {
+        if std::mem::take(&mut self.pending_startup_head)
+            && self.context_mgr.active() == ContextId::Commits
+        {
+            self.focus_head_commit()?;
+        }
+        Ok(())
+    }
+
+    fn focus_head_commit(&mut self) -> Result<()> {
+        // HEAD may not be the first all-ref commit, and may be absent from a
+        // filtered or paginated list. Never change filters or inject a commit
+        // that doesn't match them: reuse the separate revision-history view.
+        let hash = self.git.head_hash().unwrap_or_default();
+        let selected = self
+            .model
+            .lock()
+            .unwrap()
+            .commits
+            .iter()
+            .position(|commit| commit.hash == hash);
+        let (context, index) = if let Some(index) = selected {
+            (ContextId::Commits, index)
+        } else if hash.is_empty() {
+            // Unborn repository: an empty commit panel is still a valid target.
+            (ContextId::Commits, 0)
+        } else {
+            let commits = self.git.load_commits_for_branch(&hash, 300)?;
+            self.model.lock().unwrap().set_sub_commits(commits);
+            self.branch_commits_name = "HEAD".to_string();
+            self.sub_commits_parent_context = ContextId::Commits;
+            (ContextId::BranchCommits, 0)
+        };
+        self.context_mgr.set_active(context);
+        self.context_mgr.set_selection(index);
+        self.context_mgr.set_scroll_offset(context, index);
+        self.needs_diff_refresh = true;
+        Ok(())
+    }
+
+    pub fn toggle_working_tree_and_head(&mut self) -> Result<()> {
+        self.range_select_anchor = None;
+        match self.context_mgr.active() {
+            ContextId::Commits
+            | ContextId::CommitFiles
+            | ContextId::Reflog
+            | ContextId::BranchCommits
+            | ContextId::BranchCommitFiles => {
+                self.context_mgr.set_active(ContextId::Files);
+                self.needs_diff_refresh = true;
+            }
+            _ => self.focus_head_commit()?,
+        }
+        Ok(())
+    }
+
     fn next_screen_mode(&mut self) {
         self.screen_mode = match self.screen_mode {
             ScreenMode::Normal => ScreenMode::Half,
@@ -9221,6 +9317,329 @@ mod terminal_mouse_tests {
             keys.insert(result.diff_key);
         }
         assert_eq!(keys.len(), 8);
+    }
+
+    struct TempRepo {
+        path: PathBuf,
+    }
+
+    impl TempRepo {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "lazygitrs-gui-test-{}-{}-{}",
+                name,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            let _ = std::process::Command::new("git")
+                .args(["init", "-b", "main"])
+                .current_dir(&path)
+                .output();
+            Self { path }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            let output = std::process::Command::new("git")
+                .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+                .args(args)
+                .current_dir(&self.path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        }
+
+        fn commit(&self, path: &str, contents: &str) -> String {
+            std::fs::write(self.path.join(path), contents).unwrap();
+            self.git(&["add", path]);
+            self.git(&["commit", "-m", contents]);
+            self.git(&["rev-parse", "HEAD"])
+        }
+    }
+
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn toggle_working_tree_and_head_toggles_between_files_and_head() {
+        let repo = TempRepo::new("toggle-files-head");
+        let config = crate::config::AppConfig::default();
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(config, git, None, false).unwrap();
+
+        // Starts in Files by default
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+
+        // Toggle to Commits (HEAD at index 0)
+        gui.toggle_working_tree_and_head().unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Commits);
+        assert_eq!(gui.context_mgr.selected(ContextId::Commits), 0);
+        assert_eq!(gui.context_mgr.scroll_offset(ContextId::Commits), 0);
+        assert!(gui.needs_diff_refresh);
+
+        // Move commit selection, then toggle back to Files
+        gui.context_mgr.set_selection_for(ContextId::Commits, 3);
+        gui.toggle_working_tree_and_head().unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+        assert!(gui.needs_diff_refresh);
+
+        // Toggle from CommitFiles subcontext back to Files
+        gui.context_mgr.set_active(ContextId::CommitFiles);
+        gui.toggle_working_tree_and_head().unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+
+        // Toggle from outside context (e.g. Branches) jumps to Commits at HEAD
+        gui.context_mgr.set_active(ContextId::Branches);
+        gui.toggle_working_tree_and_head().unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Commits);
+        assert_eq!(gui.context_mgr.selected(ContextId::Commits), 0);
+    }
+
+    #[test]
+    fn start_in_commits_initializes_context_to_commits_head() {
+        let repo = TempRepo::new("start-in-commits");
+        let config = crate::config::AppConfig::default();
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let gui = Gui::new(config, git, None, true).unwrap();
+
+        assert_eq!(gui.context_mgr.active(), ContextId::Commits);
+        assert_eq!(gui.context_mgr.selected(ContextId::Commits), 0);
+    }
+
+    #[test]
+    fn ctrl_g_key_event_triggers_toggle() {
+        let repo = TempRepo::new("ctrl-g-toggle");
+        let config = crate::config::AppConfig::default();
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(config, git, None, false).unwrap();
+
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+
+        // Send Ctrl+g
+        let ctrl_g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        gui.handle_key(ctrl_g).unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Commits);
+
+        // Send Ctrl+g again to toggle back
+        gui.handle_key(ctrl_g).unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+
+        // Send Ctrl+g while diff is focused
+        gui.diff_focused = true;
+        gui.handle_key(ctrl_g).unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Commits);
+        assert!(gui.diff_focused);
+
+        // The configured shortcut also toggles back while diff-focused.
+        gui.handle_key(ctrl_g).unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+        assert!(gui.diff_focused);
+
+        // Test custom keybinding (e.g. <c-t>)
+        let mut custom_config = crate::config::AppConfig::default();
+        custom_config
+            .user_config
+            .keybinding
+            .universal
+            .toggle_working_tree_and_head = "<c-t>".into();
+        let git2 = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui2 = Gui::new(custom_config, git2, None, false).unwrap();
+        let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        gui2.handle_key(ctrl_t).unwrap();
+        assert_eq!(gui2.context_mgr.active(), ContextId::Commits);
+    }
+
+    #[test]
+    fn head_toggle_selects_checked_out_hash_not_another_branch_tip() {
+        let repo = TempRepo::new("head-not-first");
+        let head = repo.commit("file", "main commit");
+        repo.git(&["checkout", "-b", "ahead"]);
+        let other = repo.commit("file", "other branch commit");
+        repo.git(&["checkout", "main"]);
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let commits = git.load_commits(300).unwrap();
+        assert_eq!(commits[0].hash, other);
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+        gui.model.lock().unwrap().set_commits(commits);
+        gui.toggle_working_tree_and_head().unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Commits);
+        let index = gui.context_mgr.selected(ContextId::Commits);
+        assert_eq!(gui.model.lock().unwrap().commits[index].hash, head);
+        assert_eq!(gui.context_mgr.scroll_offset(ContextId::Commits), index);
+    }
+
+    #[test]
+    fn head_toggle_preserves_filters_and_uses_separate_head_history() {
+        let repo = TempRepo::new("filtered-head");
+        let older = repo.commit("filtered", "older");
+        let head = repo.commit("other", "head");
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+
+        for filter in [
+            crate::git::commit::CommitFilter {
+                path: Some("filtered".into()),
+                ..Default::default()
+            },
+            crate::git::commit::CommitFilter {
+                authors: vec!["nobody@example.com".into()],
+                ..Default::default()
+            },
+            crate::git::commit::CommitFilter {
+                branches: vec![older.clone()],
+                ..Default::default()
+            },
+        ] {
+            let commits = gui.git.load_filtered_commits_page(&filter, 300, 0).unwrap();
+            let hashes: Vec<_> = commits.iter().map(|c| c.hash.clone()).collect();
+            assert!(!hashes.contains(&head));
+            gui.commit_path_filter = filter.path.clone();
+            gui.commit_author_filter = filter.authors.clone();
+            gui.commit_branch_filter = filter.branches.clone();
+            gui.model.lock().unwrap().set_commits(commits);
+            gui.context_mgr.set_active(ContextId::Files);
+            gui.context_mgr.set_selection(2);
+            gui.diff_focused = true;
+            gui.toggle_working_tree_and_head().unwrap();
+            assert_eq!(gui.context_mgr.active(), ContextId::BranchCommits);
+            assert_eq!(gui.model.lock().unwrap().sub_commits[0].hash, head);
+            assert_eq!(gui.commit_path_filter, filter.path);
+            assert_eq!(gui.commit_author_filter, filter.authors);
+            assert_eq!(gui.commit_branch_filter, filter.branches);
+            assert_eq!(
+                gui.model
+                    .lock()
+                    .unwrap()
+                    .commits
+                    .iter()
+                    .map(|c| c.hash.clone())
+                    .collect::<Vec<_>>(),
+                hashes
+            );
+
+            // Streaming model refreshes do not retain sub-history themselves.
+            gui.model.lock().unwrap().clear_sub_commits();
+            gui.after_model_refresh().unwrap();
+            assert_eq!(gui.model.lock().unwrap().sub_commits[0].hash, head);
+            gui.context_mgr.set_active(ContextId::BranchCommitFiles);
+            gui.toggle_working_tree_and_head().unwrap();
+            assert_eq!(gui.context_mgr.active(), ContextId::Files);
+            assert_eq!(gui.context_mgr.selected(ContextId::Files), 2);
+            assert!(gui.diff_focused);
+        }
+    }
+
+    #[test]
+    fn head_toggle_handles_head_outside_the_loaded_page_and_detached_head() {
+        let repo = TempRepo::new("paged-head");
+        let older = repo.commit("file", "older");
+        let head = repo.commit("file", "head");
+        repo.git(&["checkout", "--detach", &head]);
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let commits = git.load_commits_for_branch(&older, 1).unwrap();
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+        gui.model.lock().unwrap().set_commits(commits);
+        gui.toggle_working_tree_and_head().unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::BranchCommits);
+        assert_eq!(gui.model.lock().unwrap().sub_commits[0].hash, head);
+        assert_eq!(gui.model.lock().unwrap().commits[0].hash, older);
+    }
+
+    #[test]
+    fn head_toggle_does_not_consume_old_binding_when_remapped_or_disabled() {
+        let repo = TempRepo::new("remapped-head");
+        repo.commit("file", "head");
+        for binding in ["<c-t>", ""] {
+            for diff_focused in [false, true] {
+                let mut config = crate::config::AppConfig::default();
+                config
+                    .user_config
+                    .keybinding
+                    .universal
+                    .toggle_working_tree_and_head = binding.into();
+                let git = crate::git::GitCommands::new(repo.path()).unwrap();
+                let mut gui = Gui::new(config, git, None, false).unwrap();
+                gui.diff_focused = diff_focused;
+                gui.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+                    .unwrap();
+                assert_eq!(gui.context_mgr.active(), ContextId::Files);
+                gui.popup = PopupState::None;
+                gui.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))
+                    .unwrap();
+                assert_eq!(
+                    gui.context_mgr.active(),
+                    if binding.is_empty() {
+                        ContextId::Files
+                    } else {
+                        ContextId::BranchCommits
+                    }
+                );
+            }
+        }
+    }
+    #[test]
+    fn commits_startup_selects_actual_head_and_preserves_path_filter() {
+        let repo = TempRepo::new("startup-head");
+        repo.commit("filtered", "older");
+        let head = repo.commit("other", "head");
+        repo.git(&["checkout", "-b", "ahead"]);
+        repo.commit("other", "ahead");
+        repo.git(&["checkout", "main"]);
+        for path in [None, Some(PathBuf::from("filtered"))] {
+            let git = crate::git::GitCommands::new(repo.path()).unwrap();
+            let mut gui =
+                Gui::new(crate::config::AppConfig::default(), git, path.clone(), true).unwrap();
+            let commits = gui
+                .git
+                .load_filtered_commits_page(
+                    &gui.commit_filter_for_load().unwrap_or_default(),
+                    300,
+                    0,
+                )
+                .unwrap();
+            gui.model.lock().unwrap().set_commits(commits);
+            gui.select_startup_head().unwrap();
+            assert!(!gui.pending_startup_head);
+            let model = gui.model.lock().unwrap();
+            let selected = gui.context_mgr.selected_active();
+            let commit = if path.is_some() {
+                &model.sub_commits[selected]
+            } else {
+                &model.commits[selected]
+            };
+            assert_eq!(commit.hash, head);
+            assert_eq!(
+                gui.commit_path_filter,
+                path.map(|p| p.to_string_lossy().to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn startup_head_does_not_override_navigation() {
+        let repo = TempRepo::new("startup-navigation");
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, true).unwrap();
+        gui.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+        gui.select_startup_head().unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
     }
 }
 

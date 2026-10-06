@@ -33,6 +33,12 @@ Then run:
 lazygitrs
 ```
 
+Use `lazygitrs --commits` to start at the checked-out HEAD commit. Press
+`Ctrl+G` to toggle between working-tree changes and HEAD (including from a
+focused diff). If filters or pagination hide HEAD, it opens a separate HEAD
+history view without clearing your filters. Remap or disable the shortcut with
+`keybinding.universal.toggleWorkingTreeAndHead` (`"<c-g>"` by default; `""` disables it).
+
 ### Upgrade
 
 Detects how you installed (brew / npm / bun / cargo / install.sh) and upgrades in place:

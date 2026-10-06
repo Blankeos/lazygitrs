@@ -1205,7 +1205,7 @@ mod tests {
             state_dir: repo.0.clone(),
             state_path: repo.0.join("state.yml"),
         };
-        let mut gui = Gui::new(config, GitCommands::new(&repo.0).unwrap(), None).unwrap();
+        let mut gui = Gui::new(config, GitCommands::new(&repo.0).unwrap(), None, false).unwrap();
         gui.diff_mode.enter(false);
         gui.diff_mode.ref_a = "main".into();
         gui.diff_mode.ref_b = "feature".into();

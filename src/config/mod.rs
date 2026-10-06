@@ -31,6 +31,20 @@ pub struct AppConfig {
     pub state_path: PathBuf,
 }
 
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            debug: false,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            user_config: UserConfig::default(),
+            app_state: AppState::default(),
+            config_dir: PathBuf::from("."),
+            state_dir: PathBuf::from("."),
+            state_path: PathBuf::from("state.yml"),
+        }
+    }
+}
+
 impl AppConfig {
     pub fn load(debug: bool) -> Result<Self> {
         let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
