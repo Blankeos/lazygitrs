@@ -157,26 +157,55 @@ mod tests {
 
     #[test]
     fn compare_layout_renders_four_sidebar_panels_and_handles_small_terminals() {
-        for (width, height) in [(180, 30), (80, 14), (30, 8), (5, 3), (1, 1)] {
-            let mut state = DiffModeState::new();
-            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            terminal
-                .draw(|frame| {
-                    render(
-                        frame,
-                        &mut state,
-                        &mut DiffViewState::default(),
-                        &Theme::default(),
-                        false,
-                        false,
-                        &mut CommitListCache::default(),
-                    )
-                })
-                .unwrap();
-            if width == 180 {
-                let text = buffer_text(&terminal);
-                for title in ["1 A", "2 B", "3 Files", "4 Commits", "5 Diff"] {
-                    assert!(text.contains(title), "Missing {title}: {text}");
+        use crate::gui::ScreenMode;
+        for (width, height) in [(180, 30), (80, 40), (80, 14), (30, 8), (5, 3), (1, 1)] {
+            for mode in [ScreenMode::Normal, ScreenMode::Half, ScreenMode::Full] {
+                for focus in [
+                    DiffModeFocus::SelectorA,
+                    DiffModeFocus::SelectorB,
+                    DiffModeFocus::CommitFiles,
+                    DiffModeFocus::Commits,
+                    DiffModeFocus::DiffExploration,
+                ] {
+                    let mut state = DiffModeState::new();
+                    state.set_focus(focus);
+                    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                    terminal
+                        .draw(|frame| {
+                            render(
+                                frame,
+                                &mut state,
+                                &mut DiffViewState::default(),
+                                &Theme::default(),
+                                false,
+                                false,
+                                &mut CommitListCache::default(),
+                                1.0 / 3.0,
+                                mode,
+                            )
+                        })
+                        .unwrap();
+                    let text = buffer_text(&terminal);
+                    if width == 180 {
+                        for (panel_focus, title) in [
+                            (DiffModeFocus::SelectorA, "1 A"),
+                            (DiffModeFocus::SelectorB, "2 B"),
+                            (DiffModeFocus::CommitFiles, "3 Files"),
+                            (DiffModeFocus::Commits, "4 Commits"),
+                            (DiffModeFocus::DiffExploration, "5 Diff"),
+                        ] {
+                            assert_eq!(
+                                text.contains(title),
+                                mode != ScreenMode::Full || focus == panel_focus,
+                                "{mode:?} {focus:?}: {text}"
+                            );
+                        }
+                    }
+                    if width == 80 && height == 40 && mode != ScreenMode::Full {
+                        for title in ["1 A", "2 B", "3 Files", "4 Commits", "5 Diff"] {
+                            assert!(text.contains(title), "{mode:?} {focus:?}: {text}");
+                        }
+                    }
                 }
             }
         }
@@ -191,34 +220,44 @@ pub fn render(
     diff_loading: bool,
     diff_loading_show: bool,
     commit_cache: &mut CommitListCache,
+    side_ratio: f64,
+    screen_mode: crate::gui::ScreenMode,
 ) {
-    let layout = CompareLayout::new(frame.area());
+    let layout = CompareLayout::new(frame.area(), side_ratio, screen_mode, state);
     let sidebar = layout.sidebar;
 
-    render_selector(frame, sidebar[0], state, DiffModeFocus::SelectorA, theme);
-    render_selector(frame, sidebar[1], state, DiffModeFocus::SelectorB, theme);
-    render_commit_files(frame, sidebar[2], state, theme);
-    render_compare_commits(frame, sidebar[3], state, theme, commit_cache);
+    if !sidebar[0].is_empty() {
+        render_selector(frame, sidebar[0], state, DiffModeFocus::SelectorA, theme);
+    }
+    if !sidebar[1].is_empty() {
+        render_selector(frame, sidebar[1], state, DiffModeFocus::SelectorB, theme);
+    }
+    if !sidebar[2].is_empty() {
+        render_commit_files(frame, sidebar[2], state, theme);
+    }
+    if !sidebar[3].is_empty() {
+        render_compare_commits(frame, sidebar[3], state, theme, commit_cache);
+    }
 
-    // Right panel: diff exploration
-    render_diff_panel(
-        frame,
-        layout.diff,
-        state,
-        diff_view,
-        theme,
-        diff_loading,
-        diff_loading_show,
-    );
-
-    // Text selection highlight overlay and tooltip (must be before popups/dropdowns)
-    crate::gui::views::render_selection_overlay(frame, diff_view, layout.diff, theme);
+    if !layout.diff.is_empty() {
+        render_diff_panel(
+            frame,
+            layout.diff,
+            state,
+            diff_view,
+            theme,
+            diff_loading,
+            diff_loading_show,
+        );
+        // Selection overlay must be before popups/dropdowns.
+        crate::gui::views::render_selection_overlay(frame, diff_view, layout.diff, theme);
+    }
 
     // Status bar
     render_status_bar(frame, layout.status, state, diff_view, theme);
 
     // Render combobox dropdown overlay on top of the sidebar
-    if state.editing.is_some() {
+    if state.editing.is_some() && sidebar.iter().any(|r| !r.is_empty()) {
         render_dropdown(frame, sidebar, state, theme);
     }
 }
@@ -701,12 +740,7 @@ fn render_status_bar(
     frame.render_widget(bar, area);
 }
 
-fn render_dropdown(
-    frame: &mut Frame,
-    sidebar: std::rc::Rc<[Rect]>,
-    state: &DiffModeState,
-    theme: &Theme,
-) {
+fn render_dropdown(frame: &mut Frame, sidebar: [Rect; 4], state: &DiffModeState, theme: &Theme) {
     // Position dropdown below the relevant selector
     let anchor = if matches!(
         state.editing,

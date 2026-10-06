@@ -1410,6 +1410,8 @@ impl Gui {
                         self.diff_loading,
                         diff_loading_show,
                         &mut self.commit_list_cache,
+                        self.layout.side_panel_ratio,
+                        self.screen_mode,
                     );
                     // Render popup overlay on top of diff mode (for ? help, errors, etc.)
                     if self.popup != PopupState::None {
@@ -3314,6 +3316,64 @@ impl Gui {
         Ok(false)
     }
 
+    /// Split-resize shortcuts shared by the main UI and compare mode.
+    fn try_handle_panel_resize_key(&mut self, key: KeyEvent) -> bool {
+        let keybindings = &self.config.user_config.keybinding;
+        // Side-panel resize: orientation-aware.
+        // Portrait (vertical stack): side on top, diff on bottom.
+        //   Alt+h/l → shrink/expand by step
+        //   Alt+k → diff pane full (ratio 0.0), Alt+j → side pane full (ratio 1.0)
+        // Landscape (horizontal split): side on left, diff on right.
+        //   Alt+h/l → shrink/expand by step, Alt+k → side full, Alt+j → main full
+        let portrait =
+            layout::should_use_portrait(self.layout.width, self.layout.height, self.screen_mode);
+        let shrink_key = matches_key(key, &keybindings.universal.shrink_side_panel);
+        let expand_key = matches_key(key, &keybindings.universal.expand_side_panel);
+        if shrink_key || expand_key {
+            const STEP: f64 = 0.05;
+            let delta = if shrink_key { -STEP } else { STEP };
+            self.layout.side_panel_ratio = (self.layout.side_panel_ratio + delta).clamp(0.0, 1.0);
+            return true;
+        }
+        if matches_key(key, &keybindings.universal.side_panel_full) {
+            // Alt+k: diff full in portrait, side full in landscape
+            self.layout.side_panel_ratio = if portrait { 0.0 } else { 1.0 };
+            return true;
+        }
+        if matches_key(key, &keybindings.universal.main_panel_full) {
+            // Alt+j: side full in portrait, main full in landscape
+            self.layout.side_panel_ratio = if portrait { 1.0 } else { 0.0 };
+            return true;
+        }
+        if matches_key(key, &keybindings.universal.reset_side_panel) {
+            self.layout.side_panel_ratio = self.config.user_config.gui.side_panel_width;
+            return true;
+        }
+
+        false
+    }
+
+    /// Compare layout shortcuts run only after its text-input handlers.
+    fn try_handle_layout_key(&mut self, mut key: KeyEvent) -> bool {
+        if self.try_handle_panel_resize_key(key) {
+            return true;
+        }
+        // Terminals may report shifted punctuation with or without SHIFT.
+        if matches!(key.code, KeyCode::Char('+') | KeyCode::Char('_')) {
+            key.modifiers.remove(KeyModifiers::SHIFT);
+        }
+        let keybindings = &self.config.user_config.keybinding;
+        if matches_key(key, &keybindings.universal.next_screen_mode) {
+            self.next_screen_mode();
+            return true;
+        }
+        if matches_key(key, &keybindings.universal.prev_screen_mode) {
+            self.prev_screen_mode();
+            return true;
+        }
+        false
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         if self.handle_ai_commit_cancel_key(key) {
             return Ok(());
@@ -3350,39 +3410,10 @@ impl Gui {
             return controller::diff_mode::handle_key(self, key);
         }
 
+        if self.try_handle_panel_resize_key(key) {
+            return Ok(());
+        }
         let keybindings = &self.config.user_config.keybinding;
-
-        // Side-panel resize: orientation-aware.
-        // Portrait (vertical stack): side on top, diff on bottom.
-        //   Alt+h/l → shrink/expand by step
-        //   Alt+k → diff pane full (ratio 0.0), Alt+j → side pane full (ratio 1.0)
-        // Landscape (horizontal split): side on left, diff on right.
-        //   Alt+h/l → shrink/expand by step, Alt+k → side full, Alt+j → main full
-        let portrait = self.screen_mode != ScreenMode::Full
-            && self.layout.width <= 84
-            && self.layout.height > 25;
-        let shrink_key = matches_key(key, &keybindings.universal.shrink_side_panel);
-        let expand_key = matches_key(key, &keybindings.universal.expand_side_panel);
-        if shrink_key || expand_key {
-            const STEP: f64 = 0.05;
-            let delta = if shrink_key { -STEP } else { STEP };
-            self.layout.side_panel_ratio = (self.layout.side_panel_ratio + delta).clamp(0.0, 1.0);
-            return Ok(());
-        }
-        if matches_key(key, &keybindings.universal.side_panel_full) {
-            // Alt+k: diff full in portrait, side full in landscape
-            self.layout.side_panel_ratio = if portrait { 0.0 } else { 1.0 };
-            return Ok(());
-        }
-        if matches_key(key, &keybindings.universal.main_panel_full) {
-            // Alt+j: side full in portrait, main full in landscape
-            self.layout.side_panel_ratio = if portrait { 1.0 } else { 0.0 };
-            return Ok(());
-        }
-        if matches_key(key, &keybindings.universal.reset_side_panel) {
-            self.layout.side_panel_ratio = self.config.user_config.gui.side_panel_width;
-            return Ok(());
-        }
 
         if matches_key(key, &keybindings.universal.toggle_diff_view_layout) {
             self.diff_view.toggle_view_layout();
@@ -6676,6 +6707,7 @@ impl Gui {
             }
         } else if self.popup == PopupState::None
             && self.screen_mode == ScreenMode::Normal
+            && (!self.diff_mode.active || self.diff_mode.editing.is_none())
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && self.sidebar_divider_hit(mouse.column, mouse.row)
         {
@@ -7156,7 +7188,7 @@ impl Gui {
     }
 
     fn handle_diff_mode_mouse(&mut self, mouse: MouseEvent) {
-        use self::modes::diff_mode::{CompareLayout, DiffModeFocus, DiffModeSelector};
+        use self::modes::diff_mode::{DiffModeFocus, DiffModeSelector};
         use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
         use ratatui::layout::Rect;
 
@@ -7217,7 +7249,7 @@ impl Gui {
 
         let area = Rect::new(0, 0, self.layout.width, self.layout.height);
 
-        let compare_layout = CompareLayout::new(area);
+        let compare_layout = self.compute_compare_layout();
         let sidebar = compare_layout.sidebar;
 
         let selector_a_rect = sidebar[0];
@@ -7642,6 +7674,15 @@ impl Gui {
         )
     }
 
+    fn compute_compare_layout(&self) -> modes::diff_mode::CompareLayout {
+        modes::diff_mode::CompareLayout::new(
+            ratatui::layout::Rect::new(0, 0, self.layout.width, self.layout.height),
+            self.layout.side_panel_ratio,
+            self.screen_mode,
+            &self.diff_mode,
+        )
+    }
+
     /// Content area above the status bar (side + main live here).
     fn content_area_rect(&self) -> ratatui::layout::Rect {
         ratatui::layout::Rect::new(
@@ -7664,6 +7705,9 @@ impl Gui {
             return false;
         }
 
+        if self.diff_mode.active {
+            return self.compute_compare_layout().divider_hit(content, col, row);
+        }
         let fl = self.compute_current_frame_layout();
 
         if fl.portrait {
@@ -7713,6 +7757,9 @@ impl Gui {
     /// Main/diff top border: 0 (row is already the split). Expanded panel bottom:
     /// 1 + trailing collapsed panels so both grabs drive the same ratio.
     fn portrait_sidebar_resize_offset(&self, row: u16) -> u16 {
+        if self.diff_mode.active {
+            return self.compute_compare_layout().resize_row_offset(row);
+        }
         let fl = self.compute_current_frame_layout();
         if !fl.portrait {
             return 0;
@@ -7738,8 +7785,12 @@ impl Gui {
         if content.width == 0 || content.height == 0 {
             return;
         }
-        let fl = self.compute_current_frame_layout();
-        let ratio = if fl.portrait {
+        let portrait = if self.diff_mode.active {
+            self.compute_compare_layout().portrait
+        } else {
+            self.compute_current_frame_layout().portrait
+        };
+        let ratio = if portrait {
             let side_end = row
                 .saturating_sub(content.y)
                 .saturating_add(self.sidebar_resize_row_offset)

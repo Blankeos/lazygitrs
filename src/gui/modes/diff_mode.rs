@@ -18,37 +18,135 @@ pub enum CompareDiffSource {
     CommitFiles,
 }
 
-/// Shared by rendering and mouse hit-testing.
+/// Shared by rendering, mouse hit-testing, and diff text-selection geometry.
 pub struct CompareLayout {
-    pub sidebar: std::rc::Rc<[ratatui::layout::Rect]>,
+    pub sidebar: [ratatui::layout::Rect; 4],
     pub diff: ratatui::layout::Rect,
     pub status: ratatui::layout::Rect,
+    pub portrait: bool,
 }
 
 impl CompareLayout {
-    pub fn new(area: ratatui::layout::Rect) -> Self {
-        use ratatui::layout::{Constraint, Direction, Layout};
+    pub fn new(
+        area: ratatui::layout::Rect,
+        side_ratio: f64,
+        screen_mode: crate::gui::ScreenMode,
+        state: &DiffModeState,
+    ) -> Self {
+        use crate::gui::ScreenMode;
+        use ratatui::layout::{Constraint, Direction, Layout, Rect};
         let outer = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(1)])
             .split(area);
-        let content = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(33), Constraint::Percentage(67)])
-            .split(outer[0]);
-        let sidebar = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Fill(1),
-                Constraint::Fill(1),
-            ])
-            .split(content[0]);
-        Self {
-            sidebar,
-            diff: content[1],
+        let content = outer[0];
+        let portrait =
+            crate::gui::layout::should_use_portrait(area.width, area.height, screen_mode);
+        let mut result = Self {
+            sidebar: [Rect::default(); 4],
+            diff: Rect::default(),
             status: outer[1],
+            portrait,
+        };
+        if screen_mode == ScreenMode::Full {
+            if state.focus == DiffModeFocus::DiffExploration {
+                result.diff = content;
+            } else {
+                let index = state.focus.sidebar_index().unwrap();
+                // Keep ref inputs compact with room below for their dropdowns.
+                result.sidebar[index] = if index < 2 {
+                    Rect {
+                        height: content.height.min(3),
+                        ..content
+                    }
+                } else {
+                    content
+                };
+            }
+            return result;
+        }
+        let ratio = if screen_mode == ScreenMode::Half {
+            0.5
+        } else {
+            side_ratio.clamp(0.0, 1.0)
+        };
+        let direction = if portrait {
+            Direction::Vertical
+        } else {
+            Direction::Horizontal
+        };
+        let extent = if portrait {
+            content.height
+        } else {
+            content.width
+        };
+        let side_extent = (f64::from(extent) * ratio).round() as u16;
+        let split = Layout::default()
+            .direction(direction)
+            .constraints([Constraint::Length(side_extent), Constraint::Min(0)])
+            .split(content);
+        result.diff = split[1];
+        let constraints = if portrait {
+            // Like the main view, collapse inactive panels to title rows when
+            // stacked above the diff, giving the last-focused list the space.
+            let active = state.sidebar_focus.sidebar_index().unwrap_or(2);
+            std::array::from_fn(|i| {
+                if i == active {
+                    if i < 2 {
+                        Constraint::Length(3)
+                    } else {
+                        Constraint::Min(1)
+                    }
+                } else if active < 2 && i == 2 {
+                    Constraint::Min(1)
+                } else {
+                    Constraint::Length(1)
+                }
+            })
+        } else {
+            [
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Fill(1),
+                Constraint::Fill(1),
+            ]
+        };
+        result.sidebar.copy_from_slice(
+            &Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(constraints)
+                .split(split[0]),
+        );
+        result
+    }
+
+    /// Both borders of the actual side/diff split can start a resize. At
+    /// either extreme, the outermost border allows the hidden pane to reopen.
+    pub fn divider_hit(&self, content: ratatui::layout::Rect, col: u16, row: u16) -> bool {
+        if content.width == 0 || content.height == 0 || !content.contains((col, row).into()) {
+            return false;
+        }
+        if self.portrait {
+            let split = self
+                .sidebar
+                .iter()
+                .map(|r| r.bottom())
+                .max()
+                .unwrap_or(content.y);
+            row == split.min(content.bottom().saturating_sub(1))
+                || (split > content.y && row == split - 1)
+        } else {
+            let split = self.diff.x;
+            col == split.min(content.right().saturating_sub(1))
+                || (split > content.x && col == split - 1)
+        }
+    }
+
+    pub fn resize_row_offset(&self, row: u16) -> u16 {
+        if self.portrait && self.diff.height > 0 && row < self.diff.y {
+            1
+        } else {
+            0
         }
     }
 }
@@ -78,6 +176,9 @@ impl DiffModeState {
             self.clear_list_search();
         }
         self.focus = focus;
+        if focus != DiffModeFocus::DiffExploration {
+            self.sidebar_focus = focus;
+        }
         match focus {
             DiffModeFocus::Commits => self.diff_source = CompareDiffSource::Commit,
             DiffModeFocus::CommitFiles => {
@@ -176,8 +277,116 @@ mod tests {
         for (i, panel) in panels.iter().enumerate() {
             assert_eq!(DiffModeFocus::from_number(i as u32 + 1), Some(*panel));
             assert_eq!(panel.next(), panels[(i + 1) % panels.len()]);
+            assert_eq!(panel.prev(), panels[(i + panels.len() - 1) % panels.len()]);
+            assert_eq!(panel.next().prev(), *panel);
         }
         assert_eq!(DiffModeFocus::from_number(6), None);
+    }
+
+    #[test]
+    fn compare_layout_modes_ratios_and_responsive_threshold_match_main_view() {
+        use crate::gui::ScreenMode;
+        use ratatui::layout::Rect;
+        let mut state = DiffModeState::new();
+        state.set_focus(DiffModeFocus::Commits);
+        for (width, height, portrait) in [
+            (150, 40, false),
+            (84, 26, true),
+            (85, 26, false),
+            (84, 25, false),
+        ] {
+            let area = Rect::new(5, 7, width, height);
+            for mode in [ScreenMode::Normal, ScreenMode::Half] {
+                let layout = CompareLayout::new(area, 0.4, mode, &state);
+                assert_eq!(layout.portrait, portrait);
+                assert_eq!(layout.status, Rect::new(5, 7 + height - 1, width, 1));
+                let ratio = if mode == ScreenMode::Half { 0.5 } else { 0.4 };
+                if portrait {
+                    assert_eq!(layout.diff.x, area.x);
+                    assert_eq!(layout.diff.width, width);
+                    assert_eq!(
+                        layout.diff.y - area.y,
+                        (f64::from(height - 1) * ratio).round() as u16
+                    );
+                    assert_eq!(layout.sidebar[2].height, 1);
+                    assert!(layout.sidebar[3].height > 1);
+                    state.set_focus(DiffModeFocus::DiffExploration);
+                    assert_eq!(
+                        CompareLayout::new(area, 0.4, mode, &state).sidebar,
+                        layout.sidebar
+                    );
+                    state.set_focus(DiffModeFocus::Commits);
+                } else {
+                    assert_eq!(
+                        layout.diff.x - area.x,
+                        (f64::from(width) * ratio).round() as u16
+                    );
+                    assert_eq!(layout.diff.y, area.y);
+                }
+            }
+            for focus in [
+                DiffModeFocus::SelectorA,
+                DiffModeFocus::SelectorB,
+                DiffModeFocus::CommitFiles,
+                DiffModeFocus::Commits,
+                DiffModeFocus::DiffExploration,
+            ] {
+                state.set_focus(focus);
+                let layout = CompareLayout::new(area, 0.4, ScreenMode::Full, &state);
+                assert!(!layout.portrait);
+                if let Some(index) = focus.sidebar_index() {
+                    assert!(layout.diff.is_empty());
+                    assert_eq!(layout.sidebar[index].width, width);
+                    for i in 0..4 {
+                        assert_eq!(layout.sidebar[i].is_empty(), i != index);
+                    }
+                } else {
+                    assert!(layout.sidebar.iter().all(|r| r.is_empty()));
+                    assert_eq!(layout.diff, Rect::new(5, 7, width, height - 1));
+                }
+            }
+            state.set_focus(DiffModeFocus::Commits);
+        }
+    }
+
+    #[test]
+    fn compare_divider_hits_only_split_borders_and_reopens_collapsed_panes() {
+        use crate::gui::ScreenMode;
+        use ratatui::layout::Rect;
+        let state = DiffModeState::new();
+        for (width, height) in [(150, 40), (80, 40)] {
+            let area = Rect::new(0, 0, width, height);
+            let content = Rect::new(0, 0, width, height - 1);
+            for ratio in [0.0, 0.4, 1.0] {
+                let layout = CompareLayout::new(area, ratio, ScreenMode::Normal, &state);
+                let split = if layout.portrait {
+                    layout.diff.y
+                } else {
+                    layout.diff.x
+                };
+                let end = if layout.portrait {
+                    content.height
+                } else {
+                    content.width
+                };
+                let border = split.min(end - 1);
+                let (col, row) = if layout.portrait {
+                    (5, border)
+                } else {
+                    (border, 5)
+                };
+                assert!(layout.divider_hit(content, col, row));
+                assert!(!layout.divider_hit(content, col, height - 1));
+                if ratio == 0.4 {
+                    let (col, row) = if layout.portrait {
+                        (5, split - 2)
+                    } else {
+                        (split - 2, 5)
+                    };
+                    assert!(!layout.divider_hit(content, col, row));
+                }
+            }
+        }
     }
 
     #[test]
@@ -276,6 +485,26 @@ impl DiffModeFocus {
         }
     }
 
+    pub fn sidebar_index(self) -> Option<usize> {
+        match self {
+            Self::SelectorA => Some(0),
+            Self::SelectorB => Some(1),
+            Self::CommitFiles => Some(2),
+            Self::Commits => Some(3),
+            Self::DiffExploration => None,
+        }
+    }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            Self::SelectorA => Self::DiffExploration,
+            Self::SelectorB => Self::SelectorA,
+            Self::CommitFiles => Self::SelectorB,
+            Self::Commits => Self::CommitFiles,
+            Self::DiffExploration => Self::Commits,
+        }
+    }
+
     pub fn next(&self) -> Self {
         match self {
             Self::SelectorA => Self::SelectorB,
@@ -341,6 +570,8 @@ pub struct DiffModeState {
 
     // Focus
     pub focus: DiffModeFocus,
+    /// Retain the expanded portrait list while inspecting its diff.
+    pub sidebar_focus: DiffModeFocus,
 
     // Commit files for A..B diff
     pub diff_files: Vec<CommitFile>,
@@ -384,6 +615,7 @@ impl DiffModeState {
             search_selected: 0,
             dropdown_scroll: 0,
             focus: DiffModeFocus::SelectorA,
+            sidebar_focus: DiffModeFocus::SelectorA,
             diff_files: Vec::new(),
             diff_files_selected: 0,
             diff_files_scroll: 0,
@@ -412,7 +644,7 @@ impl DiffModeState {
         self.search_results.clear();
         self.search_selected = 0;
         self.dropdown_scroll = 0;
-        self.focus = DiffModeFocus::SelectorA;
+        self.set_focus(DiffModeFocus::SelectorA);
         self.diff_files.clear();
         self.diff_files_selected = 0;
         self.diff_files_scroll = 0;

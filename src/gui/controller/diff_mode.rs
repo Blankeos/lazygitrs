@@ -137,6 +137,13 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         return Ok(());
     }
 
+    // Keep text-entry shortcuts local, including diff-content search.
+    if gui.diff_mode.focus == DiffModeFocus::DiffExploration && gui.diff_view.search_active {
+        return handle_diff_search_key(gui, key);
+    }
+    if gui.try_handle_layout_key(key) {
+        return Ok(());
+    }
     let keybindings = &gui.config.user_config.keybinding;
 
     if matches_key(key, &keybindings.universal.toggle_diff_view_layout) {
@@ -183,9 +190,23 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         }
     }
 
-    // Tab to cycle focus
-    if key.code == KeyCode::Tab {
-        gui.diff_mode.set_focus(gui.diff_mode.focus.next());
+    // Use the same configurable forward/reverse bindings as the main view.
+    let mut panel_key = key;
+    if panel_key.code == KeyCode::BackTab
+        || (panel_key.code == KeyCode::Tab && panel_key.modifiers.contains(KeyModifiers::SHIFT))
+    {
+        panel_key.code = KeyCode::BackTab;
+        panel_key.modifiers.insert(KeyModifiers::SHIFT);
+    }
+    let forward = matches_key(panel_key, &keybindings.universal.toggle_panel);
+    let reverse = matches_key(panel_key, &keybindings.universal.toggle_panel_reverse);
+    if forward || reverse {
+        let focus = if reverse {
+            gui.diff_mode.focus.prev()
+        } else {
+            gui.diff_mode.focus.next()
+        };
+        gui.diff_mode.set_focus(focus);
         gui.needs_diff_refresh = true;
         return Ok(());
     }
@@ -264,7 +285,7 @@ fn handle_combobox_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
                 gui.diff_mode.set_focus(DiffModeFocus::CommitFiles);
             } else if gui.diff_mode.ref_a.is_empty() {
                 // B was just set, A still empty — jump to A and start editing
-                gui.diff_mode.focus = DiffModeFocus::SelectorA;
+                gui.diff_mode.set_focus(DiffModeFocus::SelectorA);
                 gui.diff_mode.start_editing(DiffModeSelector::A);
                 let model = gui.model.lock().unwrap();
                 gui.diff_mode.search_refs(
@@ -276,7 +297,7 @@ fn handle_combobox_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
                 );
             } else {
                 // A was just set, B still empty — jump to B and start editing
-                gui.diff_mode.focus = DiffModeFocus::SelectorB;
+                gui.diff_mode.set_focus(DiffModeFocus::SelectorB);
                 gui.diff_mode.start_editing(DiffModeSelector::B);
                 let model = gui.model.lock().unwrap();
                 gui.diff_mode.search_refs(
@@ -605,22 +626,7 @@ fn handle_diff_exploration_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
                 let line = sel_ref.edit_line_number;
                 // Compute column from terminal position using the same layout as the mouse handler
                 let (top_row, top_col, _, _) = sel_ref.normalized();
-                let area = ratatui::layout::Rect::new(0, 0, gui.layout.width, gui.layout.height);
-                let outer = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints([
-                        ratatui::layout::Constraint::Min(1),
-                        ratatui::layout::Constraint::Length(1),
-                    ])
-                    .split(area);
-                let content = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Horizontal)
-                    .constraints([
-                        ratatui::layout::Constraint::Percentage(33),
-                        ratatui::layout::Constraint::Percentage(67),
-                    ])
-                    .split(outer[0]);
-                let diff_rect = content[1];
+                let diff_rect = gui.compute_compare_layout().diff;
                 let pl = DiffPanelLayout::compute(diff_rect, &gui.diff_view);
                 let (content_start, _) = pl.content_range(sel_ref.panel);
                 let column = if top_col >= content_start {
@@ -979,8 +985,65 @@ fn show_diff_mode_command_palette(gui: &mut Gui) {
         entries: vec![
             CommandEntry::keybinding("q".into(), "Exit diff mode".into()),
             CommandEntry::keybinding(
-                "Tab".into(),
+                gui.config
+                    .user_config
+                    .keybinding
+                    .universal
+                    .toggle_panel
+                    .clone(),
                 "Cycle focus (A → B → Files → Commits → Diff)".into(),
+            ),
+            CommandEntry::keybinding(
+                gui.config
+                    .user_config
+                    .keybinding
+                    .universal
+                    .toggle_panel_reverse
+                    .clone(),
+                "Cycle focus backward".into(),
+            ),
+            CommandEntry::keybinding(
+                gui.config
+                    .user_config
+                    .keybinding
+                    .universal
+                    .next_screen_mode
+                    .clone(),
+                "Next screen mode (normal / half / full)".into(),
+            ),
+            CommandEntry::keybinding(
+                gui.config
+                    .user_config
+                    .keybinding
+                    .universal
+                    .prev_screen_mode
+                    .clone(),
+                "Previous screen mode".into(),
+            ),
+            CommandEntry::keybinding(
+                format!(
+                    "{} / {}",
+                    gui.config
+                        .user_config
+                        .keybinding
+                        .universal
+                        .shrink_side_panel,
+                    gui.config
+                        .user_config
+                        .keybinding
+                        .universal
+                        .expand_side_panel
+                ),
+                "Shrink / expand sidebar (or drag its divider)".into(),
+            ),
+            CommandEntry::keybinding(
+                gui.config
+                    .user_config
+                    .keybinding
+                    .universal
+                    .reset_side_panel
+                    .clone(),
+                "Reset sidebar size".into(),
             ),
             CommandEntry::keybinding("1-5".into(), "Jump to panel (4 Commits, 5 Diff)".into()),
             CommandEntry::keybinding("<c-s>".into(), "Swap A and B".into()),
@@ -1056,7 +1119,6 @@ mod tests {
     use super::*;
     use crate::config::{AppConfig, AppState, UserConfig};
     use crate::git::GitCommands;
-    use crate::gui::modes::diff_mode::CompareLayout;
     use std::path::PathBuf;
     use std::process::Command;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1167,7 +1229,7 @@ mod tests {
         assert_eq!(gui.diff_mode.ahead_behind, Some((2, 0)));
 
         gui.layout.update_size(150, 24);
-        let rect = CompareLayout::new(ratatui::layout::Rect::new(0, 0, 150, 24)).sidebar[3];
+        let rect = gui.compute_compare_layout().sidebar[3];
         gui.handle_diff_mode_mouse(crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
             column: rect.x + 1,
@@ -1200,6 +1262,182 @@ mod tests {
                 }
             );
         }
+        // Exercise the real GUI dispatch path, including normalized terminal
+        // events, custom bindings, input priority and divider dragging.
+        use crate::gui::ScreenMode;
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        gui.diff_mode.set_focus(DiffModeFocus::SelectorA);
+        for modifiers in [KeyModifiers::SHIFT, KeyModifiers::NONE] {
+            gui.handle_key(KeyEvent::new(KeyCode::BackTab, modifiers))
+                .unwrap();
+            assert_eq!(gui.diff_mode.focus, DiffModeFocus::DiffExploration);
+            gui.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(gui.diff_mode.focus, DiffModeFocus::SelectorA);
+        }
+        gui.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT))
+            .unwrap();
+        assert_eq!(gui.diff_mode.focus, DiffModeFocus::DiffExploration);
+        let stable_key = gui.current_diff_key();
+        for (key, modifiers, expected) in [
+            ('+', KeyModifiers::NONE, ScreenMode::Half),
+            ('+', KeyModifiers::SHIFT, ScreenMode::Full),
+            ('_', KeyModifiers::SHIFT, ScreenMode::Half),
+            ('_', KeyModifiers::NONE, ScreenMode::Normal),
+        ] {
+            gui.handle_key(KeyEvent::new(KeyCode::Char(key), modifiers))
+                .unwrap();
+            assert_eq!(gui.screen_mode, expected);
+            assert_eq!(gui.current_diff_key(), stable_key);
+        }
+        let config = Arc::get_mut(&mut gui.config).unwrap();
+        config.user_config.keybinding.universal.toggle_panel_reverse = "<c-b>".into();
+        Arc::get_mut(&mut gui.config)
+            .unwrap()
+            .user_config
+            .keybinding
+            .universal
+            .next_screen_mode = "<c-n>".into();
+        gui.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(gui.diff_mode.focus, DiffModeFocus::Commits);
+        gui.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(gui.screen_mode, ScreenMode::Half);
+        gui.screen_mode = ScreenMode::Normal;
+        Arc::get_mut(&mut gui.config)
+            .unwrap()
+            .user_config
+            .keybinding
+            .universal
+            .next_screen_mode = "+".into();
+        gui.diff_mode.start_editing(DiffModeSelector::A);
+        gui.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.screen_mode, ScreenMode::Normal);
+        gui.diff_mode.cancel_editing();
+        gui.diff_mode.file_search_active = true;
+        gui.diff_mode.file_search_textarea = Some(tui_textarea::TextArea::default());
+        gui.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.screen_mode, ScreenMode::Normal);
+        gui.diff_mode.clear_list_search();
+        gui.diff_mode.set_focus(DiffModeFocus::DiffExploration);
+        gui.diff_view.search_active = true;
+        gui.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.screen_mode, ScreenMode::Normal);
+        gui.diff_view.search_active = false;
+
+        let mouse = |gui: &mut Gui, kind, column, row| {
+            gui.handle_mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        Arc::get_mut(&mut gui.config)
+            .unwrap()
+            .user_config
+            .gui
+            .mouse_events = true;
+        for (width, height) in [(150, 40), (80, 40)] {
+            gui.layout.update_size(width, height);
+            gui.layout.side_panel_ratio = 0.4;
+            let layout = gui.compute_compare_layout();
+            let (col, row) = if layout.portrait {
+                (5, layout.diff.y)
+            } else {
+                (layout.diff.x, 5)
+            };
+            mouse(&mut gui, MouseEventKind::Down(MouseButton::Left), col, row);
+            assert!(gui.sidebar_resizing);
+            let (col, row) = if layout.portrait { (5, 25) } else { (100, 5) };
+            mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), col, row);
+            let expected = if layout.portrait {
+                25.0 / 39.0
+            } else {
+                100.0 / 150.0
+            };
+            assert!((gui.layout.side_panel_ratio - expected).abs() < 1e-8);
+            mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), col, row);
+            assert!(!gui.sidebar_resizing);
+            // Grabbing the sidebar's bottom border must map to the same
+            // portrait split, rather than jumping by one row on mouse-down.
+            if layout.portrait {
+                let split = gui.compute_compare_layout().diff.y;
+                mouse(
+                    &mut gui,
+                    MouseEventKind::Down(MouseButton::Left),
+                    5,
+                    split - 1,
+                );
+                assert!(gui.sidebar_resizing);
+                assert_eq!(gui.compute_compare_layout().diff.y, split);
+                mouse(
+                    &mut gui,
+                    MouseEventKind::Up(MouseButton::Left),
+                    5,
+                    split - 1,
+                );
+            }
+            // Half/Full mode and disabled mouse input must not start resizing.
+            gui.screen_mode = ScreenMode::Half;
+            let half = gui.compute_compare_layout();
+            let (col, row) = if half.portrait {
+                (5, half.diff.y)
+            } else {
+                (half.diff.x, 5)
+            };
+            mouse(&mut gui, MouseEventKind::Down(MouseButton::Left), col, row);
+            assert!(!gui.sidebar_resizing);
+            gui.screen_mode = ScreenMode::Normal;
+            Arc::get_mut(&mut gui.config)
+                .unwrap()
+                .user_config
+                .gui
+                .mouse_events = false;
+            let normal = gui.compute_compare_layout();
+            let (col, row) = if normal.portrait {
+                (5, normal.diff.y)
+            } else {
+                (normal.diff.x, 5)
+            };
+            mouse(&mut gui, MouseEventKind::Down(MouseButton::Left), col, row);
+            assert!(!gui.sidebar_resizing);
+            Arc::get_mut(&mut gui.config)
+                .unwrap()
+                .user_config
+                .gui
+                .mouse_events = true;
+            let before = gui.layout.side_panel_ratio;
+            gui.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT))
+                .unwrap();
+            assert!((gui.layout.side_panel_ratio - (before - 0.05)).abs() < 1e-8);
+            gui.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT))
+                .unwrap();
+            assert!((gui.layout.side_panel_ratio - before).abs() < 1e-8);
+            gui.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT))
+                .unwrap();
+            assert_eq!(
+                gui.layout.side_panel_ratio,
+                if layout.portrait { 0.0 } else { 1.0 }
+            );
+            gui.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT))
+                .unwrap();
+            assert_eq!(
+                gui.layout.side_panel_ratio,
+                if layout.portrait { 1.0 } else { 0.0 }
+            );
+            gui.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT))
+                .unwrap();
+            assert_eq!(
+                gui.layout.side_panel_ratio,
+                gui.config.user_config.gui.side_panel_width
+            );
+        }
+
         gui.diff_mode.ref_a = "missing".into();
         reload_diff_files(&mut gui).unwrap();
         assert!(gui.diff_mode.commits.is_empty());
