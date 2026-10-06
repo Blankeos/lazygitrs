@@ -41,7 +41,7 @@ pub fn render_commit_details(
         Span::raw(" "),
         Span::styled("toggle ", Style::default().fg(theme.text_dimmed)),
         Span::styled(
-            ".",
+            "'",
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -423,6 +423,48 @@ fn avatar_color_for(email: &str, theme: &Theme) -> ratatui::style::Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn top_right_toggle_hint_uses_apostrophe_in_both_layouts() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let commit = Commit {
+            hash: "1234567890abcdef".into(),
+            name: "Test commit".into(),
+            status: CommitStatus::Pushed,
+            action: String::new(),
+            tags: vec![],
+            refs: vec![],
+            extra_info: String::new(),
+            author_name: "Test Author".into(),
+            author_email: String::new(),
+            unix_timestamp: 0,
+            parents: vec![],
+            divergence: Default::default(),
+        };
+        for compact in [false, true] {
+            let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_commit_details(
+                        frame,
+                        frame.area(),
+                        &commit,
+                        None,
+                        None,
+                        &Theme::default(),
+                        compact,
+                        &mut 0,
+                    );
+                })
+                .unwrap();
+            let top: String = (0..60)
+                .map(|x| terminal.backend().buffer().cell((x, 0)).unwrap().symbol())
+                .collect();
+            assert!(top.ends_with(" toggle ' ┐"), "{top}");
+            assert!(!top.contains("toggle ."), "{top}");
+        }
+    }
 
     #[test]
     fn parses_co_authored_by_trailers() {

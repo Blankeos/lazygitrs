@@ -67,6 +67,13 @@ pub fn render(
 ) {
     let area = frame.area();
     let panel_count = SideWindow::ALL.len();
+    let active_file_tree = match ctx_mgr.active() {
+        ContextId::Files => show_file_tree,
+        ContextId::CommitFiles | ContextId::BranchCommitFiles | ContextId::StashFiles => {
+            show_commit_file_tree
+        }
+        _ => false,
+    };
 
     // Determine which panel index is active so it gets expanded
     let active_window = ctx_mgr.active_window();
@@ -419,6 +426,7 @@ pub fn render(
             !cherry_pick_clipboard.is_empty(),
             &config.user_config.keybinding,
             !active_commit_filters.is_empty(),
+            active_file_tree,
         );
         // Render text selection highlight overlay and tooltip (must be before popup)
         render_selection_overlay(frame, diff_view, fl.main_panel, theme);
@@ -1080,6 +1088,7 @@ pub fn render(
         !cherry_pick_clipboard.is_empty(),
         &config.user_config.keybinding,
         !active_commit_filters.is_empty(),
+        active_file_tree,
     );
 
     // Render text selection highlight overlay and tooltip
@@ -1440,10 +1449,9 @@ mod tests {
     }
 
     #[test]
-    fn tree_navigation_is_absent_from_footer_across_file_contexts() {
+    fn footer_shows_only_enabled_folding_in_active_file_tree_lists() {
         use super::{ContextId, ContextManager, DiffViewState, KeybindingConfig, Model};
         let mut kb = KeybindingConfig::default();
-        kb.universal.fold_directory = "f".into();
         kb.universal.tree_parent = "p".into();
         kb.universal.tree_child = "c".into();
         kb.universal.tree_prev_sibling.clear();
@@ -1457,33 +1465,85 @@ mod tests {
             ContextId::StashFiles,
         ] {
             for focused in [false, true] {
-                let mut ctx_mgr = ContextManager::new();
-                ctx_mgr.set_active(ctx);
-                let mut terminal = Terminal::new(TestBackend::new(240, 1)).unwrap();
-                terminal
-                    .draw(|frame| {
-                        super::render_status_bar(
-                            frame,
-                            frame.area(),
-                            &ctx_mgr,
-                            &diff_view,
-                            &Theme::default(),
-                            &Model::default(),
-                            focused,
-                            false,
-                            &kb,
-                            false,
-                        )
-                    })
-                    .unwrap();
-                let text: String = (0..240)
-                    .map(|x| terminal.backend().buffer().cell((x, 0)).unwrap().symbol())
-                    .collect();
-                assert!(!text.contains("p/c nav"), "{ctx:?} {text}");
-                assert!(!text.contains("n siblings"), "{text}");
-                assert!(!text.contains("f fold"), "{text}");
-                assert!(!text.contains(",/."), "{text}");
+                for tree in [false, true] {
+                    for (binding, hint) in [("-", "-"), ("<c-f>", "ctrl+f"), ("", "")] {
+                        kb.universal.fold_directory = binding.into();
+                        let mut ctx_mgr = ContextManager::new();
+                        ctx_mgr.set_active(ctx);
+                        let mut terminal = Terminal::new(TestBackend::new(240, 1)).unwrap();
+                        terminal
+                            .draw(|frame| {
+                                super::render_status_bar(
+                                    frame,
+                                    frame.area(),
+                                    &ctx_mgr,
+                                    &diff_view,
+                                    &Theme::default(),
+                                    &Model::default(),
+                                    focused,
+                                    false,
+                                    &kb,
+                                    false,
+                                    tree,
+                                )
+                            })
+                            .unwrap();
+                        let text: String = (0..240)
+                            .map(|x| terminal.backend().buffer().cell((x, 0)).unwrap().symbol())
+                            .collect();
+                        assert_eq!(
+                            text.contains("fold/unfold"),
+                            tree && !focused && !binding.is_empty(),
+                            "{ctx:?} {focused} {tree} {binding}: {text}"
+                        );
+                        if tree && !focused && !binding.is_empty() {
+                            assert!(text.contains(&format!("{hint} fold/unfold")), "{text}");
+                        }
+                        assert!(!text.contains("p/c nav"), "{text}");
+                        assert!(!text.contains("n siblings"), "{text}");
+                        assert!(!text.contains("details"), "{text}");
+                    }
+                }
             }
+        }
+    }
+
+    #[test]
+    fn commit_list_footers_omit_details_toggle() {
+        for ctx in [
+            super::ContextId::Commits,
+            super::ContextId::BranchCommits,
+            super::ContextId::Reflog,
+        ] {
+            let mut ctx_mgr = super::ContextManager::new();
+            ctx_mgr.set_active(ctx);
+            let mut terminal = Terminal::new(TestBackend::new(240, 1)).unwrap();
+            terminal
+                .draw(|frame| {
+                    super::render_status_bar(
+                        frame,
+                        frame.area(),
+                        &ctx_mgr,
+                        &super::DiffViewState::default(),
+                        &Theme::default(),
+                        &super::Model::default(),
+                        false,
+                        false,
+                        &super::KeybindingConfig::default(),
+                        false,
+                        false,
+                    )
+                })
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(!text.contains("details"), "{ctx:?}: {text}");
+            assert!(!text.contains("fold/unfold"), "{ctx:?}: {text}");
         }
     }
 
@@ -1621,6 +1681,7 @@ mod tests {
                     false,
                     &keybindings,
                     false,
+                    false,
                 );
             })
             .unwrap();
@@ -1649,6 +1710,7 @@ mod tests {
                     false,
                     false,
                     &keybindings,
+                    false,
                     false,
                 );
             })
@@ -1679,6 +1741,7 @@ mod tests {
                     false,
                     &keybindings,
                     false,
+                    false,
                 );
             })
             .unwrap();
@@ -1708,6 +1771,7 @@ mod tests {
                     false,
                     &keybindings,
                     false,
+                    false,
                 );
             })
             .unwrap();
@@ -1736,6 +1800,7 @@ mod tests {
                     true,
                     false,
                     &keybindings,
+                    false,
                     false,
                 );
             })
@@ -1767,6 +1832,7 @@ mod tests {
                     false,
                     false,
                     &custom_kb,
+                    false,
                     false,
                 );
             })
@@ -1955,6 +2021,7 @@ mod tests {
                     false,
                     &keybindings,
                     true,
+                    false,
                 );
             })
             .expect("should render status bar with active filters");
@@ -1987,6 +2054,7 @@ mod tests {
                     false,
                     false,
                     &keybindings,
+                    false,
                     false,
                 );
             })
@@ -2759,7 +2827,7 @@ fn get_info_content<'a>(model: &Model, ctx_mgr: &ContextManager) -> Vec<Line<'a>
     }
 }
 
-fn format_key_hint(key: &str) -> String {
+pub(super) fn format_key_hint(key: &str) -> String {
     let key = key.trim();
     let inner = if let Some(stripped) = key.strip_prefix('<').and_then(|k| k.strip_suffix('>')) {
         stripped.trim()
@@ -2814,6 +2882,7 @@ fn render_search_bar_or_status_bar(
     has_copied_commits: bool,
     keybindings: &KeybindingConfig,
     has_active_filters: bool,
+    active_file_tree: bool,
 ) {
     if let Some((query, match_count, current_match)) = search_state {
         let match_info = if match_count > 0 {
@@ -2873,6 +2942,7 @@ fn render_search_bar_or_status_bar(
             has_copied_commits,
             keybindings,
             has_active_filters,
+            active_file_tree,
         );
     }
 }
@@ -2888,11 +2958,17 @@ fn render_status_bar(
     has_copied_commits: bool,
     keybindings: &KeybindingConfig,
     has_active_filters: bool,
+    active_file_tree: bool,
 ) {
     let mut hints: Vec<(&str, &str)> = Vec::new();
     let mut emphasized: Vec<&str> = Vec::new();
     let open_log_menu_key = format_key_hint(&keybindings.commits.open_log_menu);
     let toggle_head_key = format_key_hint(&keybindings.universal.toggle_working_tree_and_head);
+    let fold_key = format_key_hint(&keybindings.universal.fold_directory);
+
+    if active_file_tree && !diff_focused && !fold_key.is_empty() {
+        hints.push((fold_key.as_str(), "fold/unfold"));
+    }
 
     // When in a special state (rebasing/merging/cherry-picking), show those options prominently
     if model.is_rebasing {
@@ -2979,21 +3055,13 @@ fn render_status_bar(
                 if !toggle_head_key.is_empty() {
                     hints.push((toggle_head_key.as_str(), "files"));
                 }
-                hints.extend([
-                    ("enter", "commit files"),
-                    ("\\", view_layout_hint),
-                    (".", "details"),
-                ]);
+                hints.extend([("enter", "commit files"), ("\\", view_layout_hint)]);
             }
             ContextId::Reflog => {
                 if !toggle_head_key.is_empty() {
                     hints.push((toggle_head_key.as_str(), "files"));
                 }
-                hints.extend([
-                    ("enter", "commit files"),
-                    ("\\", view_layout_hint),
-                    (".", "details"),
-                ]);
+                hints.extend([("enter", "commit files"), ("\\", view_layout_hint)]);
             }
             ContextId::Branches => {
                 hints.extend([

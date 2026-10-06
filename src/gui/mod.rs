@@ -1517,6 +1517,7 @@ impl Gui {
                         &mut self.commit_list_cache,
                         self.layout.side_panel_ratio,
                         self.screen_mode,
+                        &self.config.user_config.keybinding,
                     );
                     // Render popup overlay on top of diff mode (for ? help, errors, etc.)
                     if self.popup != PopupState::None {
@@ -3891,10 +3892,10 @@ impl Gui {
             return Ok(());
         }
 
-        // `.` toggles the commit-details box when in any commit-related
+        // `'` toggles the commit-details box when in any commit-related
         // context.  Kept outside per-context controllers so the binding is
         // consistent across Commits / BranchCommits / Reflog / CommitFiles.
-        if key.code == KeyCode::Char('.') && self.context_has_commit_details() {
+        if key.code == KeyCode::Char('\'') && self.context_has_commit_details() {
             self.show_commit_details = !self.show_commit_details;
             self.persist_commit_details_visibility();
             return Ok(());
@@ -5994,7 +5995,7 @@ impl Gui {
                             kb.universal.toggle_diff_view_layout.clone(),
                             "Toggle unified / side-by-side view".into(),
                         ),
-                        CommandEntry::keybinding(".".into(), "Toggle commit details panel".into()),
+                        CommandEntry::keybinding("'".into(), "Toggle commit details panel".into()),
                     ];
                     // Grep only applies to the files list, not the commits list.
                     if active == ContextId::BranchCommitFiles {
@@ -6078,7 +6079,7 @@ impl Gui {
                         kb.commits.open_log_menu.clone(),
                         "Filter commits".into(),
                     ),
-                    CommandEntry::keybinding(".".into(), "Toggle commit details panel".into()),
+                    CommandEntry::keybinding("'".into(), "Toggle commit details panel".into()),
                 ];
                 if !self.cherry_pick_clipboard.is_empty() {
                     entries.insert(
@@ -6123,7 +6124,7 @@ impl Gui {
                         "Toggle tree view".into(),
                     ),
                     CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
-                    CommandEntry::keybinding(".".into(), "Toggle commit details panel".into()),
+                    CommandEntry::keybinding("'".into(), "Toggle commit details panel".into()),
                 ],
             },
             ContextId::Reflog => CommandSection {
@@ -6147,7 +6148,7 @@ impl Gui {
                         "Copy (cherry-pick)".into(),
                     ),
                     CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
-                    CommandEntry::keybinding(".".into(), "Toggle commit details panel".into()),
+                    CommandEntry::keybinding("'".into(), "Toggle commit details panel".into()),
                 ],
             },
             ContextId::Stash => CommandSection {
@@ -8065,7 +8066,7 @@ impl Gui {
     }
 
     /// True when the active context is one where commit-details makes sense
-    /// (drives both the `.` toggle and layout-time `show_details`).
+    /// (drives both the `'` toggle and layout-time `show_details`).
     fn context_has_commit_details(&self) -> bool {
         matches!(
             self.context_mgr.active(),
@@ -9452,7 +9453,7 @@ mod terminal_mouse_tests {
             gui.diff_mode.diff_files_selected = 0;
             gui.diff_mode.viewport_manually_scrolled = true;
             gui.needs_diff_refresh = false;
-            gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
+            gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
                 .unwrap();
             assert_eq!(gui.diff_mode.diff_files_selected, 1);
             assert!(!gui.diff_mode.viewport_manually_scrolled);
@@ -9489,7 +9490,7 @@ mod terminal_mouse_tests {
             .keybinding
             .universal
             .tree_child = "<c-t>".into();
-        gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
+        gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(gui.diff_mode.diff_files_selected, 0);
         gui.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))
@@ -9503,25 +9504,25 @@ mod terminal_mouse_tests {
         let mut gui = tree_test_gui(&repo);
         gui.context_mgr.set_active(ContextId::CommitFiles);
         let details = gui.show_commit_details;
-        gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
+        gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(gui.context_mgr.selected_active(), 1);
         assert_eq!(gui.show_commit_details, details);
-        // Other tree actions remapped to '.' also take precedence, even at a boundary.
+        // Other tree actions remapped to apostrophe also take precedence, even at a boundary.
         let kb = &mut Arc::get_mut(&mut gui.config)
             .unwrap()
             .user_config
             .keybinding;
         kb.universal.tree_child.clear();
-        kb.universal.tree_parent = ".".into();
-        gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+        kb.universal.tree_parent = "'".into();
+        gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(gui.context_mgr.selected_active(), 0);
-        gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+        gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(gui.show_commit_details, details);
         gui.show_commit_file_tree = false;
-        gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+        gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
             .unwrap();
         assert_ne!(gui.show_commit_details, details);
     }
@@ -9536,14 +9537,50 @@ mod terminal_mouse_tests {
                 gui.context_mgr.set_selection(0);
                 gui.show_commit_file_tree = tree;
                 let details = gui.show_commit_details;
-                gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+                gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
                     .unwrap();
                 assert_ne!(gui.show_commit_details, details, "{ctx:?} {tree}");
                 assert_eq!(gui.context_mgr.selected_active(), 0);
-                gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
+                gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
                     .unwrap();
                 assert_eq!(gui.context_mgr.selected_active(), usize::from(tree));
                 assert_ne!(gui.show_commit_details, details);
+            }
+        }
+    }
+
+    #[test]
+    fn apostrophe_toggles_details_and_is_documented_in_commit_context_help() {
+        let repo = TempRepo::new("apostrophe-details-help");
+        let mut gui = tree_test_gui(&repo);
+        for ctx in [
+            ContextId::Commits,
+            ContextId::BranchCommits,
+            ContextId::Reflog,
+            ContextId::CommitFiles,
+            ContextId::BranchCommitFiles,
+            ContextId::StashFiles,
+        ] {
+            gui.popup = PopupState::None;
+            gui.context_mgr.set_active(ctx);
+            let details = gui.show_commit_details;
+            gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
+                .unwrap();
+            assert_ne!(gui.show_commit_details, details, "{ctx:?}");
+            gui.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT))
+                .unwrap();
+            let PopupState::CommandPalette { sections, .. } = &gui.popup else {
+                panic!("expected help palette");
+            };
+            let details_entries: Vec<_> = sections
+                .iter()
+                .flat_map(|s| &s.entries)
+                .filter(|e| e.description == "Toggle commit details panel")
+                .collect();
+            // Stash-file help did not previously include a details entry.
+            if ctx != ContextId::StashFiles {
+                assert_eq!(details_entries.len(), 1, "{ctx:?}");
+                assert_eq!(details_entries[0].key, "'", "{ctx:?}");
             }
         }
     }
@@ -9583,7 +9620,7 @@ mod terminal_mouse_tests {
                             section
                                 .entries
                                 .iter()
-                                .any(|e| e.key == "'"
+                                .any(|e| e.key == "."
                                     && e.description == "Select first visible child")
                         );
                         assert_eq!(section.entries.iter().any(|e| e.key == "-"), !diff);
@@ -9617,7 +9654,7 @@ mod terminal_mouse_tests {
                     )
                 );
                 if let Some(section) = tree_section {
-                    assert!(section.entries.iter().any(|e| e.key == "'"));
+                    assert!(section.entries.iter().any(|e| e.key == "."));
                     assert_eq!(
                         section.entries.iter().any(|e| e.key == "-"),
                         focus == DiffModeFocus::CommitFiles
@@ -9744,7 +9781,7 @@ mod terminal_mouse_tests {
                 gui.diff_focused = diff;
                 gui.context_mgr.viewport_manually_scrolled = true;
                 gui.needs_diff_refresh = false;
-                gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
+                gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
                     .unwrap();
                 assert_eq!(gui.context_mgr.selected_active(), 1);
                 assert!(!gui.context_mgr.viewport_manually_scrolled);
