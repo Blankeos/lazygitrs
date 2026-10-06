@@ -1409,6 +1409,7 @@ impl Gui {
                         &theme,
                         self.diff_loading,
                         diff_loading_show,
+                        &mut self.commit_list_cache,
                     );
                     // Render popup overlay on top of diff mode (for ? help, errors, etc.)
                     if self.popup != PopupState::None {
@@ -1756,28 +1757,7 @@ impl Gui {
 
     fn current_diff_key(&self) -> String {
         if self.diff_mode.active {
-            let item_key = if self.diff_mode.show_tree {
-                self.diff_mode
-                    .tree_nodes
-                    .get(self.diff_mode.diff_files_selected)
-                    .map(|node| {
-                        node.file_index
-                            .and_then(|index| self.diff_mode.diff_files.get(index))
-                            .map(|file| format!("file:{}", file.name))
-                            .unwrap_or_else(|| format!("dir:{}", node.path))
-                    })
-                    .unwrap_or_else(|| "none".to_string())
-            } else {
-                self.diff_mode
-                    .diff_files
-                    .get(self.diff_mode.diff_files_selected)
-                    .map(|file| format!("file:{}", file.name))
-                    .unwrap_or_else(|| "none".to_string())
-            };
-            return format!(
-                "DiffMode:{}..{}:{}",
-                self.diff_mode.ref_a, self.diff_mode.ref_b, item_key
-            );
+            return self.diff_mode.diff_key();
         }
 
         let active = self.context_mgr.active();
@@ -7176,9 +7156,9 @@ impl Gui {
     }
 
     fn handle_diff_mode_mouse(&mut self, mouse: MouseEvent) {
-        use self::modes::diff_mode::{DiffModeFocus, DiffModeSelector};
+        use self::modes::diff_mode::{CompareLayout, DiffModeFocus, DiffModeSelector};
         use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
-        use ratatui::layout::{Constraint, Direction, Layout, Rect};
+        use ratatui::layout::Rect;
 
         // Help popup intercepts mouse scroll
         if let PopupState::CommandPalette {
@@ -7237,30 +7217,14 @@ impl Gui {
 
         let area = Rect::new(0, 0, self.layout.width, self.layout.height);
 
-        // Replicate the diff mode layout to determine regions
-        let outer = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(1)])
-            .split(area);
-
-        let content = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(33), Constraint::Percentage(67)])
-            .split(outer[0]);
-
-        let sidebar = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Min(1),
-            ])
-            .split(content[0]);
+        let compare_layout = CompareLayout::new(area);
+        let sidebar = compare_layout.sidebar;
 
         let selector_a_rect = sidebar[0];
         let selector_b_rect = sidebar[1];
         let files_rect = sidebar[2];
-        let diff_rect = content[1];
+        let commits_rect = sidebar[3];
+        let diff_rect = compare_layout.diff;
 
         let col = mouse.column;
         let row = mouse.row;
@@ -7297,9 +7261,9 @@ impl Gui {
                             self.diff_mode.confirm_selection();
                             if self.diff_mode.has_both_refs() {
                                 let _ = crate::gui::controller::diff_mode::reload_diff_files(self);
-                                self.diff_mode.focus = DiffModeFocus::CommitFiles;
+                                self.diff_mode.set_focus(DiffModeFocus::CommitFiles);
                             } else if self.diff_mode.ref_a.is_empty() {
-                                self.diff_mode.focus = DiffModeFocus::SelectorA;
+                                self.diff_mode.set_focus(DiffModeFocus::SelectorA);
                                 self.diff_mode.start_editing(DiffModeSelector::A);
                                 let model = self.model.lock().unwrap();
                                 self.diff_mode.search_refs(
@@ -7310,7 +7274,7 @@ impl Gui {
                                     &model.head_branch_name,
                                 );
                             } else {
-                                self.diff_mode.focus = DiffModeFocus::SelectorB;
+                                self.diff_mode.set_focus(DiffModeFocus::SelectorB);
                                 self.diff_mode.start_editing(DiffModeSelector::B);
                                 let model = self.model.lock().unwrap();
                                 self.diff_mode.search_refs(
@@ -7353,12 +7317,12 @@ impl Gui {
                 if rect_contains(diff_rect, col, row) && !self.diff_view.is_empty() {
                     let pl = DiffPanelLayout::compute(diff_rect, &self.diff_view);
                     if self.try_handle_revert_block_click(diff_rect, pl, col, row) {
-                        self.diff_mode.focus = DiffModeFocus::DiffExploration;
+                        self.diff_mode.set_focus(DiffModeFocus::DiffExploration);
                         return;
                     }
                     if self.diff_view.is_sticky_row(row, &pl) {
                         self.diff_view.selection = None;
-                        self.diff_mode.focus = DiffModeFocus::DiffExploration;
+                        self.diff_mode.set_focus(DiffModeFocus::DiffExploration);
                         return;
                     }
                     if let Some(panel) = pl.panel_at_x(col) {
@@ -7377,13 +7341,13 @@ impl Gui {
                     } else {
                         self.diff_view.selection = None;
                     }
-                    self.diff_mode.focus = DiffModeFocus::DiffExploration;
+                    self.diff_mode.set_focus(DiffModeFocus::DiffExploration);
                 } else {
                     self.diff_view.selection = None;
 
                     // Click on panels to switch focus
                     if rect_contains(selector_a_rect, col, row) {
-                        self.diff_mode.focus = DiffModeFocus::SelectorA;
+                        self.diff_mode.set_focus(DiffModeFocus::SelectorA);
                         // Start editing on click
                         self.diff_mode.start_editing(DiffModeSelector::A);
                         let model = self.model.lock().unwrap();
@@ -7395,7 +7359,7 @@ impl Gui {
                             &model.head_branch_name,
                         );
                     } else if rect_contains(selector_b_rect, col, row) {
-                        self.diff_mode.focus = DiffModeFocus::SelectorB;
+                        self.diff_mode.set_focus(DiffModeFocus::SelectorB);
                         // Start editing on click
                         self.diff_mode.start_editing(DiffModeSelector::B);
                         let model = self.model.lock().unwrap();
@@ -7407,7 +7371,8 @@ impl Gui {
                             &model.head_branch_name,
                         );
                     } else if rect_contains(files_rect, col, row) {
-                        self.diff_mode.focus = DiffModeFocus::CommitFiles;
+                        self.diff_mode.set_focus(DiffModeFocus::CommitFiles);
+                        self.needs_diff_refresh = true;
                         // Click to select a file — use stored scroll offset
                         let inner_y = row.saturating_sub(files_rect.y + 1);
                         let len = self.diff_mode.visible_files_len();
@@ -7417,8 +7382,20 @@ impl Gui {
                             self.diff_mode.viewport_manually_scrolled = false;
                             self.needs_diff_refresh = true;
                         }
+                    } else if rect_contains(commits_rect, col, row) {
+                        self.diff_mode.set_focus(DiffModeFocus::Commits);
+                        let inner_y = row.saturating_sub(commits_rect.y + 1);
+                        let clicked_idx = self.diff_mode.commits_scroll + inner_y as usize;
+                        if row > commits_rect.y
+                            && row < commits_rect.bottom().saturating_sub(1)
+                            && clicked_idx < self.diff_mode.commits.len()
+                        {
+                            self.diff_mode.commits_selected = clicked_idx;
+                            self.diff_mode.commits_viewport_manually_scrolled = false;
+                        }
+                        self.needs_diff_refresh = true;
                     } else if rect_contains(diff_rect, col, row) {
-                        self.diff_mode.focus = DiffModeFocus::DiffExploration;
+                        self.diff_mode.set_focus(DiffModeFocus::DiffExploration);
                     }
                 }
             }
@@ -7464,6 +7441,14 @@ impl Gui {
                         visible_height,
                     );
                     self.diff_mode.viewport_manually_scrolled = true;
+                } else if rect_contains(commits_rect, col, row) {
+                    scroll::scroll_viewport(
+                        &mut self.diff_mode.commits_scroll,
+                        -3,
+                        self.diff_mode.commits.len(),
+                        commits_rect.height.saturating_sub(2) as usize,
+                    );
+                    self.diff_mode.commits_viewport_manually_scrolled = true;
                 }
             }
             MouseEventKind::ScrollDown => {
@@ -7485,6 +7470,26 @@ impl Gui {
                         visible_height,
                     );
                     self.diff_mode.viewport_manually_scrolled = true;
+                } else if rect_contains(commits_rect, col, row) {
+                    let visible_height = commits_rect.height.saturating_sub(2) as usize;
+                    if self.diff_mode.commits_scroll + visible_height + 3
+                        >= self.diff_mode.commits.len()
+                    {
+                        if let Err(error) = controller::diff_mode::load_more_commits(self) {
+                            self.popup = PopupState::Message {
+                                title: "Compare commits".into(),
+                                message: error.to_string(),
+                                kind: popup::MessageKind::Error,
+                            };
+                        }
+                    }
+                    scroll::scroll_viewport(
+                        &mut self.diff_mode.commits_scroll,
+                        3,
+                        self.diff_mode.commits.len(),
+                        visible_height,
+                    );
+                    self.diff_mode.commits_viewport_manually_scrolled = true;
                 }
             }
             MouseEventKind::ScrollLeft => {

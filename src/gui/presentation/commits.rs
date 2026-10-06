@@ -5,7 +5,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::config::Theme;
 use crate::model::Model;
-use crate::model::commit::{Commit, CommitStatus};
+use crate::model::commit::{Commit, CommitStatus, Divergence};
 
 use super::graph;
 use super::text::plain_text;
@@ -14,6 +14,28 @@ use super::text::plain_text;
 pub struct CommitListCache {
     commits: GraphLayoutCache,
     sub_commits: GraphLayoutCache,
+    compare_commits: GraphLayoutCache,
+}
+
+pub fn render_compare_commit_list_window<'a>(
+    commits: &'a [Commit],
+    revision: u64,
+    theme: &Theme,
+    offset: usize,
+    visible_height: usize,
+    cache: &mut CommitListCache,
+) -> Vec<ListItem<'a>> {
+    cache.compare_commits.update(commits, revision);
+    render_commits_window(
+        commits,
+        "",
+        theme,
+        &[],
+        offset,
+        visible_height,
+        false,
+        &cache.compare_commits,
+    )
 }
 
 #[derive(Default)]
@@ -145,6 +167,17 @@ fn render_commits_window<'a>(
             let graph_row = graph_layout.rows.get(*i);
             let is_head = commit.hash == *head_hash;
             let mut spans: Vec<Span<'a>> = Vec::new();
+
+            match commit.divergence {
+                Divergence::Left => {
+                    spans.push(Span::styled("A ", Style::default().fg(theme.accent)))
+                }
+                Divergence::Right => spans.push(Span::styled(
+                    "B ",
+                    Style::default().fg(theme.accent_secondary),
+                )),
+                Divergence::None => {}
+            }
 
             // Hash (8, lazygit default) — color by push status.
             let is_cherry_picked = cherry_picked.iter().any(|h| *h == commit.hash);

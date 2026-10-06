@@ -1,18 +1,187 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::config::Theme;
-use crate::gui::modes::diff_mode::{DiffModeFocus, DiffModeState, RefKind};
+use crate::gui::modes::diff_mode::{
+    CompareDiffSource, CompareLayout, DiffModeFocus, DiffModeState, RefKind,
+};
 use crate::gui::presentation::commit_files::commit_file_status_display;
+use crate::gui::presentation::commits::{CommitListCache, render_compare_commit_list_window};
 use crate::gui::presentation::files::append_file_stats;
 use crate::model::file_tree::CommitFileTreeNode;
 use crate::pager::side_by_side::{self, DiffViewState};
 
 /// Max items visible in the dropdown at once.
 const DROPDOWN_MAX_VISIBLE: usize = 10;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Commit, CommitStatus, commit::Divergence};
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn commit(hash: &str, name: &str, divergence: Divergence) -> Commit {
+        Commit {
+            hash: hash.into(),
+            name: name.into(),
+            status: CommitStatus::Pushed,
+            action: String::new(),
+            tags: vec![],
+            refs: vec![],
+            extra_info: String::new(),
+            author_name: "Test Author".into(),
+            author_email: String::new(),
+            unix_timestamp: 0,
+            parents: vec![],
+            divergence,
+        }
+    }
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn compare_commits_panel_shows_sides_and_default_commit_rows() {
+        let mut state = DiffModeState::new();
+        state.ref_a = "main".into();
+        state.ref_b = "feature".into();
+        state.ahead_behind = Some((1, 1));
+        state.commits = vec![
+            commit("aaaaaaaa", "Main change", Divergence::Left),
+            commit("bbbbbbbb", "Feature change", Divergence::Right),
+        ];
+        let mut cache = CommitListCache::default();
+        let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_compare_commits(
+                    frame,
+                    frame.area(),
+                    &mut state,
+                    &Theme::default(),
+                    &mut cache,
+                )
+            })
+            .unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains("4 Commits · 1 ahead, 1 behind"), "{text}");
+        assert!(text.contains("A aaaaaaaa"), "{text}");
+        assert!(text.contains("B bbbbbbbb"), "{text}");
+        assert!(text.contains("Main change"));
+        assert!(text.contains("Feature change"));
+        assert!(!text.contains("Enter: files"));
+        assert!(!text.contains("A-only / B-only"));
+        let bottom_border: String = (0..60)
+            .map(|x| terminal.backend().buffer().cell((x, 5)).unwrap().symbol())
+            .collect();
+        assert_eq!(bottom_border, format!("└{}┘", "─".repeat(58)));
+    }
+
+    #[test]
+    fn compare_help_bar_shows_commit_actions_without_duplicate_counts() {
+        for (focus, counts, more) in [
+            (DiffModeFocus::Commits, Some((3, 1)), true),
+            (DiffModeFocus::Commits, Some((0, 0)), false),
+            (DiffModeFocus::CommitFiles, Some((3, 1)), true),
+            (DiffModeFocus::Commits, None, false),
+        ] {
+            let mut state = DiffModeState::new();
+            state.set_focus(focus);
+            state.ahead_behind = counts;
+            let mut terminal = Terminal::new(TestBackend::new(80, 1)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_status_bar(
+                        frame,
+                        frame.area(),
+                        &state,
+                        &DiffViewState::default(),
+                        &Theme::default(),
+                    )
+                })
+                .unwrap();
+            let text = buffer_text(&terminal);
+            assert!(!text.contains("A vs B:"), "{text}");
+            assert!(!text.contains("ahead"), "{text}");
+            assert!(!text.contains("behind"), "{text}");
+            assert_eq!(
+                text.contains("Enter files"),
+                focus == DiffModeFocus::Commits,
+                "{text}"
+            );
+            assert_eq!(
+                text.contains("PgDn more"),
+                focus == DiffModeFocus::Commits && more,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn compare_empty_commit_states_are_distinct() {
+        for (counts, expected) in [
+            (Some((0, 0)), "Same commit"),
+            (None, "Commit history unavailable"),
+        ] {
+            let mut state = DiffModeState::new();
+            state.ref_a = "A".into();
+            state.ref_b = "B".into();
+            state.ahead_behind = counts;
+            let mut terminal = Terminal::new(TestBackend::new(60, 5)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_compare_commits(
+                        frame,
+                        frame.area(),
+                        &mut state,
+                        &Theme::default(),
+                        &mut CommitListCache::default(),
+                    )
+                })
+                .unwrap();
+            assert!(buffer_text(&terminal).contains(expected));
+        }
+    }
+
+    #[test]
+    fn compare_layout_renders_four_sidebar_panels_and_handles_small_terminals() {
+        for (width, height) in [(180, 30), (80, 14), (30, 8), (5, 3), (1, 1)] {
+            let mut state = DiffModeState::new();
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        &mut state,
+                        &mut DiffViewState::default(),
+                        &Theme::default(),
+                        false,
+                        false,
+                        &mut CommitListCache::default(),
+                    )
+                })
+                .unwrap();
+            if width == 180 {
+                let text = buffer_text(&terminal);
+                for title in ["1 A", "2 B", "3 Files", "4 Commits", "5 Diff"] {
+                    assert!(text.contains(title), "Missing {title}: {text}");
+                }
+            }
+        }
+    }
+}
 
 pub fn render(
     frame: &mut Frame,
@@ -21,38 +190,20 @@ pub fn render(
     theme: &Theme,
     diff_loading: bool,
     diff_loading_show: bool,
+    commit_cache: &mut CommitListCache,
 ) {
-    let area = frame.area();
-
-    // Overall layout: sidebar (left) | diff panel (right) | status bar at bottom
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(area);
-
-    let content = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(33), Constraint::Percentage(67)])
-        .split(outer[0]);
-
-    // Left sidebar: [A selector (3 lines)] [B selector (3 lines)] [Commit Files (rest)]
-    let sidebar = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(1),
-        ])
-        .split(content[0]);
+    let layout = CompareLayout::new(frame.area());
+    let sidebar = layout.sidebar;
 
     render_selector(frame, sidebar[0], state, DiffModeFocus::SelectorA, theme);
     render_selector(frame, sidebar[1], state, DiffModeFocus::SelectorB, theme);
     render_commit_files(frame, sidebar[2], state, theme);
+    render_compare_commits(frame, sidebar[3], state, theme, commit_cache);
 
     // Right panel: diff exploration
     render_diff_panel(
         frame,
-        content[1],
+        layout.diff,
         state,
         diff_view,
         theme,
@@ -61,10 +212,10 @@ pub fn render(
     );
 
     // Text selection highlight overlay and tooltip (must be before popups/dropdowns)
-    crate::gui::views::render_selection_overlay(frame, diff_view, content[1], theme);
+    crate::gui::views::render_selection_overlay(frame, diff_view, layout.diff, theme);
 
     // Status bar
-    render_status_bar(frame, outer[1], state, diff_view, theme);
+    render_status_bar(frame, layout.status, state, diff_view, theme);
 
     // Render combobox dropdown overlay on top of the sidebar
     if state.editing.is_some() {
@@ -79,9 +230,8 @@ fn render_selector(
     which: DiffModeFocus,
     theme: &Theme,
 ) {
-    let (is_a, focused, editing, display, number_label) = match which {
+    let (focused, editing, display, number_label) = match which {
         DiffModeFocus::SelectorA => (
-            true,
             state.focus == DiffModeFocus::SelectorA,
             matches!(
                 state.editing,
@@ -91,7 +241,6 @@ fn render_selector(
             " 1 A ",
         ),
         DiffModeFocus::SelectorB => (
-            false,
             state.focus == DiffModeFocus::SelectorB,
             matches!(
                 state.editing,
@@ -135,6 +284,86 @@ fn render_selector(
     }
 }
 
+fn render_compare_commits(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut DiffModeState,
+    theme: &Theme,
+    cache: &mut CommitListCache,
+) {
+    let border = if state.focus == DiffModeFocus::Commits {
+        theme.active_border
+    } else {
+        Style::default().fg(theme.text_dimmed)
+    };
+    let summary = state
+        .ahead_behind
+        .map(|(ahead, behind)| format!("{ahead} ahead, {behind} behind"));
+    let title = summary
+        .map(|summary| format!(" 4 Commits · {summary} "))
+        .unwrap_or_else(|| " 4 Commits ".into());
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(border);
+    let inner = block.inner(area);
+    if state.commits.is_empty() {
+        let message = if !state.has_both_refs() {
+            "Select refs A and B to compare"
+        } else if state.ahead_behind == Some((0, 0)) {
+            "Same commit — no unique commits"
+        } else if state.ahead_behind.is_none() {
+            "Commit history unavailable for these refs"
+        } else {
+            "No commits loaded"
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                format!(" {message}"),
+                Style::default().fg(theme.text_dimmed),
+            ))
+            .block(block),
+            area,
+        );
+        return;
+    }
+    let height = inner.height as usize;
+    if height == 0 {
+        frame.render_widget(block, area);
+        return;
+    }
+    if !state.commits_viewport_manually_scrolled {
+        crate::gui::scroll::ensure_visible(
+            state.commits_selected,
+            &mut state.commits_scroll,
+            height,
+        );
+    }
+    state.commits_scroll = state
+        .commits_scroll
+        .min(state.commits.len().saturating_sub(height));
+    let items = render_compare_commit_list_window(
+        &state.commits,
+        state.commits_revision,
+        theme,
+        state.commits_scroll,
+        height,
+        cache,
+    );
+    let selection = state
+        .commits_selected
+        .checked_sub(state.commits_scroll)
+        .filter(|&i| i < items.len());
+    let mut list_state = ListState::default().with_selected(selection);
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(block)
+            .highlight_style(theme.selected_line),
+        area,
+        &mut list_state,
+    );
+}
+
 fn render_commit_files(frame: &mut Frame, area: Rect, state: &mut DiffModeState, theme: &Theme) {
     let focused = state.focus == DiffModeFocus::CommitFiles;
     let border = if focused {
@@ -143,16 +372,20 @@ fn render_commit_files(frame: &mut Frame, area: Rect, state: &mut DiffModeState,
         Style::default().fg(theme.text_dimmed)
     };
     let tree_indicator = if state.show_tree { " (tree)" } else { "" };
-    let title = format!(
-        " 3 Commit Files ({}{}) ",
-        state.diff_files.len(),
-        tree_indicator
-    );
+    let title = format!(" 3 Files ({}{}) ", state.diff_files.len(), tree_indicator);
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
         .border_style(border);
     let content_width = area.width.saturating_sub(2) as usize;
+    let block = if let Some(hash) = &state.files_commit {
+        block.title_bottom(format!(
+            " {} · Esc: comparison ",
+            &hash[..8.min(hash.len())]
+        ))
+    } else {
+        block
+    };
 
     if state.diff_files.is_empty() {
         let msg = if state.has_both_refs() {
@@ -342,13 +575,15 @@ fn render_diff_panel(
             Style::default().fg(theme.text_dimmed)
         };
         let block = Block::default()
-            .title(" 4 Diff ")
+            .title(" 5 Diff ")
             .borders(Borders::ALL)
             .border_style(border);
         let msg = if diff_loading_show {
             " Loading diff..."
+        } else if state.diff_source == CompareDiffSource::Commit {
+            " No patch for this commit"
         } else if !state.has_both_refs() || state.diff_files.is_empty() {
-            " Select a file to view diff"
+            " Select a file or commit to view diff"
         } else {
             ""
         };
@@ -431,15 +666,23 @@ fn render_status_bar(
             side_by_side::DiffViewLayout::SideBySide => "unified view",
             side_by_side::DiffViewLayout::Unified => "split view",
         };
-        vec![
+        let mut hints = Vec::new();
+        if state.focus == DiffModeFocus::Commits {
+            hints.push(("Enter", "files"));
+            if state.has_more_commits() {
+                hints.push(("PgDn", "more"));
+            }
+        }
+        hints.extend([
             ("q", "exit"),
             ("Tab", "cycle"),
-            ("1-4", "panel"),
+            ("1-5", "panel"),
             ("<c-s>", "swap"),
             ("`", "tree"),
             ("\\", view_layout_hint),
             ("?", "help"),
-        ]
+        ]);
+        hints
     };
 
     let key_style = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
