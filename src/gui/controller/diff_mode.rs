@@ -120,6 +120,15 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         return handle_file_search_key(gui, key);
     }
 
+    // Keep all text entry local before dispatching configurable shortcuts.
+    if gui.diff_mode.focus == DiffModeFocus::DiffExploration && gui.diff_view.search_active {
+        return handle_diff_search_key(gui, key);
+    }
+
+    if super::custom_commands::try_handle_prompt_key(gui, key)? {
+        return Ok(());
+    }
+
     // Ctrl-F: same-context grep dialog over all hunk contents.
     if super::diff_grep::is_diff_grep_key(key) {
         return super::diff_grep::open_diff_grep_picker(gui);
@@ -137,10 +146,6 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         return Ok(());
     }
 
-    // Keep text-entry shortcuts local, including diff-content search.
-    if gui.diff_mode.focus == DiffModeFocus::DiffExploration && gui.diff_view.search_active {
-        return handle_diff_search_key(gui, key);
-    }
     if gui.try_handle_layout_key(key) {
         return Ok(());
     }
@@ -843,7 +848,7 @@ pub fn reload_diff_files(gui: &mut Gui) -> Result<()> {
     Ok(())
 }
 
-fn update_diff_mode_tree(gui: &mut Gui) {
+pub(super) fn update_diff_mode_tree(gui: &mut Gui) {
     if gui.diff_mode.show_tree {
         gui.diff_mode.tree_nodes = crate::model::file_tree::build_commit_file_tree(
             &gui.diff_mode.diff_files,
@@ -1032,7 +1037,7 @@ pub fn maybe_request_diff(gui: &mut Gui, generation: u64, diff_key: String) {
 }
 
 fn show_diff_mode_command_palette(gui: &mut Gui) {
-    let diff_mode_section = CommandSection {
+    let mut diff_mode_section = CommandSection {
         title: "Compare / Diff Mode".into(),
         entries: vec![
             CommandEntry::keybinding("q".into(), "Exit diff mode".into()),
@@ -1130,12 +1135,26 @@ fn show_diff_mode_command_palette(gui: &mut Gui) {
                 "/".into(),
                 "Search files, loaded commits, or diff content".into(),
             ),
-            CommandEntry::keybinding("n/N".into(), "Next / previous search match".into()),
-            CommandEntry::keybinding("<c-f>".into(), "Grep diff contents".into()),
-            CommandEntry::keybinding("y".into(), "Copy to clipboard".into()),
-            CommandEntry::keybinding("?".into(), "Show command palette".into()),
         ],
     };
+    let prompt_key = &gui
+        .config
+        .user_config
+        .keybinding
+        .universal
+        .custom_command_prompt;
+    if !prompt_key.trim().is_empty() {
+        diff_mode_section.entries.push(CommandEntry::keybinding(
+            prompt_key.clone(),
+            "Execute shell command".into(),
+        ));
+    }
+    diff_mode_section.entries.extend([
+        CommandEntry::keybinding("n/N".into(), "Next / previous search match".into()),
+        CommandEntry::keybinding("<c-f>".into(), "Grep diff contents".into()),
+        CommandEntry::keybinding("y".into(), "Copy to clipboard".into()),
+        CommandEntry::keybinding("?".into(), "Show command palette".into()),
+    ]);
 
     let combobox_section = CommandSection {
         title: "Combobox (while editing A or B)".into(),
@@ -1194,6 +1213,160 @@ mod tests {
     impl Drop for TempRepo {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn prompt_test_gui() -> (TempRepo, Gui) {
+        let path = std::env::temp_dir().join(format!(
+            "lazygitrs-compare-prompt-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        let repo = TempRepo(path);
+        let output = Command::new("git")
+            .current_dir(&repo.0)
+            .args(["init", "-b", "main"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        let config = AppConfig {
+            debug: false,
+            version: String::new(),
+            user_config: UserConfig::default(),
+            app_state: AppState::default(),
+            config_dir: repo.0.clone(),
+            state_dir: repo.0.clone(),
+            state_path: repo.0.join("state.yml"),
+        };
+        let gui = Gui::new(config, GitCommands::new(&repo.0).unwrap(), None, false).unwrap();
+        (repo, gui)
+    }
+
+    #[test]
+    fn compare_shell_prompt_takes_priority_over_shortcuts_unless_disabled() {
+        let (_repo, mut gui) = prompt_test_gui();
+        for binding in [":", "q", "?", "/", "<c-f>", "+", "<tab>", "1"] {
+            Arc::get_mut(&mut gui.config)
+                .unwrap()
+                .user_config
+                .keybinding
+                .universal
+                .custom_command_prompt = binding.into();
+            for focus in [
+                DiffModeFocus::SelectorA,
+                DiffModeFocus::SelectorB,
+                DiffModeFocus::CommitFiles,
+                DiffModeFocus::Commits,
+                DiffModeFocus::DiffExploration,
+            ] {
+                gui.popup = PopupState::None;
+                gui.diff_mode.enter(false);
+                gui.diff_mode.set_focus(focus);
+                handle_key(&mut gui, parse_key(binding).unwrap()).unwrap();
+                assert!(
+                    matches!(gui.popup, PopupState::ShellCommand { .. }),
+                    "{binding} {focus:?}"
+                );
+                assert!(gui.diff_mode.active);
+                assert_eq!(gui.diff_mode.focus, focus);
+                assert_eq!(gui.screen_mode, crate::gui::ScreenMode::Normal);
+            }
+        }
+        Arc::get_mut(&mut gui.config)
+            .unwrap()
+            .user_config
+            .keybinding
+            .universal
+            .custom_command_prompt
+            .clear();
+        gui.popup = PopupState::None;
+        handle_key(&mut gui, parse_key(":").unwrap()).unwrap();
+        assert!(gui.popup == PopupState::None);
+        handle_key(&mut gui, parse_key("q").unwrap()).unwrap();
+        assert!(!gui.diff_mode.active);
+    }
+
+    #[test]
+    fn compare_text_entry_takes_priority_over_shell_prompt_and_shortcuts() {
+        let (_repo, mut gui) = prompt_test_gui();
+        for binding in [":", "q", "?", "<c-f>"] {
+            Arc::get_mut(&mut gui.config)
+                .unwrap()
+                .user_config
+                .keybinding
+                .universal
+                .custom_command_prompt = binding.into();
+            for input_mode in ["ref A", "ref B", "file search", "content search"] {
+                gui.diff_mode.enter(false);
+                gui.diff_view = DiffViewState::default();
+                match input_mode {
+                    "ref A" => gui.diff_mode.start_editing(DiffModeSelector::A),
+                    "ref B" => gui.diff_mode.start_editing(DiffModeSelector::B),
+                    "file search" => {
+                        gui.diff_mode.set_focus(DiffModeFocus::CommitFiles);
+                        gui.diff_mode.file_search_active = true;
+                        gui.diff_mode.file_search_textarea =
+                            Some(tui_textarea::TextArea::default());
+                    }
+                    "content search" => {
+                        gui.diff_mode.set_focus(DiffModeFocus::DiffExploration);
+                        gui.diff_view.start_search();
+                    }
+                    _ => unreachable!(),
+                }
+                handle_key(&mut gui, parse_key(binding).unwrap()).unwrap();
+                assert!(gui.popup == PopupState::None, "{binding} {input_mode}");
+                assert!(gui.diff_mode.active);
+                if binding != "<c-f>" {
+                    let text = match input_mode {
+                        "ref A" | "ref B" => gui.diff_mode.query_text(),
+                        "file search" => gui.diff_mode.file_search_query.clone(),
+                        "content search" => gui.diff_view.search_query.clone(),
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(text, binding, "{input_mode}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compare_palette_lists_only_enabled_shell_prompt_after_text_search() {
+        use crate::gui::popup::CommandAction;
+        let (_repo, mut gui) = prompt_test_gui();
+        for binding in [":", "<c-x>", "", "  "] {
+            Arc::get_mut(&mut gui.config)
+                .unwrap()
+                .user_config
+                .keybinding
+                .universal
+                .custom_command_prompt = binding.into();
+            show_diff_mode_command_palette(&mut gui);
+            let PopupState::CommandPalette { sections, .. } = &gui.popup else {
+                panic!("expected compare command palette");
+            };
+            let entries = &sections[0].entries;
+            let prompt = entries
+                .iter()
+                .position(|entry| entry.description == "Execute shell command");
+            if binding.trim().is_empty() {
+                assert!(prompt.is_none());
+            } else {
+                let prompt = prompt.expect("enabled prompt entry");
+                assert_eq!(entries[prompt].key, binding);
+                assert_eq!(
+                    entries[prompt].action,
+                    CommandAction::Dispatch(parse_key(binding).unwrap())
+                );
+                assert_eq!(
+                    entries[prompt - 1].description,
+                    "Search files, loaded commits, or diff content"
+                );
+            }
         }
     }
 

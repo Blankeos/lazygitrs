@@ -21,6 +21,7 @@ use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{Command, cursor, execute};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 
 use crate::config::keybindings::parse_key;
 use crate::config::{AppConfig, AppState};
@@ -586,6 +587,7 @@ pub struct Gui {
     pub context_mgr: ContextManager,
     pub layout: LayoutState,
     pub popup: PopupState,
+    shell_command_job: Option<controller::custom_commands::RunningCommand>,
     pub diff_view: DiffViewState,
     /// Cached graph layouts used to render only the visible commit rows.
     commit_list_cache: presentation::commits::CommitListCache,
@@ -1072,6 +1074,7 @@ impl Gui {
             context_mgr,
             layout: LayoutState::default(),
             popup: PopupState::None,
+            shell_command_job: None,
             diff_view: {
                 let mut dv = DiffViewState::new();
                 dv.wrap = diff_line_wrap;
@@ -1193,6 +1196,7 @@ impl Gui {
         let mut keyboard_enhanced = keyboard_enhanced;
         let result = self.main_loop(&mut terminal, &input, &mut keyboard_enhanced);
 
+        self.shell_command_job.take(); // Drop cancels and reaps before leaving the TUI.
         self.diff_preview_cache.clear();
         self.diff_view.reset_keep_prefs();
         self.displayed_diff_key.clear();
@@ -1440,6 +1444,7 @@ impl Gui {
             self.maybe_start_auto_fetch();
 
             // Check for completed background menu item operations
+            controller::custom_commands::receive_command_result(self);
             self.receive_menu_async_results();
 
             // Advance spinner animation
@@ -1713,7 +1718,8 @@ impl Gui {
     }
 
     fn input_wait_timeout(&self) -> Duration {
-        if self.ai_commit_generation_active()
+        if self.shell_command_job.is_some()
+            || self.ai_commit_generation_active()
             || self.remote_op_label.is_some()
             || self.needs_refresh
             || self.diff_loading
@@ -3575,6 +3581,14 @@ impl Gui {
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         self.pending_startup_head = false;
+        if self.shell_command_job.is_some() {
+            if key.code == KeyCode::Esc
+                || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+            {
+                controller::custom_commands::cancel_running_command(self);
+            }
+            return Ok(());
+        }
         if self.handle_ai_commit_cancel_key(key) {
             return Ok(());
         }
@@ -3597,6 +3611,14 @@ impl Gui {
         // to character-only application shortcuts if the terminal forwards
         // their enhanced-keyboard events.
         if has_command_modifier(key.modifiers) {
+            return Ok(());
+        }
+
+        // Text entry owns its characters, even when the prompt binding is remapped.
+        if !self.diff_mode.active
+            && !(self.diff_focused && self.diff_view.search_active)
+            && controller::custom_commands::try_handle_prompt_key(self, key)?
+        {
             return Ok(());
         }
 
@@ -4398,6 +4420,13 @@ impl Gui {
     }
 
     fn handle_paste(&mut self, data: String) {
+        if self.shell_command_job.is_some() {
+            return;
+        }
+        if let PopupState::ShellCommand { textarea } = &mut self.popup {
+            textarea.insert_str(&data.replace("\r\n", "\n").replace('\r', "\n"));
+            return;
+        }
         if data.is_empty() {
             return;
         }
@@ -4561,6 +4590,47 @@ impl Gui {
                     }
                 } else {
                     self.popup = PopupState::None;
+                }
+            }
+            PopupState::ShellCommand { textarea } => {
+                if key.code == KeyCode::Esc {
+                    self.popup = PopupState::None;
+                } else if key.code == KeyCode::Enter {
+                    let command = textarea.lines().join("\n");
+                    self.popup = PopupState::None;
+                    controller::custom_commands::confirm_shell_prompt(self, &command)?;
+                } else if let PopupState::ShellCommand { textarea } = &mut self.popup {
+                    textarea_input(textarea, key);
+                }
+            }
+            PopupState::CommandOutput { .. } => {
+                if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
+                    self.popup = PopupState::None;
+                } else if let PopupState::CommandOutput {
+                    message, scroll, ..
+                } = &mut self.popup
+                {
+                    let max = views::command_output_max_scroll(
+                        message,
+                        Rect::new(0, 0, self.layout.width, self.layout.height),
+                    );
+                    let page = (usize::from(self.layout.height) * 4 / 5)
+                        .saturating_sub(3)
+                        .max(1);
+                    match key.code {
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            *scroll = scroll.saturating_add(1).min(max)
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => *scroll = scroll.saturating_sub(1),
+                        KeyCode::PageDown => *scroll = scroll.saturating_add(page).min(max),
+                        KeyCode::PageUp => *scroll = scroll.saturating_sub(page),
+                        KeyCode::Home | KeyCode::Char('g') => *scroll = 0,
+                        KeyCode::End | KeyCode::Char('G') => *scroll = max,
+                        KeyCode::Char('y') => {
+                            let _ = Platform::copy_to_clipboard(message);
+                        }
+                        _ => {}
+                    }
                 }
             }
             PopupState::Message { .. } => {
@@ -5822,7 +5892,7 @@ impl Gui {
         let active = self.context_mgr.active();
 
         // Universal keybindings
-        let universal = CommandSection {
+        let mut universal = CommandSection {
             title: "Universal".into(),
             entries: vec![
                 CommandEntry::keybinding(kb.universal.quit.clone(), "Quit".into()),
@@ -5899,6 +5969,13 @@ impl Gui {
                 ),
             ],
         };
+
+        if !kb.universal.custom_command_prompt.is_empty() {
+            universal.entries.push(CommandEntry::keybinding(
+                kb.universal.custom_command_prompt.clone(),
+                "Execute shell command".into(),
+            ));
+        }
 
         // Context-specific keybindings
         let context_section = match active {
@@ -6973,6 +7050,9 @@ impl Gui {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.shell_command_job.is_some() {
+            return;
+        }
         use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
         if !self.config.user_config.gui.mouse_events {
@@ -9416,6 +9496,215 @@ mod terminal_mouse_tests {
             keys.insert(result.diff_key);
         }
         assert_eq!(keys.len(), 8);
+    }
+
+    fn wait_for_shell_command(gui: &mut Gui) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while gui.shell_command_job.is_some() {
+            controller::custom_commands::receive_command_result(gui);
+            assert!(Instant::now() < deadline, "shell job did not finish");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn start_test_custom_command(gui: &mut Gui, command: &str, show_output: bool) {
+        let config = Arc::get_mut(&mut gui.config).unwrap();
+        config.user_config.custom_commands = vec![crate::config::user_config::CustomCommand {
+            key: "<c-x>".into(),
+            command: command.into(),
+            show_output,
+            ..Default::default()
+        }];
+        gui.handle_key(parse_key("<c-x>").unwrap()).unwrap();
+    }
+
+    #[test]
+    fn shell_prompt_binding_works_in_lists_and_diff_focus_and_respects_remapping() {
+        let repo = TempRepo::new("shell-prompt-bindings");
+        let mut gui = tree_test_gui(&repo);
+        for context in [
+            ContextId::Files,
+            ContextId::Commits,
+            ContextId::CommitFiles,
+            ContextId::StashFiles,
+            ContextId::Branches,
+        ] {
+            gui.context_mgr.set_active(context);
+            for focused in [false, true] {
+                gui.diff_focused = focused;
+                for binding in [":", "q", "?", "<c-x>", "<tab>"] {
+                    Arc::get_mut(&mut gui.config)
+                        .unwrap()
+                        .user_config
+                        .keybinding
+                        .universal
+                        .custom_command_prompt = binding.into();
+                    gui.handle_key(parse_key(binding).unwrap()).unwrap();
+                    assert!(
+                        matches!(gui.popup, PopupState::ShellCommand { .. }),
+                        "{context:?}, {focused}, {binding}"
+                    );
+                    assert!(!gui.should_quit);
+                    gui.handle_key(parse_key("<esc>").unwrap()).unwrap();
+                }
+            }
+        }
+        Arc::get_mut(&mut gui.config)
+            .unwrap()
+            .user_config
+            .keybinding
+            .universal
+            .custom_command_prompt
+            .clear();
+        gui.diff_focused = false;
+        gui.context_mgr.set_active(ContextId::Files);
+        gui.handle_key(parse_key(":").unwrap()).unwrap();
+        assert!(gui.popup == PopupState::None);
+        gui.show_command_palette();
+        let PopupState::CommandPalette { sections, .. } = &gui.popup else {
+            panic!("palette");
+        };
+        assert!(
+            !sections
+                .iter()
+                .flat_map(|s| &s.entries)
+                .any(|e| e.description == "Execute shell command")
+        );
+    }
+
+    #[test]
+    fn shell_prompt_does_not_steal_search_or_popup_input() {
+        let repo = TempRepo::new("shell-text-priority");
+        let mut gui = tree_test_gui(&repo);
+        gui.search_active = true;
+        gui.search_textarea = Some(popup::make_textarea(""));
+        gui.handle_key(parse_key(":").unwrap()).unwrap();
+        assert!(gui.popup == PopupState::None);
+        assert_eq!(gui.search_query, ":");
+        gui.search_active = false;
+        gui.diff_focused = true;
+        gui.diff_view.search_active = true;
+        gui.handle_key(parse_key(":").unwrap()).unwrap();
+        assert!(gui.popup == PopupState::None);
+        gui.diff_view.search_active = false;
+        gui.popup = PopupState::Input {
+            title: "Other input".into(),
+            textarea: popup::make_textarea(""),
+            on_confirm: Box::new(|_, _| Ok(())),
+            is_commit: false,
+            confirm_focused: false,
+        };
+        gui.handle_key(parse_key(":").unwrap()).unwrap();
+        assert!(
+            matches!(&gui.popup, PopupState::Input { textarea, .. } if textarea.lines().join("") == ":")
+        );
+    }
+
+    #[test]
+    fn shell_prompt_keeps_literal_paste_through_resize_and_blank_submit_is_noop() {
+        let repo = TempRepo::new("shell-literal-input");
+        let mut gui = tree_test_gui(&repo);
+        gui.handle_key(parse_key(":").unwrap()).unwrap();
+        let command = "printf '%s' 'multiple   spaces; $quoted'\n# pasted newline";
+        gui.handle_paste(command.into());
+        gui.handle_resize(25, 8);
+        assert!(
+            matches!(&gui.popup, PopupState::ShellCommand { textarea } if textarea.lines().join("\n") == command)
+        );
+        gui.handle_key(parse_key("<esc>").unwrap()).unwrap();
+        assert!(gui.shell_command_job.is_none());
+        gui.handle_key(parse_key(":").unwrap()).unwrap();
+        gui.handle_paste("  ".into());
+        gui.handle_key(parse_key("<enter>").unwrap()).unwrap();
+        assert!(gui.popup == PopupState::None);
+        assert!(gui.shell_command_job.is_none());
+    }
+
+    #[test]
+    fn custom_command_is_nonblocking_cancelable_and_refreshes_after_cancellation() {
+        let repo = TempRepo::new("shell-cancellation");
+        let mut gui = tree_test_gui(&repo);
+        let started = Instant::now();
+        start_test_custom_command(&mut gui, "sleep 30", true);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(gui.shell_command_job.is_some());
+        assert_eq!(gui.input_wait_timeout(), Duration::from_millis(16));
+        gui.handle_key(parse_key("q").unwrap()).unwrap();
+        assert!(!gui.should_quit);
+        gui.handle_key(parse_key("<esc>").unwrap()).unwrap();
+        wait_for_shell_command(&mut gui);
+        assert!(gui.needs_refresh);
+        assert!(gui.needs_diff_refresh);
+        assert!(
+            matches!(&gui.popup, PopupState::CommandOutput { title, kind: MessageKind::Error, .. } if title == "Command cancelled")
+        );
+    }
+
+    #[test]
+    fn custom_command_logs_and_reports_failure_stdout_and_stderr_without_losing_filters() {
+        let repo = TempRepo::new("shell-output");
+        let mut gui = tree_test_gui(&repo);
+        gui.commit_path_filter = Some("src".into());
+        gui.commit_author_filter = vec!["Example".into()];
+        gui.screen_mode = ScreenMode::Half;
+        start_test_custom_command(
+            &mut gui,
+            "printf partial; printf warning >&2; exit 7",
+            false,
+        );
+        wait_for_shell_command(&mut gui);
+        assert!(
+            matches!(&gui.popup, PopupState::CommandOutput { title, message, kind: MessageKind::Error, .. }
+            if title.contains("exit 7") && message.contains("partial") && message.contains("warning"))
+        );
+        let log = gui.command_log.lock().unwrap();
+        assert!(log.iter().any(|line| line.contains("$ printf partial")));
+        assert!(
+            log.iter()
+                .any(|line| line.contains("Command failed (exit 7)"))
+        );
+        drop(log);
+        assert_eq!(gui.commit_path_filter.as_deref(), Some("src"));
+        assert_eq!(gui.commit_author_filter, vec!["Example"]);
+        assert_eq!(gui.screen_mode, ScreenMode::Half);
+        gui.handle_key(parse_key("<esc>").unwrap()).unwrap();
+        start_test_custom_command(&mut gui, "printf changed > created-by-command", false);
+        wait_for_shell_command(&mut gui);
+        assert!(gui.popup == PopupState::None);
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("created-by-command")).unwrap(),
+            "changed"
+        );
+        assert!(gui.needs_refresh);
+    }
+
+    #[test]
+    fn command_output_can_scroll_to_last_line_and_back() {
+        let repo = TempRepo::new("shell-scroll");
+        let mut gui = tree_test_gui(&repo);
+        gui.layout.update_size(80, 24);
+        let message = (0..100).map(|i| format!("line {i}\n")).collect::<String>();
+        gui.popup = PopupState::CommandOutput {
+            title: "output".into(),
+            message: message.clone(),
+            kind: MessageKind::Info,
+            scroll: 0,
+        };
+        gui.handle_key(parse_key("G").unwrap()).unwrap();
+        let max = views::command_output_max_scroll(&message, Rect::new(0, 0, 80, 24));
+        assert!(matches!(gui.popup, PopupState::CommandOutput { scroll, .. } if scroll == max));
+        gui.handle_key(parse_key("g").unwrap()).unwrap();
+        assert!(matches!(
+            gui.popup,
+            PopupState::CommandOutput { scroll: 0, .. }
+        ));
+        gui.handle_key(parse_key("j").unwrap()).unwrap();
+        assert!(matches!(
+            gui.popup,
+            PopupState::CommandOutput { scroll: 1, .. }
+        ));
+        gui.handle_key(parse_key("<enter>").unwrap()).unwrap();
+        assert!(gui.popup == PopupState::None);
     }
 
     struct TempRepo {
