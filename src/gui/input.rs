@@ -20,6 +20,8 @@
 //! sequence is dropped rather than replayed byte by byte. It is also lossless
 //! for real keys — anything that cannot appear inside the sequence being parsed
 //! is handed back as the keypress it is.
+//! An Alt+underscore is ambiguous with an APC introducer, so its lookahead is
+//! lossless: only a complete, validated Kitty reply is suppressed.
 
 use std::io;
 use std::sync::Arc;
@@ -51,6 +53,9 @@ const SEQUENCE_DEADLINE: Duration = Duration::from_millis(400);
 
 /// Guard against a pathological run of parameter bytes.
 const MAX_SEQUENCE_BYTES: usize = 64;
+
+/// Bound speculative Kitty reply buffering, including printable error text.
+const MAX_KITTY_REPLY_BYTES: usize = 1024;
 
 /// Most events handed to the UI in one batch. Keeps a paste storm or a very long
 /// auto-repeat burst from starving the renderer.
@@ -175,9 +180,7 @@ fn next_events_interruptible(
 
 /// Blocking read of the next logical event(s).
 fn next_events(source: &mut impl EventSource) -> io::Result<Vec<Event>> {
-    // A bare `Esc` is the only event that can be the head of a sequence that
-    // crossterm failed to keep together, so everything else passes straight
-    // through.
+    // Both entry points share reassembly and lossless Kitty reply recognition.
     let first = loop {
         if let Some(event) = source.next(Duration::from_secs(3600))? {
             break event;
@@ -191,14 +194,13 @@ fn resolve_first_event(source: &mut impl EventSource, first: Event) -> io::Resul
         return Ok(vec![first]);
     };
     // Crossterm parses an intact ESC _ (APC) as Alt+_, not as a control
-    // string. Without this guard, a Kitty reply's G opens Reset and its
-    // remaining `i=31;OK` payload gets typed into the dialog.
+    // string. Validate the reply rather than swallowing genuine Alt shortcuts
+    // and whatever input follows them.
     if key.kind == KeyEventKind::Press
         && key.modifiers == KeyModifiers::ALT
-        && matches!(key.code, KeyCode::Char(']' | 'P' | '^' | '_'))
+        && key.code == KeyCode::Char('_')
     {
-        consume_control_string(source, Instant::now() + SEQUENCE_DEADLINE)?;
-        return Ok(Vec::new());
+        return resolve_kitty_reply(source, key);
     }
     if key.code != KeyCode::Esc || key.kind != KeyEventKind::Press {
         return Ok(vec![Event::Key(key)]);
@@ -227,9 +229,14 @@ fn resolve_escape(source: &mut impl EventSource) -> io::Result<Vec<Event>> {
     match introducer {
         '[' => read_csi(source, deadline),
         'O' => read_ss3(source, deadline),
-        // OSC/DCS/PM/APC carry a string payload that is never a shortcut. Read
-        // to its terminator and emit nothing.
-        ']' | 'P' | '^' | '_' => {
+        // A split APC and a genuine Alt+underscore use the same recognizer as
+        // the already-parsed Alt event. Do not infer a reply from '_' alone.
+        '_' => {
+            key.modifiers |= KeyModifiers::ALT;
+            resolve_kitty_reply(source, key)
+        }
+        // Existing OSC/DCS/PM reassembly remains unchanged.
+        ']' | 'P' | '^' => {
             consume_control_string(source, deadline)?;
             Ok(Vec::new())
         }
@@ -240,6 +247,94 @@ fn resolve_escape(source: &mut impl EventSource) -> io::Result<Vec<Event>> {
             Ok(vec![Event::Key(key)])
         }
     }
+}
+
+/// Keep all speculative events until a complete Kitty reply is confirmed.
+/// No caller needs to track terminal query state or manage a replay queue.
+fn resolve_kitty_reply(
+    source: &mut impl EventSource,
+    introducer: KeyEvent,
+) -> io::Result<Vec<Event>> {
+    let mut events = vec![Event::Key(introducer)];
+    let mut payload = String::new();
+    let mut saw_esc = false;
+    let deadline = Instant::now() + SEQUENCE_DEADLINE;
+    loop {
+        let budget = if events.len() == 1 {
+            INTRODUCER_PROBE
+        } else {
+            CONTINUATION_WINDOW
+        };
+        let Some(event) =
+            source.next(budget.min(deadline.saturating_duration_since(Instant::now())))?
+        else {
+            return Ok(events);
+        };
+        events.push(event.clone());
+        let Event::Key(key) = event else {
+            return Ok(events);
+        };
+        if key.kind != KeyEventKind::Press {
+            return Ok(events);
+        }
+        if key.code == KeyCode::Char('\\') && (saw_esc || key.modifiers == KeyModifiers::ALT) {
+            return Ok(if is_kitty_reply(&payload) {
+                Vec::new()
+            } else {
+                events
+            });
+        }
+        if saw_esc || key.modifiers != KeyModifiers::NONE {
+            return Ok(events);
+        }
+        if key.code == KeyCode::Esc {
+            saw_esc = true;
+            continue;
+        }
+        let KeyCode::Char(ch @ ' '..='~') = key.code else {
+            return Ok(events);
+        };
+        payload.push(ch);
+        // Fail fast before waiting for a terminator on ordinary typed text.
+        let valid_prefix = match payload.len() {
+            1 => payload == "G",
+            2 => matches!(payload.as_str(), "Gi" | "GI"),
+            3 => matches!(payload.as_str(), "Gi=" | "GI="),
+            _ => true,
+        };
+        if !valid_prefix || payload.len() >= MAX_KITTY_REPLY_BYTES {
+            return Ok(events);
+        }
+    }
+}
+
+/// Kitty acknowledges image identities with optional placement identities and
+/// an ASCII status. Only this reply shape, not arbitrary APC text, is filtered.
+fn is_kitty_reply(payload: &str) -> bool {
+    let Some((fields, status)) = payload.strip_prefix('G').and_then(|s| s.split_once(';')) else {
+        return false;
+    };
+    if status.is_empty() || !status.bytes().all(|b| matches!(b, b' '..=b'~')) {
+        return false;
+    }
+    let mut has_image_id = false;
+    for field in fields.split(',') {
+        let Some((key, value)) = field.split_once('=') else {
+            return false;
+        };
+        if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        let Ok(value) = value.parse::<u32>() else {
+            return false;
+        };
+        match key {
+            "i" | "I" if value != 0 => has_image_id = true,
+            "p" => {}
+            _ => return false,
+        }
+    }
+    has_image_id
 }
 
 /// Read the body of a `CSI` sequence and turn it into the event it encodes.
@@ -658,5 +753,173 @@ mod tests {
             next_events(&mut Scripted::new(vec![Some(event.clone())])).unwrap(),
             vec![event]
         );
+    }
+
+    fn read_scripted(source: &mut Scripted, interruptible: bool) -> Vec<Event> {
+        if interruptible {
+            next_events_interruptible(source, &AtomicBool::new(false))
+                .unwrap()
+                .unwrap()
+        } else {
+            next_events(source).unwrap()
+        }
+    }
+
+    #[test]
+    fn genuine_alt_control_introducers_and_following_input_are_preserved() {
+        for interruptible in [false, true] {
+            for c in [']', 'P', '^', '_'] {
+                let alt = Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT));
+                let next = key(KeyCode::Char('q'));
+                let mut source = Scripted::new(vec![Some(alt.clone()), Some(next.clone())]);
+                let mut received = read_scripted(&mut source, interruptible);
+                if !source.0.is_empty() {
+                    received.extend(read_scripted(&mut source, interruptible));
+                }
+                assert_eq!(received, vec![alt.clone(), next]);
+
+                let mut source = Scripted::new(vec![Some(alt.clone()), None]);
+                assert_eq!(read_scripted(&mut source, interruptible), vec![alt]);
+            }
+        }
+    }
+
+    #[test]
+    fn split_apc_introducer_preserves_genuine_alt_underscore() {
+        let mut source = Scripted::new(vec![Some(key(KeyCode::Esc)), ch('_'), ch('q')]);
+        assert_eq!(
+            next_events(&mut source).unwrap(),
+            vec![
+                Event::Key(KeyEvent::new(KeyCode::Char('_'), KeyModifiers::ALT)),
+                key(KeyCode::Char('q')),
+            ]
+        );
+    }
+
+    #[test]
+    fn unconfirmed_kitty_reply_replays_every_event() {
+        let alt = Event::Key(KeyEvent::new(KeyCode::Char('_'), KeyModifiers::ALT));
+        let terminator = Event::Key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::ALT));
+        for interruptible in [false, true] {
+            for payload in ["G", "Gi=", "Gi=31;OK", "Gi=x;OK", "Gi=31;"] {
+                let mut items = vec![Some(alt.clone())];
+                items.extend(payload.chars().map(ch));
+                if matches!(payload, "Gi=x;OK" | "Gi=31;") {
+                    items.push(Some(terminator.clone()));
+                } else {
+                    items.push(None);
+                }
+                let expected: Vec<_> = items.iter().flatten().cloned().collect();
+                let mut source = Scripted::new(items);
+                let mut received = read_scripted(&mut source, interruptible);
+                while source.0.iter().any(Option::is_some) {
+                    received.extend(read_scripted(&mut source, interruptible));
+                }
+                assert_eq!(received, expected, "payload: {payload}");
+            }
+        }
+    }
+
+    #[test]
+    fn kitty_probe_preserves_non_payload_events() {
+        let alt = Event::Key(KeyEvent::new(KeyCode::Char('_'), KeyModifiers::ALT));
+        for next in [
+            Event::FocusGained,
+            Event::Resize(80, 24),
+            Event::Paste("paste".into()),
+            key(KeyCode::Enter),
+        ] {
+            let mut items = vec![Some(alt.clone())];
+            items.extend("Gi=31;".chars().map(ch));
+            items.push(Some(next));
+            let expected: Vec<_> = items.iter().flatten().cloned().collect();
+            assert_eq!(next_events(&mut Scripted::new(items)).unwrap(), expected);
+        }
+    }
+    #[test]
+    fn kitty_success_and_error_replies_accept_both_terminator_encodings() {
+        for interruptible in [false, true] {
+            for split_terminator in [false, true] {
+                for payload in [
+                    "Gi=31;OK",
+                    "Gi=4294967295,p=2;ENOENT: image not found",
+                    "GI=42,i=99;OK",
+                ] {
+                    let mut items = vec![Some(Event::Key(KeyEvent::new(
+                        KeyCode::Char('_'),
+                        KeyModifiers::ALT,
+                    )))];
+                    items.extend(payload.chars().map(ch));
+                    if split_terminator {
+                        items.extend([Some(key(KeyCode::Esc)), ch('\\')]);
+                    } else {
+                        items.push(Some(Event::Key(KeyEvent::new(
+                            KeyCode::Char('\\'),
+                            KeyModifiers::ALT,
+                        ))));
+                    }
+                    items.push(ch('q'));
+                    let mut source = Scripted::new(items);
+                    assert!(read_scripted(&mut source, interruptible).is_empty());
+                    assert_eq!(
+                        read_scripted(&mut source, interruptible),
+                        vec![key(KeyCode::Char('q'))]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn kitty_reply_validation_rejects_non_reply_metadata() {
+        for payload in [
+            "G;OK",
+            "Gi=0;OK",
+            "Gi=4294967296;OK",
+            "Gi=-1;OK",
+            "Gi=1,p=x;OK",
+            "Gp=1;OK",
+            "Gi=1,a=t;OK",
+            "Gi=1;",
+            "Gi=1;OK\n",
+        ] {
+            assert!(!is_kitty_reply(payload), "{payload:?}");
+        }
+    }
+
+    #[test]
+    fn oversized_kitty_candidate_is_bounded_and_replayed() {
+        let mut items = vec![Some(Event::Key(KeyEvent::new(
+            KeyCode::Char('_'),
+            KeyModifiers::ALT,
+        )))];
+        let payload = format!("Gi=31;{}", "x".repeat(MAX_KITTY_REPLY_BYTES));
+        items.extend(payload.chars().map(ch));
+        let expected: Vec<_> = items.iter().flatten().cloned().collect();
+        let mut source = Scripted::new(items);
+        let mut received = next_events(&mut source).unwrap();
+        assert_eq!(received.len(), MAX_KITTY_REPLY_BYTES + 1);
+        while !source.0.is_empty() {
+            received.extend(next_events(&mut source).unwrap());
+        }
+        assert_eq!(received, expected);
+    }
+
+    #[test]
+    fn alt_underscore_uses_only_the_short_initial_probe() {
+        struct TimedSource(Vec<Duration>);
+        impl EventSource for TimedSource {
+            fn next(&mut self, timeout: Duration) -> io::Result<Option<Event>> {
+                self.0.push(timeout);
+                Ok(None)
+            }
+        }
+        let alt = KeyEvent::new(KeyCode::Char('_'), KeyModifiers::ALT);
+        let mut source = TimedSource(Vec::new());
+        assert_eq!(
+            resolve_first_event(&mut source, Event::Key(alt)).unwrap(),
+            vec![Event::Key(alt)]
+        );
+        assert_eq!(source.0, vec![INTRODUCER_PROBE]);
     }
 }
