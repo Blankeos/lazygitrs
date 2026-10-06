@@ -65,6 +65,13 @@ pub const DEFAULT_COMMIT_LIMIT: usize = 300;
 /// Total number of `ModelPart` variants that `load_model_streaming` sends.
 pub const MODEL_PART_COUNT: usize = 14;
 
+/// Confirmed HEAD identity, read after a successful checkout.
+pub struct HeadState {
+    pub hash: String,
+    /// Empty when HEAD is detached.
+    pub branch_name: String,
+}
+
 struct RepoPaths {
     worktree_path: PathBuf,
     repo_path: PathBuf,
@@ -339,6 +346,32 @@ impl GitCommands {
         Ok(result.stdout_trimmed().to_string())
     }
 
+    /// Read the full HEAD hash and symbolic ref with one Git subprocess.
+    pub fn head_state(&self) -> Result<HeadState> {
+        let result = self
+            .git()
+            .args(&["rev-parse", "HEAD", "--symbolic-full-name", "HEAD"])
+            .run_expecting_success()?;
+        let mut lines = result.stdout.lines();
+        let hash = lines
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("Git did not return a HEAD hash"))?;
+        let reference = lines
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("Git did not return a HEAD ref"))?;
+        let branch_name = if reference == "HEAD" {
+            ""
+        } else {
+            reference
+                .strip_prefix("refs/heads/")
+                .ok_or_else(|| anyhow::anyhow!("Unexpected HEAD ref: {reference}"))?
+        };
+        Ok(HeadState {
+            hash: hash.to_string(),
+            branch_name: branch_name.to_string(),
+        })
+    }
+
     /// Resolve a revision to a verified commit, peeling annotated tags.
     /// Unlike `resolve_ref`, this rejects trees and option-like input.
     fn resolve_commit_ref(&self, reference: &str) -> Result<String> {
@@ -482,6 +515,33 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn head_state_reads_branch_names_and_detached_annotated_tags() {
+        let temp = TempDir::new("head-state");
+        let run = |args: &[&str]| run_test_git(temp.path(), args);
+        run(&["init", "-b", "main"]);
+        run(&["commit", "--allow-empty", "-m", "root"]);
+        let hash = run(&["rev-parse", "HEAD"]);
+        run(&["checkout", "-b", "feature/nested-name"]);
+        let git = GitCommands::new(temp.path()).unwrap();
+        let head = git.head_state().unwrap();
+        assert_eq!(head.hash, hash);
+        assert_eq!(head.branch_name, "feature/nested-name");
+        run(&["tag", "-a", "release", "-m", "release"]);
+        run(&["checkout", "release"]);
+        let head = git.head_state().unwrap();
+        assert_eq!(head.hash, hash);
+        assert!(head.branch_name.is_empty());
+    }
+
+    #[test]
+    fn head_state_rejects_unborn_head() {
+        let temp = TempDir::new("unborn-head-state");
+        run_test_git(temp.path(), &["init", "-b", "main"]);
+        let git = GitCommands::new(temp.path()).unwrap();
+        assert!(git.head_state().is_err());
     }
 
     #[test]
