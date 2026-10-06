@@ -848,7 +848,7 @@ pub fn reload_diff_files(gui: &mut Gui) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn update_diff_mode_tree(gui: &mut Gui) {
+pub(in crate::gui) fn update_diff_mode_tree(gui: &mut Gui) {
     if gui.diff_mode.show_tree {
         gui.diff_mode.tree_nodes = crate::model::file_tree::build_commit_file_tree(
             &gui.diff_mode.diff_files,

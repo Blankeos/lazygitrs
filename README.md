@@ -97,12 +97,12 @@ minutes. Output includes the exit status, stdout, and stderr, with a 1 MiB captu
 cap per stream (excess output is truncated). Background children are terminated
 when the job ends, including on completion, cancellation, or timeout; this is
 not a way to launch persistent background services. Processes that explicitly
-create their own session can escape process-group cleanup; this prompt is not a
+create their own process group or session can escape cleanup; this prompt is not a
 sandbox. The process runner currently requires Unix (macOS/Linux).
 
 Input preserves pasted newlines and quoted spacing; `Enter` executes the whole
 command and `Esc` dismisses without running it. Scroll command results with
-`j`/`k`, arrow keys, `PgUp`/`PgDn`, or `g`/`G`; `y` copies the result and
+`j`/`k`, arrow keys, the mouse wheel, `PgUp`/`PgDn`, or `g`/`G`; `y` copies the result and
 `Esc`/`Enter` closes it. The command log retains a bounded output preview.
 
 Configured `customCommands` still use `sh -c` rather than the prompt's `$SHELL`

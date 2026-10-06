@@ -1562,14 +1562,8 @@ mod tests {
                         assert!(text.contains(&format!("{hint} shell")), "{text}");
                     }
                     assert_eq!(text.contains(": shell"), binding == ":", "{text}");
-                    if ctx != ContextId::StashFiles {
-                        let toggle = if ctx == ContextId::Files {
-                            "head"
-                        } else {
-                            "files"
-                        };
-                        assert!(text.contains(&format!("ctrl+g {toggle}")), "{text}");
-                    }
+                    assert!(!text.contains("ctrl+g head"), "{text}");
+                    assert!(!text.contains("ctrl+g files"), "{text}");
                 }
             }
         }
