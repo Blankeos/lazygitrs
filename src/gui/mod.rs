@@ -24,7 +24,7 @@ use ratatui::backend::CrosstermBackend;
 
 use crate::config::keybindings::parse_key;
 use crate::config::{AppConfig, AppState};
-use crate::git::{DEFAULT_COMMIT_LIMIT, GitCommands, MODEL_PART_COUNT, ModelPart};
+use crate::git::{DEFAULT_COMMIT_LIMIT, GitCommands, HeadState, MODEL_PART_COUNT, ModelPart};
 use crate::model::Model;
 use crate::model::file_tree::{CommitFileTreeNode, FileTreeNode, build_file_tree};
 use crate::os::platform::Platform;
@@ -662,9 +662,9 @@ pub struct Gui {
     /// Diff source for the next AI commit message generation.
     ai_commit_source: AiCommitSource,
     /// Receiver for background remote operations (push, pull, fetch).
-    remote_op_rx: mpsc::Receiver<Result<()>>,
+    remote_op_rx: mpsc::Receiver<Result<Option<HeadState>>>,
     /// Sender cloned into background threads for remote operations.
-    remote_op_tx: mpsc::Sender<Result<()>>,
+    remote_op_tx: mpsc::Sender<Result<Option<HeadState>>>,
     /// Async light files refresh (status-only) so Space-spam doesn't freeze.
     files_refresh_rx: Option<mpsc::Receiver<Result<Vec<crate::model::File>>>>,
     files_refresh_in_progress: bool,
@@ -1668,19 +1668,7 @@ impl Gui {
             // One batch per frame. Reassembly lives on the reader thread so a
             // split ESC [ A cannot leak as Char('A') → amend between frames.
             // Keep the frame budget tight while anything animated/async is up.
-            let timeout = if self.ai_commit_generation_active()
-                || self.remote_op_label.is_some()
-                || self.diff_loading
-                || self.initial_load_rx.is_some()
-                || self.refresh_in_progress
-            {
-                Duration::from_millis(16)
-            } else if self.config.user_config.git.auto_refresh {
-                Duration::from_millis(50)
-            } else {
-                Duration::from_millis(200)
-            };
-            let events = input.wait_batch(timeout);
+            let events = input.wait_batch(self.input_wait_timeout());
             self.handle_event_batch(events);
 
             // Terminal editors: leave alt screen, run hx/nvim, restore TUI.
@@ -1722,6 +1710,22 @@ impl Gui {
         }
 
         Ok(())
+    }
+
+    fn input_wait_timeout(&self) -> Duration {
+        if self.ai_commit_generation_active()
+            || self.remote_op_label.is_some()
+            || self.needs_refresh
+            || self.diff_loading
+            || self.initial_load_rx.is_some()
+            || self.refresh_in_progress
+        {
+            Duration::from_millis(16)
+        } else if self.config.user_config.git.auto_refresh {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(200)
+        }
     }
 
     /// Apply one batch of terminal events before the next paint.
@@ -2559,10 +2563,31 @@ impl Gui {
         if let Ok(result) = self.remote_op_rx.try_recv() {
             self.remote_op_label = None;
             match result {
-                Ok(()) => {
-                    self.pending_checkout_by_name = None;
+                Ok(head) => {
+                    let was_checkout = self.pending_checkout_by_name.take().is_some();
+                    if let Some(head) = head {
+                        let mut model = self.model.lock().unwrap();
+                        for branch in &mut model.branches {
+                            branch.head = branch.name == head.branch_name;
+                        }
+                        model.head_hash = head.hash;
+                        model.head_branch_name = head.branch_name;
+                        self.needs_diff_refresh = true;
+                    }
                     self.needs_refresh = true;
                     self.remote_op_success_at = Some(Instant::now());
+                    if was_checkout {
+                        // A pre-checkout stream must not overwrite confirmed HEAD
+                        // or files. Its workers can finish, but drop their results.
+                        self.initial_load_rx = None;
+                        self.refresh_in_progress = false;
+                        self.files_refresh_rx = None;
+                        self.files_refresh_in_progress = false;
+                        self.needs_files_refresh = false;
+                        // Dispatch before the next paint/input wait, not after an
+                        // idle 50/200ms poll. HEAD is already visible above.
+                        self.start_background_refresh();
+                    }
                 }
                 Err(e) => {
                     let err = format!("{}", e);
@@ -2839,8 +2864,17 @@ impl Gui {
         self.remote_op_success_at = None;
         let git = Arc::clone(&self.git);
         let tx = self.remote_op_tx.clone();
+        let is_checkout = self.pending_checkout_by_name.is_some();
         std::thread::spawn(move || {
-            let result = op(&git);
+            let result = op(&git).map(|()| {
+                if is_checkout {
+                    // Read on the worker, never on the UI thread. If this read
+                    // fails, checkout still succeeded; the refresh is the fallback.
+                    git.head_state().ok()
+                } else {
+                    None
+                }
+            });
             let _ = tx.send(result);
         });
     }
@@ -9437,6 +9471,338 @@ mod terminal_mouse_tests {
     impl Drop for TempRepo {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn checkout_test_gui(repo: &TempRepo) -> Gui {
+        repo.commit("file", "main contents");
+        repo.git(&["checkout", "-b", "feature"]);
+        repo.commit("file", "feature contents");
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+        // Finish startup loading before exercising checkout and its refresh.
+        for _ in gui.initial_load_rx.take().unwrap() {}
+        *gui.model.lock().unwrap() = gui.git.load_model().unwrap();
+        gui.context_mgr.set_active(ContextId::Branches);
+        gui
+    }
+
+    fn request_test_checkout(gui: &mut Gui, key: char, target: &str) {
+        let selected = gui
+            .model
+            .lock()
+            .unwrap()
+            .branches
+            .iter()
+            .position(|b| b.name == target)
+            .unwrap_or(0);
+        gui.context_mgr.set_selection(selected);
+        gui.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE))
+            .unwrap();
+        if key == 'c' {
+            let PopupState::RefPicker { core, .. } = &mut gui.popup else {
+                panic!("expected checkout ref picker");
+            };
+            core.search_textarea = popup::make_command_palette_search_textarea();
+            core.search_textarea.insert_str(target);
+            core.selected = core
+                .items
+                .iter()
+                .position(|i| i.value == target)
+                .unwrap_or(core.items.len());
+            gui.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .unwrap();
+        }
+    }
+
+    fn wait_for_test_checkout(gui: &mut Gui) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while gui.remote_op_label.is_some() {
+            assert!(Instant::now() < deadline, "checkout did not finish");
+            gui.receive_remote_op_results();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    #[ignore = "manual checkout visibility benchmark; timing is machine-dependent"]
+    fn checkout_visibility_latency() {
+        for auto_refresh in [true, false] {
+            let repo = TempRepo::new("checkout-latency");
+            let mut gui = checkout_test_gui(&repo);
+            let mut config = crate::config::AppConfig::default();
+            config.user_config.git.auto_refresh = auto_refresh;
+            gui.config = Arc::new(config);
+            let mut samples = Vec::new();
+            for target in ["main", "feature"].into_iter().cycle().take(10) {
+                let start = Instant::now();
+                request_test_checkout(&mut gui, ' ', target);
+                loop {
+                    if let Some(rx) = &gui.initial_load_rx {
+                        while let Ok(part) = rx.try_recv() {
+                            let mut model = gui.model.lock().unwrap();
+                            match part {
+                                ModelPart::Branches(branches) => model.branches = branches,
+                                ModelPart::Head { hash, branch_name } => {
+                                    model.head_hash = hash;
+                                    model.head_branch_name = branch_name;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    gui.receive_remote_op_results();
+                    {
+                        let model = gui.model.lock().unwrap();
+                        if model.head_branch_name == target
+                            && model.branches.iter().any(|b| b.head && b.name == target)
+                        {
+                            samples.push(start.elapsed().as_secs_f64() * 1000.0);
+                            break;
+                        }
+                    }
+                    assert!(start.elapsed() < Duration::from_secs(10));
+                    // Mirror the main loop's input wait before dispatching refresh.
+                    std::thread::sleep(gui.input_wait_timeout());
+                    if gui.needs_refresh
+                        && !gui.refresh_in_progress
+                        && gui.initial_load_rx.is_none()
+                    {
+                        gui.start_background_refresh();
+                    }
+                }
+                if let Some(rx) = gui.initial_load_rx.take() {
+                    for _ in rx {}
+                }
+                gui.refresh_in_progress = false;
+                gui.needs_refresh = false;
+            }
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "auto_refresh={auto_refresh}: median={:.1}ms, min={:.1}ms, max={:.1}ms (10 checkouts)",
+                (samples[4] + samples[5]) / 2.0,
+                samples[0],
+                samples[9]
+            );
+        }
+    }
+
+    fn assert_checkout_head(gui: &Gui, branch: &str, hash: &str) {
+        let model = gui.model.lock().unwrap();
+        let heads: Vec<_> = model
+            .branches
+            .iter()
+            .filter(|b| b.head)
+            .map(|b| b.name.as_str())
+            .collect();
+        assert_eq!(heads, vec![branch]);
+        assert_eq!(model.head_branch_name, branch);
+        assert_eq!(model.head_hash, hash);
+        assert_eq!(gui.git.current_branch_name().unwrap(), branch);
+        assert_eq!(gui.git.head_hash().unwrap(), hash);
+    }
+
+    #[test]
+    fn failed_checkout_preserves_head_after_error_dismissal_and_retry() {
+        for key in [' ', '-', 'c'] {
+            let repo = TempRepo::new("failed-checkout");
+            let mut gui = checkout_test_gui(&repo);
+            let head = repo.git(&["rev-parse", "HEAD"]);
+            std::fs::write(repo.path().join("file"), "local changes").unwrap();
+
+            for _ in 0..2 {
+                request_test_checkout(&mut gui, key, "main");
+                assert_eq!(gui.remote_op_label.as_deref(), Some("Checking out"));
+                wait_for_test_checkout(&mut gui);
+                assert!(matches!(
+                    &gui.popup,
+                    PopupState::Message { message, kind: MessageKind::Error, .. }
+                        if message.contains("would be overwritten by checkout")
+                ));
+                assert_checkout_head(&gui, "feature", &head);
+                assert!(gui.pending_checkout_by_name.is_none());
+                gui.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                    .unwrap();
+                assert!(matches!(gui.popup, PopupState::None));
+                assert_checkout_head(&gui, "feature", &head);
+                assert_eq!(
+                    std::fs::read_to_string(repo.path().join("file")).unwrap(),
+                    "local changes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn missing_checkout_ref_preserves_head_and_offers_branch_creation() {
+        let repo = TempRepo::new("missing-checkout-ref");
+        let mut gui = checkout_test_gui(&repo);
+        let head = repo.git(&["rev-parse", "HEAD"]);
+        request_test_checkout(&mut gui, 'c', "brand-new-branch");
+        wait_for_test_checkout(&mut gui);
+        assert_checkout_head(&gui, "feature", &head);
+        assert!(matches!(
+            &gui.popup,
+            PopupState::Confirm { title, .. } if title == "Branch not found"
+        ));
+        gui.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        gui.refresh().unwrap();
+        assert_checkout_head(&gui, "brand-new-branch", &head);
+    }
+
+    #[test]
+    fn tag_checkout_updates_detached_head_before_refresh() {
+        let repo = TempRepo::new("tag-checkout");
+        let mut gui = checkout_test_gui(&repo);
+        let head = repo.git(&["rev-parse", "main"]);
+        repo.git(&["tag", "release", "main"]);
+        gui.model.lock().unwrap().tags = gui.git.load_tags().unwrap();
+        request_test_checkout(&mut gui, 'c', "release");
+        wait_for_test_checkout(&mut gui);
+        assert!(gui.refresh_in_progress);
+        assert!(matches!(gui.popup, PopupState::None));
+        let model = gui.model.lock().unwrap();
+        assert!(!model.branches.iter().any(|b| b.head));
+        assert!(model.head_branch_name.is_empty());
+        assert_eq!(model.head_hash, head);
+        assert_eq!(gui.git.head_hash().unwrap(), head);
+        assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "HEAD");
+        drop(model);
+        gui.refresh().unwrap();
+        assert_eq!(gui.model.lock().unwrap().head_hash, head);
+    }
+
+    #[test]
+    fn successful_checkout_updates_head_before_refresh() {
+        for key in [' ', '-', 'c'] {
+            let repo = TempRepo::new("successful-checkout");
+            let mut gui = checkout_test_gui(&repo);
+            request_test_checkout(&mut gui, key, "main");
+            let pending_head = gui
+                .model
+                .lock()
+                .unwrap()
+                .branches
+                .iter()
+                .find(|b| b.head)
+                .map(|b| b.name.clone());
+            wait_for_test_checkout(&mut gui);
+            assert_eq!(pending_head.as_deref(), Some("feature"));
+            assert!(gui.refresh_in_progress);
+            assert!(gui.initial_load_rx.is_some());
+            assert!(matches!(gui.popup, PopupState::None));
+            assert!(gui.pending_checkout_by_name.is_none());
+            assert_checkout_head(&gui, "main", &repo.git(&["rev-parse", "main"]));
+            gui.refresh().unwrap();
+            assert_checkout_head(&gui, "main", &repo.git(&["rev-parse", "main"]));
+        }
+    }
+
+    #[test]
+    fn checkout_discards_pre_checkout_refresh_results() {
+        let repo = TempRepo::new("checkout-stale-refresh");
+        let mut gui = checkout_test_gui(&repo);
+        let old_head = repo.git(&["rev-parse", "HEAD"]);
+        let (model_tx, model_rx) = mpsc::channel();
+        let (files_tx, files_rx) = mpsc::channel();
+        gui.initial_load_rx = Some(model_rx);
+        gui.initial_load_received = 5;
+        gui.refresh_in_progress = true;
+        gui.files_refresh_rx = Some(files_rx);
+        gui.files_refresh_in_progress = true;
+        model_tx
+            .send(ModelPart::Head {
+                hash: old_head.clone(),
+                branch_name: "feature".into(),
+            })
+            .unwrap();
+        files_tx.send(Ok(Vec::new())).unwrap();
+
+        request_test_checkout(&mut gui, ' ', "main");
+        wait_for_test_checkout(&mut gui);
+        assert_checkout_head(&gui, "main", &repo.git(&["rev-parse", "main"]));
+        assert!(
+            model_tx
+                .send(ModelPart::Head {
+                    hash: old_head,
+                    branch_name: "feature".into(),
+                })
+                .is_err()
+        );
+        assert!(files_tx.send(Ok(Vec::new())).is_err());
+        assert!(gui.files_refresh_rx.is_none());
+        assert!(!gui.files_refresh_in_progress);
+        assert!(gui.refresh_in_progress);
+        assert_eq!(gui.initial_load_received, 0);
+        let parts: Vec<_> = gui.initial_load_rx.take().unwrap().into_iter().collect();
+        assert_eq!(parts.len(), MODEL_PART_COUNT);
+        assert!(parts.iter().any(|part| matches!(
+            part, ModelPart::Head { branch_name, .. } if branch_name == "main"
+        )));
+        assert!(parts.iter().any(|part| matches!(
+            part, ModelPart::Branches(branches)
+                if branches.iter().any(|b| b.head && b.name == "main")
+        )));
+    }
+
+    #[test]
+    fn pending_refresh_keeps_input_polling_fast() {
+        let repo = TempRepo::new("refresh-polling");
+        let mut gui = checkout_test_gui(&repo);
+        let mut config = crate::config::AppConfig::default();
+        config.user_config.git.auto_refresh = false;
+        gui.config = Arc::new(config);
+        gui.needs_refresh = false;
+        assert_eq!(gui.input_wait_timeout(), Duration::from_millis(200));
+        gui.needs_refresh = true;
+        assert_eq!(gui.input_wait_timeout(), Duration::from_millis(16));
+    }
+
+    #[test]
+    fn ordinary_remote_operation_keeps_normal_refresh_behavior() {
+        let repo = TempRepo::new("remote-op-refresh");
+        let mut gui = checkout_test_gui(&repo);
+        let head = repo.git(&["rev-parse", "HEAD"]);
+        gui.start_remote_op("Fetch", "", |_| Ok(()));
+        wait_for_test_checkout(&mut gui);
+        assert_checkout_head(&gui, "feature", &head);
+        assert!(gui.needs_refresh);
+        assert!(!gui.refresh_in_progress);
+        assert!(gui.initial_load_rx.is_none());
+        assert!(matches!(gui.popup, PopupState::None));
+    }
+
+    #[test]
+    fn successful_checkout_without_head_metadata_still_refreshes() {
+        let repo = TempRepo::new("checkout-metadata-fallback");
+        let mut gui = checkout_test_gui(&repo);
+        repo.git(&["checkout", "main"]);
+        gui.remote_op_label = Some("Checking out".into());
+        gui.pending_checkout_by_name = Some("main".into());
+        gui.remote_op_tx.send(Ok(None)).unwrap();
+        gui.receive_remote_op_results();
+        assert!(matches!(gui.popup, PopupState::None));
+        assert!(gui.pending_checkout_by_name.is_none());
+        assert!(gui.refresh_in_progress);
+        gui.refresh().unwrap();
+        assert_checkout_head(&gui, "main", &repo.git(&["rev-parse", "main"]));
+    }
+
+    #[test]
+    fn busy_checkout_does_not_change_head_or_pending_checkout() {
+        for key in [' ', '-', 'c'] {
+            let repo = TempRepo::new("busy-checkout");
+            let mut gui = checkout_test_gui(&repo);
+            let head = repo.git(&["rev-parse", "HEAD"]);
+            for pending in [None, Some("already-pending".to_string())] {
+                gui.remote_op_label = Some("Busy".to_string());
+                gui.pending_checkout_by_name = pending.clone();
+                request_test_checkout(&mut gui, key, "main");
+                assert_checkout_head(&gui, "feature", &head);
+                assert_eq!(gui.pending_checkout_by_name, pending);
+                assert_eq!(gui.remote_op_label.as_deref(), Some("Busy"));
+            }
         }
     }
 
