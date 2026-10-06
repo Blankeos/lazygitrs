@@ -2,10 +2,11 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::ListItem;
 
+use super::text::plain_text;
 use crate::config::Theme;
 use crate::model::Model;
 
-pub fn render_reflog_list<'a>(model: &Model, theme: &Theme) -> Vec<ListItem<'a>> {
+pub fn render_reflog_list<'a>(model: &'a Model, theme: &Theme) -> Vec<ListItem<'a>> {
     model
         .reflog_commits
         .iter()
@@ -16,7 +17,7 @@ pub fn render_reflog_list<'a>(model: &Model, theme: &Theme) -> Vec<ListItem<'a>>
                     Style::default().fg(theme.reflog_hash),
                 ),
                 Span::styled(
-                    commit.name.clone(),
+                    plain_text(&commit.name),
                     Style::default().fg(theme.reflog_message),
                 ),
             ];

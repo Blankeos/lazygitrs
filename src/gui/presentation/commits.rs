@@ -5,14 +5,37 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::config::Theme;
 use crate::model::Model;
-use crate::model::commit::{Commit, CommitStatus};
+use crate::model::commit::{Commit, CommitStatus, Divergence};
 
 use super::graph;
+use super::text::plain_text;
 
 #[derive(Default)]
 pub struct CommitListCache {
     commits: GraphLayoutCache,
     sub_commits: GraphLayoutCache,
+    compare_commits: GraphLayoutCache,
+}
+
+pub fn render_compare_commit_list_window<'a>(
+    commits: &'a [Commit],
+    revision: u64,
+    theme: &Theme,
+    offset: usize,
+    visible_height: usize,
+    cache: &mut CommitListCache,
+) -> Vec<ListItem<'a>> {
+    cache.compare_commits.update(commits, revision);
+    render_commits_window(
+        commits,
+        "",
+        theme,
+        &[],
+        offset,
+        visible_height,
+        false,
+        &cache.compare_commits,
+    )
 }
 
 #[derive(Default)]
@@ -38,14 +61,14 @@ impl GraphLayoutCache {
     }
 }
 
-pub fn render_sub_commit_list_window(
-    model: &Model,
+pub fn render_sub_commit_list_window<'a>(
+    model: &'a Model,
     theme: &Theme,
     offset: usize,
     visible_height: usize,
     full: bool,
     cache: &mut CommitListCache,
-) -> Vec<ListItem<'static>> {
+) -> Vec<ListItem<'a>> {
     cache
         .sub_commits
         .update(&model.sub_commits, model.sub_commits_revision);
@@ -61,15 +84,15 @@ pub fn render_sub_commit_list_window(
     )
 }
 
-pub fn render_commit_list_window(
-    model: &Model,
+pub fn render_commit_list_window<'a>(
+    model: &'a Model,
     theme: &Theme,
     cherry_picked: &[String],
     offset: usize,
     visible_height: usize,
     full: bool,
     cache: &mut CommitListCache,
-) -> Vec<ListItem<'static>> {
+) -> Vec<ListItem<'a>> {
     cache.commits.update(&model.commits, model.commits_revision);
     render_commits_window(
         &model.commits,
@@ -90,8 +113,8 @@ pub fn render_commit_list_window(
 ///   same compact/expanded responsiveness as lazygit.
 /// - Fixed columns (hash/date/author) are padded to the visible window's max
 ///   width so rows align like lazygit's `RenderDisplayStrings`.
-fn render_commits_window(
-    commits: &[Commit],
+fn render_commits_window<'a>(
+    commits: &'a [Commit],
     head_hash: &str,
     theme: &Theme,
     cherry_picked: &[String],
@@ -99,7 +122,7 @@ fn render_commits_window(
     visible_height: usize,
     full: bool,
     graph_layout: &GraphLayoutCache,
-) -> Vec<ListItem<'static>> {
+) -> Vec<ListItem<'a>> {
     let visible: Vec<(usize, &Commit)> = commits
         .iter()
         .enumerate()
@@ -121,19 +144,21 @@ fn render_commits_window(
             }
         })
         .collect();
-    let authors: Vec<String> = visible
+    let authors: Vec<(String, Color)> = visible
         .iter()
         .map(|(_, c)| {
-            if full {
-                long_author(&c.author_name, 17)
+            let author = plain_text(&c.author_name);
+            let label = if full {
+                long_author(&author, 17)
             } else {
-                author_initials(&c.author_name)
-            }
+                author_initials(&author)
+            };
+            (label, author_color(&author))
         })
         .collect();
 
     let date_w = dates.iter().map(|s| s.width()).max().unwrap_or(0);
-    let author_w = authors.iter().map(|s| s.width()).max().unwrap_or(0);
+    let author_w = authors.iter().map(|(s, _)| s.width()).max().unwrap_or(0);
 
     visible
         .iter()
@@ -141,7 +166,18 @@ fn render_commits_window(
         .map(|(vi, (i, commit))| {
             let graph_row = graph_layout.rows.get(*i);
             let is_head = commit.hash == *head_hash;
-            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut spans: Vec<Span<'a>> = Vec::new();
+
+            match commit.divergence {
+                Divergence::Left => {
+                    spans.push(Span::styled("A ", Style::default().fg(theme.accent)))
+                }
+                Divergence::Right => spans.push(Span::styled(
+                    "B ",
+                    Style::default().fg(theme.accent_secondary),
+                )),
+                Divergence::None => {}
+            }
 
             // Hash (8, lazygit default) — color by push status.
             let is_cherry_picked = cherry_picked.iter().any(|h| *h == commit.hash);
@@ -172,10 +208,9 @@ fn render_commits_window(
 
             // Author — per-author color like lazygit's AuthorStyle.
             if author_w > 0 {
-                let color = author_color(&commit.author_name);
                 spans.push(Span::styled(
-                    pad_to(&authors[vi], author_w),
-                    Style::default().fg(color),
+                    pad_to(&authors[vi].0, author_w),
+                    Style::default().fg(authors[vi].1),
                 ));
                 spans.push(Span::raw(" "));
             }
@@ -210,7 +245,7 @@ fn render_commits_window(
 
             // Message.
             spans.push(Span::styled(
-                commit.name.clone(),
+                plain_text(&commit.name),
                 Style::default().fg(theme.text_strong),
             ));
 
@@ -434,6 +469,79 @@ mod tests {
             render_commit_list_window(&model, &Theme::default(), &[], 1, 1, false, &mut cache);
 
         assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn history_views_strip_ansi_before_clipping_or_wrapping() {
+        use ratatui::{
+            Terminal,
+            backend::TestBackend,
+            widgets::{Block, Borders, List},
+        };
+
+        let mut original = commit("31fc03a0", None);
+        original.name = "Add Vike skill — \x1b[4mhttps://vike.dev/ai#skill\x1b[24m".into();
+        original.author_name = "\x1b[4mBlankeos\x1b[24m".into();
+        original.author_email = "\x1b[4mdev@example.com\x1b[24m".into();
+        let mut clean = original.clone();
+        clean.name = plain_text(&clean.name).into_owned();
+        clean.author_name = plain_text(&clean.author_name).into_owned();
+        clean.author_email = plain_text(&clean.author_email).into_owned();
+
+        for width in [24, 60, 120] {
+            for view in 0..5 {
+                let render = |entry: Commit| {
+                    let mut model = Model::default();
+                    model.set_commits(vec![entry.clone(), commit("aaaaaaaa", None)]);
+                    model.reflog_commits = model.commits.clone();
+                    let theme = Theme::default();
+                    let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+                    terminal
+                        .draw(|frame| {
+                            if view >= 3 {
+                                super::super::commit_details::render_commit_details(
+                                    frame,
+                                    frame.area(),
+                                    &entry,
+                                    None,
+                                    (view == 4).then_some(entry.name.as_str()),
+                                    &theme,
+                                    false,
+                                    &mut 0,
+                                );
+                            } else {
+                                let items = if view == 2 {
+                                    super::super::reflog::render_reflog_list(&model, &theme)
+                                } else {
+                                    render_commit_list_window(
+                                        &model,
+                                        &theme,
+                                        &[],
+                                        0,
+                                        2,
+                                        view == 1,
+                                        &mut CommitListCache::default(),
+                                    )
+                                };
+                                frame.render_widget(
+                                    List::new(items).block(Block::default().borders(Borders::ALL)),
+                                    frame.area(),
+                                );
+                            }
+                        })
+                        .unwrap();
+                    terminal.backend().buffer().clone()
+                };
+                let actual = render(original.clone());
+                assert_eq!(actual, render(clean.clone()), "width={width}, view={view}");
+                assert!(actual.content.iter().all(|cell| {
+                    !cell.symbol().chars().any(char::is_control)
+                        && !cell.modifier.contains(Modifier::UNDERLINED)
+                }));
+            }
+        }
+        // Rendering must not change data later used by Git operations.
+        assert!(original.name.contains('\x1b'));
     }
 
     #[test]

@@ -3,6 +3,7 @@ pub mod bisect;
 pub mod branch;
 pub mod commit;
 pub mod diff;
+pub(crate) mod diff_paths;
 pub mod file;
 pub mod loader;
 pub mod rebase;
@@ -338,6 +339,21 @@ impl GitCommands {
         Ok(result.stdout_trimmed().to_string())
     }
 
+    /// Resolve a revision to a verified commit, peeling annotated tags.
+    /// Unlike `resolve_ref`, this rejects trees and option-like input.
+    fn resolve_commit_ref(&self, reference: &str) -> Result<String> {
+        let result = self
+            .git()
+            .args(&[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{reference}^{{commit}}"),
+            ])
+            .run_expecting_success()?;
+        Ok(result.stdout_trimmed().to_string())
+    }
+
     /// Get the name of the previously checked-out branch (`@{-1}`), if any.
     pub fn previous_branch_name(&self) -> Option<String> {
         let result = self
@@ -442,6 +458,244 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+
+    fn run_test_git(path: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(path)
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "tag.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn load_compare_commits_linear_history_and_commit_revisions() {
+        use crate::model::commit::Divergence;
+
+        let temp = TempDir::new("compare-commits-linear");
+        let run = |args: &[&str]| run_test_git(temp.path(), args);
+        run(&["init", "-b", "main"]);
+        run(&["commit", "--allow-empty", "-m", "root"]);
+        let root = run(&["rev-parse", "HEAD"]);
+        run(&["tag", "-a", "base", "-m", "base"]);
+        run(&["checkout", "-b", "feature"]);
+        run(&["commit", "--allow-empty", "-m", "one | pipe"]);
+        let first = run(&["rev-parse", "HEAD"]);
+        run(&["commit", "--allow-empty", "-m", "two"]);
+        let tip = run(&["rev-parse", "HEAD"]);
+        run(&["tag", "-a", "tip", "-m", "tip"]);
+        let git = GitCommands::new(temp.path()).unwrap();
+
+        for (a, b, side) in [
+            ("feature", "main", Divergence::Left),
+            ("base", "feature", Divergence::Right),
+            (root.as_str(), tip.as_str(), Divergence::Right),
+            ("HEAD~2", "tip", Divergence::Right),
+        ] {
+            let commits = git.load_compare_commits(a, b, 0, 0).unwrap();
+            assert_eq!(commits.len(), 2);
+            assert_eq!(commits[0].hash, tip);
+            assert_eq!(commits[1].hash, first);
+            assert!(commits.iter().all(|commit| commit.divergence == side));
+            assert_eq!(commits[1].name, "one | pipe");
+            assert_eq!(commits[1].author_name, "Test");
+            assert_eq!(commits[1].author_email, "test@example.com");
+            assert!(commits[1].unix_timestamp > 0);
+            assert_eq!(commits[1].parents, [root.clone()]);
+            assert_eq!(commits[0].tags, ["tip"]);
+            assert!(commits[0].refs.iter().any(|r| r.contains("feature")));
+        }
+        assert!(
+            git.load_compare_commits("feature", "tip", 10, 0)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            git.load_compare_commits("main", "main", 10, 0)
+                .unwrap()
+                .is_empty()
+        );
+        let commits = git.load_compare_commits("HEAD~1", "HEAD", 10, 0).unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].hash, tip);
+        assert_eq!(commits[0].divergence, Divergence::Right);
+    }
+
+    #[test]
+    fn load_compare_commits_diverged_history_and_paging() {
+        use crate::model::commit::Divergence;
+
+        let temp = TempDir::new("compare-commits-diverged");
+        let run = |args: &[&str]| run_test_git(temp.path(), args);
+        run(&["init", "-b", "main"]);
+        run(&["commit", "--allow-empty", "-m", "root"]);
+        let root = run(&["rev-parse", "HEAD"]);
+        run(&["checkout", "-b", "feature"]);
+        run(&["commit", "--allow-empty", "-m", "feature one"]);
+        let feature_one = run(&["rev-parse", "HEAD"]);
+        run(&["commit", "--allow-empty", "-m", "feature two"]);
+        let feature_two = run(&["rev-parse", "HEAD"]);
+        run(&["checkout", "main"]);
+        run(&["commit", "--allow-empty", "-m", "main one"]);
+        let main_one = run(&["rev-parse", "HEAD"]);
+        let git = GitCommands::new(temp.path()).unwrap();
+        let commits = git.load_compare_commits("feature", "main", 0, 0).unwrap();
+        assert_eq!(commits.len(), 3);
+        assert!(!commits.iter().any(|commit| commit.hash == root));
+        for (hash, side) in [
+            (&feature_one, Divergence::Left),
+            (&feature_two, Divergence::Left),
+            (&main_one, Divergence::Right),
+        ] {
+            assert_eq!(
+                commits.iter().find(|c| &c.hash == hash).unwrap().divergence,
+                side
+            );
+        }
+        let position = |hash: &str| commits.iter().position(|c| c.hash == hash).unwrap();
+        assert!(position(&feature_two) < position(&feature_one));
+
+        for skip in 0..commits.len() {
+            let page = git
+                .load_compare_commits("feature", "main", 1, skip)
+                .unwrap();
+            assert_eq!(page.len(), 1);
+            assert_eq!(page[0].hash, commits[skip].hash);
+            assert_eq!(page[0].divergence, commits[skip].divergence);
+        }
+        assert!(
+            git.load_compare_commits("feature", "main", 2, 3)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            git.load_compare_commits("feature", "main", 0, 1)
+                .unwrap()
+                .len(),
+            2
+        );
+        let reverse = git.load_compare_commits("main", "feature", 0, 0).unwrap();
+        for commit in reverse {
+            let original = commits.iter().find(|c| c.hash == commit.hash).unwrap();
+            assert_ne!(original.divergence, commit.divergence);
+        }
+    }
+
+    #[test]
+    fn load_compare_commits_rejects_invalid_and_non_commit_refs() {
+        let temp = TempDir::new("compare-commits-invalid");
+        let run = |args: &[&str]| run_test_git(temp.path(), args);
+        run(&["init", "-b", "main"]);
+        run(&["commit", "--allow-empty", "-m", "root"]);
+        let tree = run(&["rev-parse", "HEAD^{tree}"]);
+        run(&["tag", "-a", "tree-tag", &tree, "-m", "tree tag"]);
+        let git = GitCommands::new(temp.path()).unwrap();
+        for reference in [
+            "missing-ref",
+            "HEAD^{tree}",
+            tree.as_str(),
+            "tree-tag",
+            "--all",
+            "HEAD..HEAD",
+            "",
+        ] {
+            assert!(
+                git.load_compare_commits(reference, "main", 10, 0).is_err(),
+                "left: {reference}"
+            );
+            assert!(
+                git.load_compare_commits("main", reference, 10, 0).is_err(),
+                "right: {reference}"
+            );
+        }
+    }
+
+    #[test]
+    fn diff_refs_ahead_behind_counts_commit_ancestry_not_file_changes() {
+        let temp = TempDir::new("compare-ancestry");
+        let run = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(temp.path())
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "tag.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        run(&["init", "-b", "main"]);
+        run(&["commit", "--allow-empty", "-m", "root"]);
+        let root = run(&["rev-parse", "HEAD"]);
+        run(&["tag", "-a", "base", "-m", "base"]);
+        run(&["checkout", "-b", "feature"]);
+        run(&["commit", "--allow-empty", "-m", "feature one"]);
+        run(&["commit", "--allow-empty", "-m", "feature two"]);
+        let tip = run(&["rev-parse", "HEAD"]);
+        run(&["update-ref", "refs/remotes/origin/feature", &tip]);
+
+        let git = GitCommands::new(temp.path()).unwrap();
+        assert_eq!(
+            git.diff_refs_ahead_behind("feature", "main").unwrap(),
+            (2, 0)
+        );
+        assert_eq!(
+            git.diff_refs_ahead_behind("base", "feature").unwrap(),
+            (0, 2)
+        );
+        assert_eq!(git.diff_refs_ahead_behind(&tip, &root).unwrap(), (2, 0));
+        assert_eq!(
+            git.diff_refs_ahead_behind("HEAD~1", "HEAD").unwrap(),
+            (0, 1)
+        );
+        assert_eq!(
+            git.diff_refs_ahead_behind("origin/feature", "feature")
+                .unwrap(),
+            (0, 0)
+        );
+        assert!(git.diff_refs_files("base", "feature").unwrap().is_empty());
+
+        run(&["checkout", "main"]);
+        run(&["commit", "--allow-empty", "-m", "main one"]);
+        assert_eq!(
+            git.diff_refs_ahead_behind("feature", "main").unwrap(),
+            (2, 1)
+        );
+        assert_eq!(
+            git.diff_refs_ahead_behind("main", "feature").unwrap(),
+            (1, 2)
+        );
+        assert!(git.diff_refs_ahead_behind("missing-ref", "main").is_err());
+        assert!(git.diff_refs_ahead_behind("HEAD^{tree}", "main").is_err());
+        assert!(git.diff_refs_files("HEAD^{tree}", "main").is_ok());
     }
 
     #[test]

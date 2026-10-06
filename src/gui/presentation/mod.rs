@@ -11,3 +11,4 @@ pub mod remote_branches;
 pub mod remotes;
 pub mod stash;
 pub mod tags;
+pub(crate) mod text;

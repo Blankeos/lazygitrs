@@ -16,10 +16,21 @@ use crate::model::Branch;
 use crate::os::platform::Platform;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
-    // Esc: cancel range select first, then clear clipboard
+    // Esc: cancel range select first, then clear active commit filter, then clear clipboard
     if key.code == crossterm::event::KeyCode::Esc {
         if gui.range_select_anchor.is_some() {
             gui.range_select_anchor = None;
+            return Ok(());
+        }
+
+        if gui.commit_path_filter.is_some()
+            || !gui.commit_author_filter.is_empty()
+            || !gui.commit_branch_filter.is_empty()
+        {
+            gui.commit_path_filter = None;
+            gui.commit_author_filter.clear();
+            gui.commit_branch_filter.clear();
+            apply_commit_filters_and_focus(gui)?;
             return Ok(());
         }
 
@@ -133,7 +144,11 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
     }
 
     // Open commit filtering menu
-    if matches_key(key, &keybindings.commits.open_log_menu) {
+    if matches_key(key, &keybindings.commits.open_log_menu)
+        || (key.modifiers == crossterm::event::KeyModifiers::CONTROL
+            && (key.code == crossterm::event::KeyCode::Char('l')
+                || key.code == crossterm::event::KeyCode::Char('L')))
+    {
         return show_filtering_menu(gui);
     }
 
@@ -1324,26 +1339,40 @@ fn apply_commit_filters(gui: &mut Gui) -> Result<()> {
     Ok(())
 }
 
+fn build_branch_checklist_items(
+    branches: &[Branch],
+    current_filter: &[String],
+) -> Vec<ChecklistItem> {
+    let mut items = vec![ChecklistItem {
+        label: "<Clear Filter>".to_string(),
+        checked: false,
+        is_free_entry: false,
+    }];
+
+    for b in branches {
+        let checked = current_filter.contains(&b.name);
+        items.push(ChecklistItem {
+            label: b.name.clone(),
+            checked,
+            is_free_entry: false,
+        });
+    }
+
+    items
+}
+
+fn resolve_branch_filter_selection(checked: Vec<String>) -> Vec<String> {
+    if checked.iter().any(|val| val == "<Clear Filter>") {
+        Vec::new()
+    } else {
+        checked
+    }
+}
+
 fn show_branch_filter_menu(gui: &mut Gui) -> Result<()> {
-    use crate::gui::popup::ChecklistItem;
-
     let model = gui.model.lock().unwrap();
-    let branches: Vec<String> = model.branches.iter().map(|b| b.name.clone()).collect();
+    let items = build_branch_checklist_items(&model.branches, &gui.commit_branch_filter);
     drop(model);
-
-    let current_filter = &gui.commit_branch_filter;
-
-    let items: Vec<ChecklistItem> = branches
-        .into_iter()
-        .map(|name| {
-            let checked = current_filter.contains(&name);
-            ChecklistItem {
-                label: name,
-                checked,
-                is_free_entry: false,
-            }
-        })
-        .collect();
 
     gui.popup = PopupState::Checklist {
         title: "Filter commits by branch".to_string(),
@@ -1351,7 +1380,7 @@ fn show_branch_filter_menu(gui: &mut Gui) -> Result<()> {
         selected: 0,
         search_textarea: crate::gui::popup::make_checklist_search_textarea(),
         on_confirm: Box::new(|gui: &mut Gui, checked: Vec<String>| {
-            gui.commit_branch_filter = checked;
+            gui.commit_branch_filter = resolve_branch_filter_selection(checked);
             apply_commit_filters_and_focus(gui)
         }),
         free_entry_category: None,
@@ -1550,5 +1579,49 @@ mod tests {
     #[test]
     fn treats_blank_filter_values_as_unset() {
         assert_eq!(nonempty("   "), None);
+    }
+
+    #[test]
+    fn build_branch_checklist_items_starts_with_unchecked_clear_filter() {
+        use super::build_branch_checklist_items;
+
+        let branches = vec![branch("main", "1111111"), branch("feature", "2222222")];
+        let current_filter = vec!["main".to_string()];
+        let items = build_branch_checklist_items(&branches, &current_filter);
+
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].label, "<Clear Filter>");
+        assert!(!items[0].checked);
+
+        assert_eq!(items[1].label, "main");
+        assert!(items[1].checked);
+
+        assert_eq!(items[2].label, "feature");
+        assert!(!items[2].checked);
+    }
+
+    #[test]
+    fn resolve_branch_filter_selection_clears_when_clear_filter_selected() {
+        use super::resolve_branch_filter_selection;
+
+        let checked = vec!["<Clear Filter>".to_string(), "main".to_string()];
+        assert!(resolve_branch_filter_selection(checked).is_empty());
+
+        let checked = vec!["<Clear Filter>".to_string()];
+        assert!(resolve_branch_filter_selection(checked).is_empty());
+    }
+
+    #[test]
+    fn resolve_branch_filter_selection_preserves_selected_branches() {
+        use super::resolve_branch_filter_selection;
+
+        let checked = vec!["main".to_string(), "feature".to_string()];
+        assert_eq!(
+            resolve_branch_filter_selection(checked),
+            vec!["main".to_string(), "feature".to_string()]
+        );
+
+        let checked: Vec<String> = Vec::new();
+        assert!(resolve_branch_filter_selection(checked).is_empty());
     }
 }

@@ -94,6 +94,40 @@ impl GitCommands {
         self.load_filtered_commits_page(&CommitFilter::default(), limit, skip)
     }
 
+    /// Load the symmetric difference of two commit revisions in topological order.
+    /// Left marks A-only commits; Right marks B-only commits. A zero limit is
+    /// unlimited, matching the other paged commit loaders.
+    pub fn load_compare_commits(
+        &self,
+        ref_a: &str,
+        ref_b: &str,
+        limit: usize,
+        skip: usize,
+    ) -> Result<Vec<Commit>> {
+        let range = format!(
+            "{}...{}",
+            self.resolve_commit_ref(ref_a)?,
+            self.resolve_commit_ref(ref_b)?
+        );
+        // NUL field separators preserve pipes in commit subjects and identities.
+        // %m is '<' for the left side and '>' for the right side of A...B.
+        let mut cmd = self.git().args(&[
+            "log",
+            "--left-right",
+            "--topo-order",
+            "--no-show-signature",
+            "--format=%H%x00%s%x00%an%x00%ae%x00%at%x00%P%x00%D%x00%m",
+        ]);
+        if limit > 0 {
+            cmd = cmd.arg(&format!("--max-count={limit}"));
+        }
+        if skip > 0 {
+            cmd = cmd.arg(&format!("--skip={skip}"));
+        }
+        let result = cmd.arg(&range).arg("--").run_expecting_success()?;
+        self.parse_commit_log_fields(&result, '\0')
+    }
+
     pub fn load_filtered_commits_page(
         &self,
         filter: &CommitFilter,
@@ -165,6 +199,14 @@ impl GitCommands {
     }
 
     fn parse_commit_log(&self, result: &crate::os::cmd::CmdResult) -> Result<Vec<Commit>> {
+        self.parse_commit_log_fields(result, '|')
+    }
+
+    fn parse_commit_log_fields(
+        &self,
+        result: &crate::os::cmd::CmdResult,
+        separator: char,
+    ) -> Result<Vec<Commit>> {
         if !result.success {
             return Ok(Vec::new());
         }
@@ -173,7 +215,9 @@ impl GitCommands {
         // `git log @{u}..HEAD` per page parse (filter apply hot path).
         let mut commits = Vec::new();
         for line in result.stdout.lines() {
-            let parts: Vec<&str> = line.splitn(7, '|').collect();
+            let parts: Vec<&str> = line
+                .splitn(if separator == '\0' { 8 } else { 7 }, separator)
+                .collect();
             if parts.len() < 6 {
                 continue;
             }
@@ -201,7 +245,11 @@ impl GitCommands {
                 author_email,
                 unix_timestamp,
                 parents,
-                divergence: Divergence::None,
+                divergence: match parts.get(7).copied() {
+                    Some("<") => Divergence::Left,
+                    Some(">") => Divergence::Right,
+                    _ => Divergence::None,
+                },
             });
         }
 
