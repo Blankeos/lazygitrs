@@ -360,6 +360,30 @@ impl GitCommands {
         }
     }
 
+    /// Counts commits unique to A and B, respectively (A's ahead/behind B).
+    /// Both refs must resolve to commits; tree-only comparisons have no ancestry.
+    pub fn diff_refs_ahead_behind(&self, ref_a: &str, ref_b: &str) -> Result<(usize, usize)> {
+        let range = format!(
+            "{}...{}",
+            self.resolve_commit_ref(ref_a)?,
+            self.resolve_commit_ref(ref_b)?
+        );
+        let result = self
+            .git()
+            .args(&["rev-list", "--left-right", "--count", &range, "--"])
+            .run_expecting_success()?;
+        let mut counts = result.stdout.split_whitespace();
+        let ahead = counts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("Missing ahead count"))?
+            .parse()?;
+        let behind = counts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("Missing behind count"))?
+            .parse()?;
+        Ok((ahead, behind))
+    }
+
     /// Get the list of files changed between two refs (for diff/compare mode).
     pub fn diff_refs_files(
         &self,
@@ -486,7 +510,7 @@ impl GitCommands {
     }
 }
 
-fn diff_paths_for_label(path: &str) -> Vec<&str> {
+pub(crate) fn diff_paths_for_label(path: &str) -> Vec<&str> {
     match path.split_once(" -> ") {
         Some((old, new)) => vec![old, new],
         None => vec![path],

@@ -5,12 +5,104 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::config::keybindings::parse_key;
-use crate::gui::modes::diff_mode::{DiffModeFocus, DiffModeSelector};
+use crate::gui::modes::diff_mode::{CompareDiffSource, DiffModeFocus, DiffModeSelector};
 use crate::gui::popup::{CommandEntry, CommandSection, MenuItem, PopupState};
 use crate::gui::{DiffPayload, Gui, textarea_input};
 use crate::model::FileChangeStatus;
 use crate::os::platform::Platform;
 use crate::pager::side_by_side::{DiffPanelLayout, DiffViewState};
+
+fn handle_commits_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
+    let selected = gui.diff_mode.commits_selected;
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            if selected + 1 >= gui.diff_mode.commits.len() {
+                load_more_commits(gui)?;
+            }
+            gui.diff_mode.commits_selected =
+                (selected + 1).min(gui.diff_mode.commits.len().saturating_sub(1));
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            gui.diff_mode.commits_selected = selected.saturating_sub(1)
+        }
+        KeyCode::PageDown => {
+            if selected + 10 >= gui.diff_mode.commits.len() {
+                load_more_commits(gui)?;
+            }
+            gui.diff_mode.commits_selected =
+                (selected + 10).min(gui.diff_mode.commits.len().saturating_sub(1));
+        }
+        KeyCode::PageUp => gui.diff_mode.commits_selected = selected.saturating_sub(10),
+        KeyCode::Char('g') | KeyCode::Home => gui.diff_mode.commits_selected = 0,
+        KeyCode::Char('G') | KeyCode::End => {
+            gui.diff_mode.commits_selected = gui.diff_mode.commits.len().saturating_sub(1);
+        }
+        KeyCode::Enter => return open_selected_commit_files(gui),
+        KeyCode::Char('y') => {
+            if let Some(commit) = gui.diff_mode.selected_commit() {
+                Platform::copy_to_clipboard(&commit.hash)?;
+            }
+        }
+        _ => return Ok(()),
+    }
+    gui.diff_mode.commits_viewport_manually_scrolled = false;
+    gui.needs_diff_refresh = true;
+    Ok(())
+}
+
+pub fn load_more_commits(gui: &mut Gui) -> Result<()> {
+    if !gui.diff_mode.has_more_commits() {
+        return Ok(());
+    }
+    let commits = gui.git.load_compare_commits(
+        &gui.diff_mode.ref_a,
+        &gui.diff_mode.ref_b,
+        crate::git::DEFAULT_COMMIT_LIMIT,
+        gui.diff_mode.commits.len(),
+    )?;
+    gui.diff_mode.commits.extend(commits);
+    gui.diff_mode.commits_revision = gui.diff_mode.commits_revision.wrapping_add(1);
+    Ok(())
+}
+
+pub fn open_selected_commit_files(gui: &mut Gui) -> Result<()> {
+    let Some(hash) = gui
+        .diff_mode
+        .selected_commit()
+        .map(|commit| commit.hash.clone())
+    else {
+        return Ok(());
+    };
+    let files = gui.git.commit_files(&hash)?;
+    set_diff_files(gui, files);
+    gui.diff_mode.files_commit = Some(hash);
+    gui.diff_mode.set_focus(DiffModeFocus::CommitFiles);
+    gui.clear_diff_view();
+    gui.needs_diff_refresh = true;
+    gui.needs_diff_refresh = true;
+    Ok(())
+}
+
+pub fn restore_comparison_files(gui: &mut Gui) -> Result<()> {
+    let files = gui
+        .git
+        .diff_refs_files(&gui.diff_mode.ref_a, &gui.diff_mode.ref_b)?;
+    set_diff_files(gui, files);
+    gui.diff_mode.files_commit = None;
+    gui.diff_mode.set_focus(DiffModeFocus::CommitFiles);
+    gui.clear_diff_view();
+    Ok(())
+}
+
+fn set_diff_files(gui: &mut Gui, files: Vec<crate::model::CommitFile>) {
+    gui.diff_mode.diff_files = files;
+    gui.diff_mode.diff_files_selected = 0;
+    gui.diff_mode.diff_files_scroll = 0;
+    gui.diff_mode.viewport_manually_scrolled = false;
+    gui.diff_mode.collapsed_dirs.clear();
+    gui.diff_mode.clear_list_search();
+    update_diff_mode_tree(gui);
+}
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
     // Popup takes priority (for ? help)
@@ -45,6 +137,13 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         return Ok(());
     }
 
+    // Keep text-entry shortcuts local, including diff-content search.
+    if gui.diff_mode.focus == DiffModeFocus::DiffExploration && gui.diff_view.search_active {
+        return handle_diff_search_key(gui, key);
+    }
+    if gui.try_handle_layout_key(key) {
+        return Ok(());
+    }
     let keybindings = &gui.config.user_config.keybinding;
 
     if matches_key(key, &keybindings.universal.toggle_diff_view_layout) {
@@ -91,17 +190,31 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         }
     }
 
-    // Tab to cycle focus
-    if key.code == KeyCode::Tab {
-        gui.diff_mode.focus = gui.diff_mode.focus.next();
+    // Use the same configurable forward/reverse bindings as the main view.
+    let mut panel_key = key;
+    if panel_key.code == KeyCode::BackTab
+        || (panel_key.code == KeyCode::Tab && panel_key.modifiers.contains(KeyModifiers::SHIFT))
+    {
+        panel_key.code = KeyCode::BackTab;
+        panel_key.modifiers.insert(KeyModifiers::SHIFT);
+    }
+    let forward = matches_key(panel_key, &keybindings.universal.toggle_panel);
+    let reverse = matches_key(panel_key, &keybindings.universal.toggle_panel_reverse);
+    if forward || reverse {
+        let focus = if reverse {
+            gui.diff_mode.focus.prev()
+        } else {
+            gui.diff_mode.focus.next()
+        };
+        gui.diff_mode.set_focus(focus);
         gui.needs_diff_refresh = true;
         return Ok(());
     }
 
-    // Number keys 1-4 to jump to focus panel
-    if let KeyCode::Char(c @ '1'..='4') = key.code {
+    // Number keys 1-5 to jump to focus panel
+    if let KeyCode::Char(c @ '1'..='5') = key.code {
         if let Some(focus) = DiffModeFocus::from_number(c.to_digit(10).unwrap()) {
-            gui.diff_mode.focus = focus;
+            gui.diff_mode.set_focus(focus);
             gui.needs_diff_refresh = true;
             return Ok(());
         }
@@ -148,6 +261,9 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         DiffModeFocus::CommitFiles => {
             handle_commit_files_key(gui, key)?;
         }
+        DiffModeFocus::Commits => {
+            handle_commits_key(gui, key)?;
+        }
         DiffModeFocus::DiffExploration => {
             handle_diff_exploration_key(gui, key)?;
         }
@@ -166,10 +282,10 @@ fn handle_combobox_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
             if gui.diff_mode.has_both_refs() {
                 reload_diff_files(gui)?;
                 // Both refs set — auto-focus commit files
-                gui.diff_mode.focus = DiffModeFocus::CommitFiles;
+                gui.diff_mode.set_focus(DiffModeFocus::CommitFiles);
             } else if gui.diff_mode.ref_a.is_empty() {
                 // B was just set, A still empty — jump to A and start editing
-                gui.diff_mode.focus = DiffModeFocus::SelectorA;
+                gui.diff_mode.set_focus(DiffModeFocus::SelectorA);
                 gui.diff_mode.start_editing(DiffModeSelector::A);
                 let model = gui.model.lock().unwrap();
                 gui.diff_mode.search_refs(
@@ -181,7 +297,7 @@ fn handle_combobox_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
                 );
             } else {
                 // A was just set, B still empty — jump to B and start editing
-                gui.diff_mode.focus = DiffModeFocus::SelectorB;
+                gui.diff_mode.set_focus(DiffModeFocus::SelectorB);
                 gui.diff_mode.start_editing(DiffModeSelector::B);
                 let model = gui.model.lock().unwrap();
                 gui.diff_mode.search_refs(
@@ -241,7 +357,8 @@ fn handle_file_search_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
                 // Jump to first match
                 if !gui.diff_mode.file_search_matches.is_empty() {
                     gui.diff_mode.file_search_match_idx = 0;
-                    gui.diff_mode.diff_files_selected = gui.diff_mode.file_search_matches[0];
+                    gui.diff_mode
+                        .select_list_match(gui.diff_mode.file_search_matches[0]);
                 }
                 gui.diff_mode.file_search_textarea = None;
                 gui.needs_diff_refresh = true;
@@ -257,7 +374,32 @@ fn handle_file_search_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
+fn handle_tree_navigation(gui: &mut Gui, key: KeyEvent) -> bool {
+    if !gui.diff_mode.show_tree {
+        return false;
+    }
+    if let Some(destination) = super::tree::destination(
+        key,
+        &gui.config.user_config.keybinding,
+        &gui.diff_mode.tree_nodes,
+        gui.diff_mode.diff_files_selected,
+    ) {
+        if let Some(idx) = destination {
+            gui.diff_mode.diff_files_selected = idx;
+            gui.diff_mode.viewport_manually_scrolled = false;
+            gui.needs_diff_refresh = true;
+        }
+        return true;
+    }
+    false
+}
+
 fn handle_commit_files_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
+    if key.code == KeyCode::Esc && gui.diff_mode.files_commit.is_some() {
+        restore_comparison_files(gui)?;
+        gui.needs_diff_refresh = true;
+        return Ok(());
+    }
     let keybindings = &gui.config.user_config.keybinding;
 
     // Toggle tree view (backtick) — keep in sync with Files / Commit Files and persist
@@ -269,6 +411,30 @@ fn handle_commit_files_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         gui.persist_file_tree_visibility();
         update_diff_mode_tree(gui);
         gui.diff_mode.diff_files_selected = 0;
+        return Ok(());
+    }
+
+    if gui.diff_mode.show_tree
+        && super::tree::matches_key(key, &keybindings.universal.fold_directory)
+    {
+        if let Some(node) = gui
+            .diff_mode
+            .tree_nodes
+            .get(gui.diff_mode.diff_files_selected)
+        {
+            if node.is_dir {
+                let path = node.path.clone();
+                if !gui.diff_mode.collapsed_dirs.remove(&path) {
+                    gui.diff_mode.collapsed_dirs.insert(path);
+                }
+                update_diff_mode_tree(gui);
+                gui.diff_mode.viewport_manually_scrolled = false;
+                gui.needs_diff_refresh = true;
+            }
+        }
+        return Ok(());
+    }
+    if handle_tree_navigation(gui, key) {
         return Ok(());
     }
 
@@ -293,26 +459,7 @@ fn handle_commit_files_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
             }
         }
         KeyCode::Enter => {
-            if gui.diff_mode.show_tree {
-                // Toggle dir collapse or focus diff
-                if let Some(node) = gui
-                    .diff_mode
-                    .tree_nodes
-                    .get(gui.diff_mode.diff_files_selected)
-                {
-                    if node.is_dir {
-                        let path = node.path.clone();
-                        if gui.diff_mode.collapsed_dirs.contains(&path) {
-                            gui.diff_mode.collapsed_dirs.remove(&path);
-                        } else {
-                            gui.diff_mode.collapsed_dirs.insert(path);
-                        }
-                        update_diff_mode_tree(gui);
-                        return Ok(());
-                    }
-                }
-            }
-            gui.diff_mode.focus = DiffModeFocus::DiffExploration;
+            gui.diff_mode.set_focus(DiffModeFocus::DiffExploration);
             gui.needs_diff_refresh = true;
         }
         KeyCode::Char('g') => {
@@ -356,8 +503,11 @@ fn show_commit_file_copy_menu(gui: &mut Gui) -> Result<()> {
         .map_or_else(|| file.name.clone(), |(old, _)| old.to_string());
     let new_path = file.current_path().to_string();
     let status = file.status;
-    let ref_a = gui.diff_mode.ref_a.clone();
-    let ref_b = gui.diff_mode.ref_b.clone();
+    let (ref_a, ref_b) = match &gui.diff_mode.files_commit {
+        Some(hash) => (format!("{hash}^1"), hash.clone()),
+        None => (gui.diff_mode.ref_a.clone(), gui.diff_mode.ref_b.clone()),
+    };
+    let commit_for_diff = gui.diff_mode.files_commit.clone();
     let path_for_old = old_path.clone();
     let path_for_new = new_path.clone();
     let path_for_diff = file_name.clone();
@@ -384,7 +534,12 @@ fn show_commit_file_copy_menu(gui: &mut Gui) -> Result<()> {
                 })),
             },
             MenuItem {
-                label: "Old content (from A)".to_string(),
+                label: if commit_for_diff.is_some() {
+                    "Old content (parent)"
+                } else {
+                    "Old content (from A)"
+                }
+                .to_string(),
                 description: if has_old {
                     String::new()
                 } else {
@@ -404,7 +559,12 @@ fn show_commit_file_copy_menu(gui: &mut Gui) -> Result<()> {
                 },
             },
             MenuItem {
-                label: "New content (from B)".to_string(),
+                label: if commit_for_diff.is_some() {
+                    "New content (commit)"
+                } else {
+                    "New content (from B)"
+                }
+                .to_string(),
                 description: if has_new {
                     String::new()
                 } else {
@@ -428,9 +588,12 @@ fn show_commit_file_copy_menu(gui: &mut Gui) -> Result<()> {
                 description: String::new(),
                 key: Some("d".to_string()),
                 action: Some(Box::new(move |gui| {
-                    let diff =
+                    let diff = if let Some(hash) = &commit_for_diff {
+                        gui.git.diff_commit_file(hash, &path_for_diff)?
+                    } else {
                         gui.git
-                            .diff_refs_file(&ref_a_for_diff, &ref_b_for_diff, &path_for_diff)?;
+                            .diff_refs_file(&ref_a_for_diff, &ref_b_for_diff, &path_for_diff)?
+                    };
                     Platform::copy_to_clipboard(&diff)?;
                     Ok(())
                 })),
@@ -488,22 +651,7 @@ fn handle_diff_exploration_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
                 let line = sel_ref.edit_line_number;
                 // Compute column from terminal position using the same layout as the mouse handler
                 let (top_row, top_col, _, _) = sel_ref.normalized();
-                let area = ratatui::layout::Rect::new(0, 0, gui.layout.width, gui.layout.height);
-                let outer = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Vertical)
-                    .constraints([
-                        ratatui::layout::Constraint::Min(1),
-                        ratatui::layout::Constraint::Length(1),
-                    ])
-                    .split(area);
-                let content = ratatui::layout::Layout::default()
-                    .direction(ratatui::layout::Direction::Horizontal)
-                    .constraints([
-                        ratatui::layout::Constraint::Percentage(33),
-                        ratatui::layout::Constraint::Percentage(67),
-                    ])
-                    .split(outer[0]);
-                let diff_rect = content[1];
+                let diff_rect = gui.compute_compare_layout().diff;
                 let pl = DiffPanelLayout::compute(diff_rect, &gui.diff_view);
                 let (content_start, _) = pl.content_range(sel_ref.panel);
                 let column = if top_col >= content_start {
@@ -518,7 +666,7 @@ fn handle_diff_exploration_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
                         .map(|(line_idx, _, panel)| (line_idx, panel))
                         .unwrap_or_else(|| {
                             (
-                                gui.diff_view.scroll_offset + (top_row - pl.inner_y) as usize,
+                                gui.diff_view.fallback_line_idx_for_row(top_row, &pl),
                                 sel_ref.panel,
                             )
                         })
@@ -583,12 +731,22 @@ fn handle_diff_exploration_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         }
     }
 
+    if handle_tree_navigation(gui, key) {
+        return Ok(());
+    }
+
     match key.code {
         KeyCode::Esc => {
             if !gui.diff_view.search_query.is_empty() {
                 gui.diff_view.clear_search();
             } else {
-                gui.diff_mode.focus = DiffModeFocus::CommitFiles;
+                gui.diff_mode.set_focus(
+                    if gui.diff_mode.diff_source == CompareDiffSource::Commit {
+                        DiffModeFocus::Commits
+                    } else {
+                        DiffModeFocus::CommitFiles
+                    },
+                );
             }
         }
         KeyCode::Char('j') | KeyCode::Down => {
@@ -650,6 +808,8 @@ fn handle_diff_exploration_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
 pub fn reload_diff_files(gui: &mut Gui) -> Result<()> {
     let ref_a = gui.diff_mode.ref_a.clone();
     let ref_b = gui.diff_mode.ref_b.clone();
+    gui.diff_mode.ahead_behind = None;
+    gui.diff_mode.clear_commits();
     if ref_a.is_empty() || ref_b.is_empty() {
         return Ok(());
     }
@@ -658,15 +818,20 @@ pub fn reload_diff_files(gui: &mut Gui) -> Result<()> {
 
     match gui.git.diff_refs_files(&ref_a, &ref_b) {
         Ok(files) => {
-            gui.diff_mode.diff_files = files;
-            gui.diff_mode.diff_files_selected = 0;
-            gui.diff_mode.diff_files_scroll = 0;
-            if gui.diff_mode.show_tree {
-                update_diff_mode_tree(gui);
+            // Tree refs can still be diffed even though they have no commit history.
+            gui.diff_mode.ahead_behind = gui.git.diff_refs_ahead_behind(&ref_a, &ref_b).ok();
+            if gui.diff_mode.ahead_behind.is_some() {
+                gui.diff_mode.commits = gui
+                    .git
+                    .load_compare_commits(&ref_a, &ref_b, crate::git::DEFAULT_COMMIT_LIMIT, 0)
+                    .unwrap_or_default();
+                gui.diff_mode.commits_revision = gui.diff_mode.commits_revision.wrapping_add(1);
             }
+            set_diff_files(gui, files);
         }
         Err(e) => {
             gui.diff_mode.diff_files.clear();
+            gui.diff_mode.tree_nodes.clear();
             gui.popup = PopupState::Message {
                 title: "Diff error".to_string(),
                 message: format!("{}", e),
@@ -674,6 +839,7 @@ pub fn reload_diff_files(gui: &mut Gui) -> Result<()> {
             };
         }
     }
+    gui.diff_mode.set_focus(gui.diff_mode.focus);
     Ok(())
 }
 
@@ -691,6 +857,33 @@ fn update_diff_mode_tree(gui: &mut Gui) {
 /// Called from the main loop to request diff loading for the currently selected file in diff mode.
 /// Queues the request on the shared latest-only diff worker.
 pub fn maybe_request_diff(gui: &mut Gui, generation: u64, diff_key: String) {
+    if gui.diff_mode.diff_source == CompareDiffSource::Commit {
+        let Some(hash) = gui
+            .diff_mode
+            .selected_commit()
+            .map(|commit| commit.hash.clone())
+        else {
+            gui.diff_loading = false;
+            gui.diff_loading_since = None;
+            gui.clear_diff_view();
+            return;
+        };
+        let git = Arc::clone(&gui.git);
+        gui.queue_diff_job(generation, diff_key, move || {
+            let diff = git.diff_commit(&hash).unwrap_or_default();
+            if diff.is_empty() {
+                DiffPayload::Empty
+            } else {
+                DiffPayload::Parsed(DiffViewState::parse_diff_output(
+                    &hash[..8.min(hash.len())],
+                    &diff,
+                    4,
+                    false,
+                ))
+            }
+        });
+        return;
+    }
     if !gui.diff_mode.has_both_refs() || gui.diff_mode.diff_files.is_empty() {
         gui.diff_loading = false;
         gui.diff_loading_since = None;
@@ -700,6 +893,8 @@ pub fn maybe_request_diff(gui: &mut Gui, generation: u64, diff_key: String) {
 
     let ref_a = gui.diff_mode.ref_a.clone();
     let ref_b = gui.diff_mode.ref_b.clone();
+
+    let files_commit = gui.diff_mode.files_commit.clone();
 
     // Resolve file index (tree view maps node -> file index)
     let selected = gui.diff_mode.diff_files_selected;
@@ -727,13 +922,39 @@ pub fn maybe_request_diff(gui: &mut Gui, generation: u64, diff_key: String) {
         let current_path = file.current_path().to_string();
 
         gui.queue_diff_job(generation, diff_key, move || {
-            match git.diff_refs_file(&ref_a, &ref_b, &name) {
+            let result = if let Some(hash) = &files_commit {
+                git.diff_commit_file(hash, &name)
+            } else {
+                git.diff_refs_file(&ref_a, &ref_b, &name)
+            };
+            match result {
                 Ok(diff) if diff.is_empty() => DiffPayload::Empty,
                 Ok(diff) => {
                     let exists = git.repo_path().join(&current_path).exists();
+                    use crate::pager::image_preview::ImageSource;
+                    let paths = crate::git::diff::diff_paths_for_label(&name);
+                    if let Some(parsed) = super::super::image_diff_payload(
+                        &git,
+                        &name,
+                        &diff,
+                        exists,
+                        ImageSource::Revision {
+                            revision: &ref_a,
+                            path: paths[0],
+                        },
+                        ImageSource::Revision {
+                            revision: &ref_b,
+                            path: &current_path,
+                        },
+                    ) {
+                        return DiffPayload::Parsed(parsed);
+                    }
                     // Pure renames between refs: show file content at ref_b.
                     if crate::pager::side_by_side::is_rename_only_diff(&diff) {
-                        if let Ok(content) = git.file_content_at_commit(&ref_b, &current_path) {
+                        if let Ok(content) = git.file_content_at_commit(
+                            files_commit.as_deref().unwrap_or(&ref_b),
+                            &current_path,
+                        ) {
                             if !content.is_empty() {
                                 return DiffPayload::Parsed(DiffViewState::parse_content(
                                     &current_path,
@@ -772,18 +993,26 @@ pub fn maybe_request_diff(gui: &mut Gui, generation: u64, diff_key: String) {
                         Some(p) => vec![p],
                         None => Vec::new(),
                     };
-                    let combined_diff = git
-                        .diff_refs_paths(&ref_a, &ref_b, &paths)
-                        .unwrap_or_default();
+                    let combined_diff = if let Some(hash) = &files_commit {
+                        git.diff_commit_paths(hash, &paths)
+                    } else {
+                        git.diff_refs_paths(&ref_a, &ref_b, &paths)
+                    }
+                    .unwrap_or_default();
                     if combined_diff.is_empty() {
                         DiffPayload::Empty
                     } else {
-                        DiffPayload::Parsed(DiffViewState::parse_diff_output(
-                            &dir_name,
+                        let mut parsed =
+                            DiffViewState::parse_diff_output(&dir_name, &combined_diff, 4, true);
+                        crate::pager::image_preview::attach_inline_image_previews(
+                            &mut parsed,
+                            git.repo_path(),
                             &combined_diff,
-                            4,
-                            true,
-                        ))
+                            &ref_a,
+                            Some(&ref_b),
+                            &std::collections::HashSet::new(),
+                        );
+                        DiffPayload::Parsed(parsed)
                     }
                 });
             } else {
@@ -807,12 +1036,83 @@ fn show_diff_mode_command_palette(gui: &mut Gui) {
         title: "Compare / Diff Mode".into(),
         entries: vec![
             CommandEntry::keybinding("q".into(), "Exit diff mode".into()),
-            CommandEntry::keybinding("Tab".into(), "Cycle focus (A → B → Files → Diff)".into()),
-            CommandEntry::keybinding("1-4".into(), "Jump to panel".into()),
+            CommandEntry::keybinding(
+                gui.config
+                    .user_config
+                    .keybinding
+                    .universal
+                    .toggle_panel
+                    .clone(),
+                "Cycle focus (A → B → Files → Commits → Diff)".into(),
+            ),
+            CommandEntry::keybinding(
+                gui.config
+                    .user_config
+                    .keybinding
+                    .universal
+                    .toggle_panel_reverse
+                    .clone(),
+                "Cycle focus backward".into(),
+            ),
+            CommandEntry::keybinding(
+                gui.config
+                    .user_config
+                    .keybinding
+                    .universal
+                    .next_screen_mode
+                    .clone(),
+                "Next screen mode (normal / half / full)".into(),
+            ),
+            CommandEntry::keybinding(
+                gui.config
+                    .user_config
+                    .keybinding
+                    .universal
+                    .prev_screen_mode
+                    .clone(),
+                "Previous screen mode".into(),
+            ),
+            CommandEntry::keybinding(
+                format!(
+                    "{} / {}",
+                    gui.config
+                        .user_config
+                        .keybinding
+                        .universal
+                        .shrink_side_panel,
+                    gui.config
+                        .user_config
+                        .keybinding
+                        .universal
+                        .expand_side_panel
+                ),
+                "Shrink / expand sidebar (or drag its divider)".into(),
+            ),
+            CommandEntry::keybinding(
+                gui.config
+                    .user_config
+                    .keybinding
+                    .universal
+                    .reset_side_panel
+                    .clone(),
+                "Reset sidebar size".into(),
+            ),
+            CommandEntry::keybinding("1-5".into(), "Jump to panel (4 Commits, 5 Diff)".into()),
             CommandEntry::keybinding("<c-s>".into(), "Swap A and B".into()),
-            CommandEntry::keybinding("<enter>".into(), "Edit selector / Focus diff".into()),
+            CommandEntry::keybinding(
+                "<enter>".into(),
+                "Edit ref / Open commit files / Focus diff".into(),
+            ),
+            CommandEntry::keybinding(
+                "<esc>".into(),
+                "Back from diff / Restore comparison files".into(),
+            ),
             CommandEntry::keybinding("`".into(), "Toggle file tree view".into()),
-            CommandEntry::keybinding("j/k".into(), "Navigate files / Scroll diff".into()),
+            CommandEntry::keybinding(
+                "j/k".into(),
+                "Navigate files or commits / Scroll diff".into(),
+            ),
+            CommandEntry::keybinding("PgUp/PgDn".into(), "Page through commits".into()),
             CommandEntry::keybinding("{/}".into(), "Previous / next hunk".into()),
             CommandEntry::keybinding("[/]".into(), "Toggle old / new only view".into()),
             CommandEntry::keybinding(
@@ -826,7 +1126,10 @@ fn show_diff_mode_command_palette(gui: &mut Gui) {
             ),
             CommandEntry::keybinding("z".into(), "Toggle line wrap".into()),
             CommandEntry::keybinding("g/G".into(), "Go to top / bottom".into()),
-            CommandEntry::keybinding("/".into(), "Search (files or diff content)".into()),
+            CommandEntry::keybinding(
+                "/".into(),
+                "Search files, loaded commits, or diff content".into(),
+            ),
             CommandEntry::keybinding("n/N".into(), "Next / previous search match".into()),
             CommandEntry::keybinding("<c-f>".into(), "Grep diff contents".into()),
             CommandEntry::keybinding("y".into(), "Copy to clipboard".into()),
@@ -847,8 +1150,23 @@ fn show_diff_mode_command_palette(gui: &mut Gui) {
         ],
     };
 
+    let mut sections = vec![diff_mode_section, combobox_section];
+    if gui.diff_mode.show_tree
+        && matches!(
+            gui.diff_mode.focus,
+            DiffModeFocus::CommitFiles | DiffModeFocus::DiffExploration
+        )
+    {
+        sections.insert(
+            1,
+            super::tree::command_section(
+                &gui.config.user_config.keybinding,
+                gui.diff_mode.focus == DiffModeFocus::CommitFiles,
+            ),
+        );
+    }
     gui.popup = PopupState::CommandPalette {
-        sections: vec![diff_mode_section, combobox_section],
+        sections,
         selected: 0,
         search_textarea: crate::gui::popup::make_command_palette_search_textarea(),
         scroll_offset: 0,
@@ -860,5 +1178,337 @@ fn matches_key(key: KeyEvent, binding: &str) -> bool {
         key.code == expected.code && key.modifiers == expected.modifiers
     } else {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AppConfig, AppState, UserConfig};
+    use crate::git::GitCommands;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    struct TempRepo(PathBuf);
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn compare_controller_previews_commits_opens_files_and_routes_mouse() {
+        let path = std::env::temp_dir().join(format!(
+            "lazygitrs-compare-viewer-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        let repo = TempRepo(path);
+        let run = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(&repo.0)
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "-b", "main"]);
+        std::fs::write(repo.0.join("file.txt"), "base\n").unwrap();
+        run(&["add", "file.txt"]);
+        run(&["commit", "-m", "root"]);
+        run(&["checkout", "-b", "feature"]);
+        std::fs::write(repo.0.join("file.txt"), "feature\n").unwrap();
+        run(&["add", "file.txt"]);
+        run(&["commit", "-m", "feature change"]);
+        std::fs::write(repo.0.join("file.txt"), "base\n").unwrap();
+        run(&["add", "file.txt"]);
+        run(&["commit", "-m", "restore content"]);
+        let config = AppConfig {
+            debug: false,
+            version: String::new(),
+            user_config: UserConfig::default(),
+            app_state: AppState::default(),
+            config_dir: repo.0.clone(),
+            state_dir: repo.0.clone(),
+            state_path: repo.0.join("state.yml"),
+        };
+        let mut gui = Gui::new(config, GitCommands::new(&repo.0).unwrap(), None, false).unwrap();
+        gui.diff_mode.enter(false);
+        gui.diff_mode.ref_a = "main".into();
+        gui.diff_mode.ref_b = "feature".into();
+        reload_diff_files(&mut gui).unwrap();
+        assert_eq!(gui.diff_mode.commits.len(), 2);
+        assert!(gui.diff_mode.diff_files.is_empty());
+        gui.diff_mode.commits.truncate(1);
+        load_more_commits(&mut gui).unwrap();
+        assert_eq!(gui.diff_mode.commits.len(), 2);
+        assert!(!gui.diff_mode.has_more_commits());
+        let press =
+            |gui: &mut Gui, key| handle_key(gui, KeyEvent::new(key, KeyModifiers::NONE)).unwrap();
+        press(&mut gui, KeyCode::Char('4'));
+        assert_eq!(gui.diff_mode.focus, DiffModeFocus::Commits);
+        let commit_key = gui.current_diff_key();
+        maybe_request_diff(&mut gui, 0, commit_key.clone());
+        let result = gui.diff_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(result.diff_key, commit_key);
+        assert!(matches!(result.payload, DiffPayload::Parsed(_)));
+        press(&mut gui, KeyCode::Char('5'));
+        assert_eq!(gui.current_diff_key(), commit_key);
+        press(&mut gui, KeyCode::Esc);
+        assert_eq!(gui.diff_mode.focus, DiffModeFocus::Commits);
+        press(&mut gui, KeyCode::Enter);
+        assert_eq!(gui.diff_mode.diff_source, CompareDiffSource::CommitFiles);
+        assert_eq!(gui.diff_mode.diff_files.len(), 1);
+        let file_key = gui.current_diff_key();
+        maybe_request_diff(&mut gui, 0, file_key.clone());
+        let result = gui.diff_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(result.diff_key, file_key);
+        assert!(matches!(result.payload, DiffPayload::Parsed(_)));
+        press(&mut gui, KeyCode::Esc);
+        assert_eq!(gui.diff_mode.diff_source, CompareDiffSource::Comparison);
+        assert!(gui.diff_mode.diff_files.is_empty());
+
+        press(&mut gui, KeyCode::Char('4'));
+        handle_key(
+            &mut gui,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        )
+        .unwrap();
+        assert_eq!(gui.diff_mode.focus, DiffModeFocus::Commits);
+        assert_eq!(gui.diff_mode.diff_source, CompareDiffSource::Commit);
+        assert_eq!(gui.diff_mode.ahead_behind, Some((2, 0)));
+
+        gui.layout.update_size(150, 24);
+        let rect = gui.compute_compare_layout().sidebar[3];
+        gui.handle_diff_mode_mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: rect.x + 1,
+            row: rect.y + 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(gui.diff_mode.focus, DiffModeFocus::Commits);
+        assert_eq!(gui.diff_mode.commits_selected, 1);
+        assert_eq!(gui.diff_mode.diff_source, CompareDiffSource::Commit);
+        let commit = gui.diff_mode.commits[0].clone();
+        gui.diff_mode.commits = vec![commit; 30];
+        gui.diff_mode.ahead_behind = Some((30, 0));
+        for kind in [
+            crossterm::event::MouseEventKind::ScrollDown,
+            crossterm::event::MouseEventKind::ScrollUp,
+        ] {
+            gui.handle_diff_mode_mouse(crossterm::event::MouseEvent {
+                kind,
+                column: rect.x + 1,
+                row: rect.y + 2,
+                modifiers: KeyModifiers::NONE,
+            });
+            assert_eq!(gui.diff_mode.commits_selected, 1);
+            assert_eq!(
+                gui.diff_mode.commits_scroll,
+                if kind == crossterm::event::MouseEventKind::ScrollDown {
+                    3
+                } else {
+                    0
+                }
+            );
+        }
+        // Exercise the real GUI dispatch path, including normalized terminal
+        // events, custom bindings, input priority and divider dragging.
+        use crate::gui::ScreenMode;
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        gui.diff_mode.set_focus(DiffModeFocus::SelectorA);
+        for modifiers in [KeyModifiers::SHIFT, KeyModifiers::NONE] {
+            gui.handle_key(KeyEvent::new(KeyCode::BackTab, modifiers))
+                .unwrap();
+            assert_eq!(gui.diff_mode.focus, DiffModeFocus::DiffExploration);
+            gui.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(gui.diff_mode.focus, DiffModeFocus::SelectorA);
+        }
+        gui.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT))
+            .unwrap();
+        assert_eq!(gui.diff_mode.focus, DiffModeFocus::DiffExploration);
+        let stable_key = gui.current_diff_key();
+        for (key, modifiers, expected) in [
+            ('+', KeyModifiers::NONE, ScreenMode::Half),
+            ('+', KeyModifiers::SHIFT, ScreenMode::Full),
+            ('_', KeyModifiers::SHIFT, ScreenMode::Half),
+            ('_', KeyModifiers::NONE, ScreenMode::Normal),
+        ] {
+            gui.handle_key(KeyEvent::new(KeyCode::Char(key), modifiers))
+                .unwrap();
+            assert_eq!(gui.screen_mode, expected);
+            assert_eq!(gui.current_diff_key(), stable_key);
+        }
+        let config = Arc::get_mut(&mut gui.config).unwrap();
+        config.user_config.keybinding.universal.toggle_panel_reverse = "<c-b>".into();
+        Arc::get_mut(&mut gui.config)
+            .unwrap()
+            .user_config
+            .keybinding
+            .universal
+            .next_screen_mode = "<c-n>".into();
+        gui.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(gui.diff_mode.focus, DiffModeFocus::Commits);
+        gui.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(gui.screen_mode, ScreenMode::Half);
+        gui.screen_mode = ScreenMode::Normal;
+        Arc::get_mut(&mut gui.config)
+            .unwrap()
+            .user_config
+            .keybinding
+            .universal
+            .next_screen_mode = "+".into();
+        gui.diff_mode.start_editing(DiffModeSelector::A);
+        gui.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.screen_mode, ScreenMode::Normal);
+        gui.diff_mode.cancel_editing();
+        gui.diff_mode.file_search_active = true;
+        gui.diff_mode.file_search_textarea = Some(tui_textarea::TextArea::default());
+        gui.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.screen_mode, ScreenMode::Normal);
+        gui.diff_mode.clear_list_search();
+        gui.diff_mode.set_focus(DiffModeFocus::DiffExploration);
+        gui.diff_view.search_active = true;
+        gui.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.screen_mode, ScreenMode::Normal);
+        gui.diff_view.search_active = false;
+
+        let mouse = |gui: &mut Gui, kind, column, row| {
+            gui.handle_mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        Arc::get_mut(&mut gui.config)
+            .unwrap()
+            .user_config
+            .gui
+            .mouse_events = true;
+        for (width, height) in [(150, 40), (80, 40)] {
+            gui.layout.update_size(width, height);
+            gui.layout.side_panel_ratio = 0.4;
+            let layout = gui.compute_compare_layout();
+            let (col, row) = if layout.portrait {
+                (5, layout.diff.y)
+            } else {
+                (layout.diff.x, 5)
+            };
+            mouse(&mut gui, MouseEventKind::Down(MouseButton::Left), col, row);
+            assert!(gui.sidebar_resizing);
+            let (col, row) = if layout.portrait { (5, 25) } else { (100, 5) };
+            mouse(&mut gui, MouseEventKind::Drag(MouseButton::Left), col, row);
+            let expected = if layout.portrait {
+                25.0 / 39.0
+            } else {
+                100.0 / 150.0
+            };
+            assert!((gui.layout.side_panel_ratio - expected).abs() < 1e-8);
+            mouse(&mut gui, MouseEventKind::Up(MouseButton::Left), col, row);
+            assert!(!gui.sidebar_resizing);
+            // Grabbing the sidebar's bottom border must map to the same
+            // portrait split, rather than jumping by one row on mouse-down.
+            if layout.portrait {
+                let split = gui.compute_compare_layout().diff.y;
+                mouse(
+                    &mut gui,
+                    MouseEventKind::Down(MouseButton::Left),
+                    5,
+                    split - 1,
+                );
+                assert!(gui.sidebar_resizing);
+                assert_eq!(gui.compute_compare_layout().diff.y, split);
+                mouse(
+                    &mut gui,
+                    MouseEventKind::Up(MouseButton::Left),
+                    5,
+                    split - 1,
+                );
+            }
+            // Half/Full mode and disabled mouse input must not start resizing.
+            gui.screen_mode = ScreenMode::Half;
+            let half = gui.compute_compare_layout();
+            let (col, row) = if half.portrait {
+                (5, half.diff.y)
+            } else {
+                (half.diff.x, 5)
+            };
+            mouse(&mut gui, MouseEventKind::Down(MouseButton::Left), col, row);
+            assert!(!gui.sidebar_resizing);
+            gui.screen_mode = ScreenMode::Normal;
+            Arc::get_mut(&mut gui.config)
+                .unwrap()
+                .user_config
+                .gui
+                .mouse_events = false;
+            let normal = gui.compute_compare_layout();
+            let (col, row) = if normal.portrait {
+                (5, normal.diff.y)
+            } else {
+                (normal.diff.x, 5)
+            };
+            mouse(&mut gui, MouseEventKind::Down(MouseButton::Left), col, row);
+            assert!(!gui.sidebar_resizing);
+            Arc::get_mut(&mut gui.config)
+                .unwrap()
+                .user_config
+                .gui
+                .mouse_events = true;
+            let before = gui.layout.side_panel_ratio;
+            gui.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT))
+                .unwrap();
+            assert!((gui.layout.side_panel_ratio - (before - 0.05)).abs() < 1e-8);
+            gui.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT))
+                .unwrap();
+            assert!((gui.layout.side_panel_ratio - before).abs() < 1e-8);
+            gui.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT))
+                .unwrap();
+            assert_eq!(
+                gui.layout.side_panel_ratio,
+                if layout.portrait { 0.0 } else { 1.0 }
+            );
+            gui.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT))
+                .unwrap();
+            assert_eq!(
+                gui.layout.side_panel_ratio,
+                if layout.portrait { 1.0 } else { 0.0 }
+            );
+            gui.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT))
+                .unwrap();
+            assert_eq!(
+                gui.layout.side_panel_ratio,
+                gui.config.user_config.gui.side_panel_width
+            );
+        }
+
+        gui.diff_mode.ref_a = "missing".into();
+        reload_diff_files(&mut gui).unwrap();
+        assert!(gui.diff_mode.commits.is_empty());
+        assert!(gui.diff_mode.tree_nodes.is_empty());
+        assert!(gui.diff_mode.ahead_behind.is_none());
     }
 }

@@ -33,6 +33,44 @@ Then run:
 lazygitrs
 ```
 
+Use `lazygitrs --commits` to start at the checked-out HEAD commit. Press
+`Ctrl+G` to toggle between working-tree changes and HEAD (including from a
+focused diff). If filters or pagination hide HEAD, it opens a separate HEAD
+history view without clearing your filters. Remap or disable the shortcut with
+`keybinding.universal.toggleWorkingTreeAndHead` (`"<c-g>"` by default; `""` disables it).
+
+### File tree navigation
+
+In Files, commit/stash file lists, and compare mode, press backtick (`` ` ``) to
+toggle the tree view. With a tree active:
+
+- `-` folds/unfolds the selected directory (including the root).
+- `Enter` focuses the selected file or combined directory diff without changing
+  your normal/half/full layout; `Esc` returns to the file list.
+- `,` / `.` select the parent / first visible child.
+- `<` / `>` select the previous / next sibling, skipping nested descendants.
+  Hierarchy navigation also works while the diff is focused.
+
+These shortcuts are configurable under `keybinding.universal` in your config:
+
+```yaml
+keybinding:
+  universal:
+    foldDirectory: "-"
+    treeParent: ","
+    treeChild: "."
+    treePrevSibling: "<"
+    treeNextSibling: ">"
+```
+
+Set a binding to `""` to disable it. Collapsed directories must be unfolded
+before their children can be selected. Tree-navigation actions appear in `?`
+only while a tree is active. The footer shows just the fold/unfold shortcut
+(default `-`) in tree views, not hierarchy navigation or commit details.
+`'` (apostrophe) toggles commit details, also shown on the panel’s top-right
+border; explicitly remapping a tree action to `'` will override it while
+the tree is active.
+
 ### Upgrade
 
 Detects how you installed (brew / npm / bun / cargo / install.sh) and upgrades in place:
@@ -73,6 +111,30 @@ lazygitrs upgrade 0.0.32   # specific version
   - [x] `git rebase` (global `I`) and then asks rebase on top of what branch/commit.
   - [x] 🎨 Themes + Theme-Picker!
 - [x] **Grep diff contents** — `Ctrl-F` in Files / Commit Files / Compare searches hunk lines in-context, `Enter` jumps to the file in the current list.
+
+### Image diffs
+
+Selecting a PNG, JPEG, GIF (first frame), WebP, BMP, ICO, or TIFF file shows
+**Before / After** previews in Kitty and Ghostty. Added/deleted files show the
+available image full-width, labeled **Added** or **Deleted**. Staged previews use the index;
+commit-file and ref comparisons use the corresponding Git blobs.
+
+Other binaries, unsupported/corrupt images, files over 20 MiB, and unsupported
+terminal environments keep the striped binary placeholder. Images are decoded
+with memory/dimension limits and resized in the background. SVG and video
+previews are not included yet.
+
+Folder previews in the file tree mix text diffs with inline image sections.
+Each image section is capped at 12 rows; visible sections load in the background
+(two at a time) and offscreen pixels are released. This works in split/unified
+and wrapped views, including commit/stash folders and ref-comparison folders.
+Whole-commit overview buffers still retain binary placeholders. Inline images
+require Kitty/Ghostty placeholder graphics; other terminals keep stripes.
+
+Set `LAZYGITRS_IMAGE_PREVIEW=off` to disable image previews. tmux, screen, and
+Zellij currently fall back to stripes. iTerm2/WezTerm and Sixel are experimental
+(`LAZYGITRS_IMAGE_PREVIEW=experimental`); their overlay cleanup is not yet fully
+verified. Nested editor launches avoid terminal capability queries.
 
 ### Configuration
 

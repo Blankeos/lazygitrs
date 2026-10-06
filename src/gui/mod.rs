@@ -24,7 +24,7 @@ use ratatui::backend::CrosstermBackend;
 
 use crate::config::keybindings::parse_key;
 use crate::config::{AppConfig, AppState};
-use crate::git::{DEFAULT_COMMIT_LIMIT, GitCommands, MODEL_PART_COUNT, ModelPart};
+use crate::git::{DEFAULT_COMMIT_LIMIT, GitCommands, HeadState, MODEL_PART_COUNT, ModelPart};
 use crate::model::Model;
 use crate::model::file_tree::{CommitFileTreeNode, FileTreeNode, build_file_tree};
 use crate::os::platform::Platform;
@@ -292,7 +292,10 @@ struct DiffPreviewCache {
 }
 
 impl DiffPreviewCache {
-    fn insert(&mut self, key: String, view: DiffViewState) {
+    fn insert(&mut self, key: String, mut view: DiffViewState) {
+        for image in view.inline_images.values_mut() {
+            image.unload_for_cache();
+        }
         self.remove(&key);
         let estimated_bytes = estimate_diff_view_bytes(&view);
         if estimated_bytes > MAX_CACHED_DIFF_BYTES {
@@ -380,6 +383,17 @@ fn estimate_diff_view_bytes(view: &DiffViewState) -> usize {
         .saturating_add(view.new_content.len())
         .saturating_add(line_bytes)
         .saturating_mul(2)
+        .saturating_add(
+            view.inline_images
+                .values()
+                .map(|image| image.estimated_bytes())
+                .sum::<usize>(),
+        )
+        .saturating_add(
+            view.image_preview
+                .as_ref()
+                .map_or(0, |p| p.estimated_bytes()),
+        )
 }
 
 type BackgroundJob = Box<dyn FnOnce() + Send>;
@@ -648,9 +662,9 @@ pub struct Gui {
     /// Diff source for the next AI commit message generation.
     ai_commit_source: AiCommitSource,
     /// Receiver for background remote operations (push, pull, fetch).
-    remote_op_rx: mpsc::Receiver<Result<()>>,
+    remote_op_rx: mpsc::Receiver<Result<Option<HeadState>>>,
     /// Sender cloned into background threads for remote operations.
-    remote_op_tx: mpsc::Sender<Result<()>>,
+    remote_op_tx: mpsc::Sender<Result<Option<HeadState>>>,
     /// Async light files refresh (status-only) so Space-spam doesn't freeze.
     files_refresh_rx: Option<mpsc::Receiver<Result<Vec<crate::model::File>>>>,
     files_refresh_in_progress: bool,
@@ -708,6 +722,8 @@ pub struct Gui {
     pub show_commit_file_tree: bool,
     /// Name of the branch/tag whose commits are being viewed in BranchCommits context.
     pub branch_commits_name: String,
+    /// Select HEAD once startup history arrives, unless the user navigates first.
+    pending_startup_head: bool,
     /// Name of the remote whose branches are being viewed in RemoteBranches context.
     pub remote_branches_name: String,
     /// Parent context to return to when pressing Esc from BranchCommits.
@@ -816,7 +832,7 @@ fn synthesize_new_file_diff(filename: &str, content: &str) -> String {
     diff
 }
 
-/// Placeholder so the pager shows "Binary file (not viewable)".
+/// Synthetic binary diff so the pager renders its unavailable-preview placeholder.
 fn synthesize_binary_file_diff(filename: &str) -> String {
     format!(
         "diff --git a/{f} b/{f}\n\
@@ -866,6 +882,24 @@ fn parse_commit_file_diff_payload(
     current_path: &str,
     diff: &str,
 ) -> DiffPayload {
+    let paths = crate::git::diff::diff_paths_for_label(name);
+    let parent = format!("{hash}^1");
+    if let Some(parsed) = image_diff_payload(
+        git,
+        name,
+        diff,
+        false,
+        crate::pager::image_preview::ImageSource::Revision {
+            revision: &parent,
+            path: paths[0],
+        },
+        crate::pager::image_preview::ImageSource::Revision {
+            revision: hash,
+            path: current_path,
+        },
+    ) {
+        return DiffPayload::Parsed(parsed);
+    }
     if is_rename_only_diff(diff) {
         if let Ok(content) = git.file_content_at_commit(hash, current_path) {
             if !content.is_empty() {
@@ -882,6 +916,41 @@ fn parse_commit_file_diff_payload(
     DiffPayload::Parsed(DiffViewState::parse_diff_output(name, diff, 4, false))
 }
 
+/// Only single raster-file selections are previewed; multi-file buffers retain
+/// their ordinary binary placeholders. Decoding validates the actual bytes.
+fn image_diff_payload(
+    git: &GitCommands,
+    name: &str,
+    diff: &str,
+    exists: bool,
+    old: crate::pager::image_preview::ImageSource<'_>,
+    new: crate::pager::image_preview::ImageSource<'_>,
+) -> Option<crate::pager::side_by_side::ParsedDiff> {
+    let paths = crate::git::diff::diff_paths_for_label(name);
+    if !paths
+        .iter()
+        .any(|p| crate::pager::image_preview::is_image_path(p))
+    {
+        return None;
+    }
+    let preview = crate::pager::image_preview::load(git, old, new)?;
+    // A rename-only image has no binary marker, but must still be a nonempty
+    // diff view without text hunks (image content cannot be staged by hunk).
+    let placeholder = synthesize_binary_file_diff(name);
+    let mut parsed = DiffViewState::parse_diff_output(
+        name,
+        if diff.is_empty() || is_rename_only_diff(diff) {
+            &placeholder
+        } else {
+            diff
+        },
+        4,
+        exists,
+    );
+    parsed.image_preview = Some(preview);
+    Some(parsed)
+}
+
 impl Gui {
     fn show_error(&mut self, title: &str, err: anyhow::Error) {
         self.popup = PopupState::Message {
@@ -891,7 +960,12 @@ impl Gui {
         };
     }
 
-    pub fn new(config: AppConfig, git: GitCommands, filter_path: Option<PathBuf>) -> Result<Self> {
+    pub fn new(
+        config: AppConfig,
+        git: GitCommands,
+        filter_path: Option<PathBuf>,
+        start_in_commits: bool,
+    ) -> Result<Self> {
         let (diff_tx, diff_rx) = mpsc::channel();
         let (diff_scheduler_tx, diff_scheduler_rx) = mpsc::channel();
         let (diff_prefetch_tx, diff_prefetch_rx) = mpsc::channel();
@@ -983,8 +1057,9 @@ impl Gui {
             .unwrap_or(0);
 
         let mut context_mgr = ContextManager::new();
-        if startup_path_filter.is_some() {
+        if startup_path_filter.is_some() || start_in_commits {
             context_mgr.set_active(ContextId::Commits);
+            context_mgr.set_selection_for(ContextId::Commits, 0);
         }
 
         Ok(Self {
@@ -1070,6 +1145,7 @@ impl Gui {
             commit_files_collapsed_dirs: HashSet::new(),
             show_commit_file_tree: show_file_tree,
             branch_commits_name: String::new(),
+            pending_startup_head: start_in_commits,
             remote_branches_name: String::new(),
             sub_commits_parent_context: context::ContextId::Branches,
             commit_files_parent_context: None,
@@ -1117,6 +1193,9 @@ impl Gui {
         let mut keyboard_enhanced = keyboard_enhanced;
         let result = self.main_loop(&mut terminal, &input, &mut keyboard_enhanced);
 
+        self.diff_preview_cache.clear();
+        self.diff_view.reset_keep_prefs();
+        self.displayed_diff_key.clear();
         restore_terminal(&mut terminal, keyboard_enhanced)?;
         result
     }
@@ -1154,6 +1233,13 @@ impl Gui {
         // event reader is process-wide and would steal hx/nvim's keystrokes.
         input.pause();
         input.drain();
+        // Dropping the cached protocols queues scoped deletes and ensures they
+        // are freshly transmitted after returning from another alternate screen.
+        self.diff_preview_cache.clear();
+        self.diff_view.reset_keep_prefs();
+        self.displayed_diff_key.clear();
+        self.needs_diff_refresh = true;
+        crate::pager::image_preview::flush_cleanup(terminal.backend_mut());
         restore_terminal(terminal, *keyboard_enhanced)?;
 
         // LeaveAlternateScreen restores the previous buffer; wipe the primary
@@ -1219,6 +1305,7 @@ impl Gui {
             // Drain any model parts that have arrived from the background load.
             if let Some(rx) = &self.initial_load_rx {
                 let mut got_files = false;
+                let mut got_commits = false;
                 let mut got_rebase_in_progress = false;
                 let received_before = self.initial_load_received;
                 while let Ok(part) = rx.try_recv() {
@@ -1230,6 +1317,7 @@ impl Gui {
                         }
                         ModelPart::Branches(v) => model.branches = v,
                         ModelPart::Commits(v) => {
+                            got_commits = true;
                             // Stream already applies the active filter when one is set
                             // (`load_model_streaming(commit_filter)`), so always take it.
                             self.commit_history_complete = v.len() < DEFAULT_COMMIT_LIMIT;
@@ -1269,6 +1357,11 @@ impl Gui {
                         ModelPart::Contributors(c) => model.contributors = c,
                     }
                     self.initial_load_received += 1;
+                }
+                if got_commits {
+                    if let Err(err) = self.select_startup_head() {
+                        self.show_error("Could not select HEAD", err);
+                    }
                 }
                 // Enter the InProgress rebase view as soon as we know a rebase
                 // is on disk — don't wait for a future `refresh()` tick (focus
@@ -1354,6 +1447,18 @@ impl Gui {
 
             // Render
             let theme = self.active_theme();
+            crate::pager::image_preview::flush_cleanup(terminal.backend_mut());
+            self.diff_view.image_preview_hidden = self.popup != PopupState::None
+                || (self.show_command_log
+                    && self
+                        .diff_view
+                        .image_preview
+                        .as_ref()
+                        .is_some_and(|p| !p.uses_placeholders()))
+                || self.ai_commit_generation_active()
+                || self.remote_op_label.is_some()
+                || self.rebase_mode.active
+                || self.patch_building.active;
             terminal.draw(|frame| {
                 if self.rebase_mode.active {
                     presentation::rebase_mode::render(frame, &mut self.rebase_mode, &theme);
@@ -1409,6 +1514,10 @@ impl Gui {
                         &theme,
                         self.diff_loading,
                         diff_loading_show,
+                        &mut self.commit_list_cache,
+                        self.layout.side_panel_ratio,
+                        self.screen_mode,
+                        &self.config.user_config.keybinding,
                     );
                     // Render popup overlay on top of diff mode (for ? help, errors, etc.)
                     if self.popup != PopupState::None {
@@ -1559,19 +1668,7 @@ impl Gui {
             // One batch per frame. Reassembly lives on the reader thread so a
             // split ESC [ A cannot leak as Char('A') → amend between frames.
             // Keep the frame budget tight while anything animated/async is up.
-            let timeout = if self.ai_commit_generation_active()
-                || self.remote_op_label.is_some()
-                || self.diff_loading
-                || self.initial_load_rx.is_some()
-                || self.refresh_in_progress
-            {
-                Duration::from_millis(16)
-            } else if self.config.user_config.git.auto_refresh {
-                Duration::from_millis(50)
-            } else {
-                Duration::from_millis(200)
-            };
-            let events = input.wait_batch(timeout);
+            let events = input.wait_batch(self.input_wait_timeout());
             self.handle_event_batch(events);
 
             // Terminal editors: leave alt screen, run hx/nvim, restore TUI.
@@ -1613,6 +1710,22 @@ impl Gui {
         }
 
         Ok(())
+    }
+
+    fn input_wait_timeout(&self) -> Duration {
+        if self.ai_commit_generation_active()
+            || self.remote_op_label.is_some()
+            || self.needs_refresh
+            || self.diff_loading
+            || self.initial_load_rx.is_some()
+            || self.refresh_in_progress
+        {
+            Duration::from_millis(16)
+        } else if self.config.user_config.git.auto_refresh {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(200)
+        }
     }
 
     /// Apply one batch of terminal events before the next paint.
@@ -1756,28 +1869,7 @@ impl Gui {
 
     fn current_diff_key(&self) -> String {
         if self.diff_mode.active {
-            let item_key = if self.diff_mode.show_tree {
-                self.diff_mode
-                    .tree_nodes
-                    .get(self.diff_mode.diff_files_selected)
-                    .map(|node| {
-                        node.file_index
-                            .and_then(|index| self.diff_mode.diff_files.get(index))
-                            .map(|file| format!("file:{}", file.name))
-                            .unwrap_or_else(|| format!("dir:{}", node.path))
-                    })
-                    .unwrap_or_else(|| "none".to_string())
-            } else {
-                self.diff_mode
-                    .diff_files
-                    .get(self.diff_mode.diff_files_selected)
-                    .map(|file| format!("file:{}", file.name))
-                    .unwrap_or_else(|| "none".to_string())
-            };
-            return format!(
-                "DiffMode:{}..{}:{}",
-                self.diff_mode.ref_a, self.diff_mode.ref_b, item_key
-            );
+            return self.diff_mode.diff_key();
         }
 
         let active = self.context_mgr.active();
@@ -2471,10 +2563,31 @@ impl Gui {
         if let Ok(result) = self.remote_op_rx.try_recv() {
             self.remote_op_label = None;
             match result {
-                Ok(()) => {
-                    self.pending_checkout_by_name = None;
+                Ok(head) => {
+                    let was_checkout = self.pending_checkout_by_name.take().is_some();
+                    if let Some(head) = head {
+                        let mut model = self.model.lock().unwrap();
+                        for branch in &mut model.branches {
+                            branch.head = branch.name == head.branch_name;
+                        }
+                        model.head_hash = head.hash;
+                        model.head_branch_name = head.branch_name;
+                        self.needs_diff_refresh = true;
+                    }
                     self.needs_refresh = true;
                     self.remote_op_success_at = Some(Instant::now());
+                    if was_checkout {
+                        // A pre-checkout stream must not overwrite confirmed HEAD
+                        // or files. Its workers can finish, but drop their results.
+                        self.initial_load_rx = None;
+                        self.refresh_in_progress = false;
+                        self.files_refresh_rx = None;
+                        self.files_refresh_in_progress = false;
+                        self.needs_files_refresh = false;
+                        // Dispatch before the next paint/input wait, not after an
+                        // idle 50/200ms poll. HEAD is already visible above.
+                        self.start_background_refresh();
+                    }
                 }
                 Err(e) => {
                     let err = format!("{}", e);
@@ -2751,8 +2864,17 @@ impl Gui {
         self.remote_op_success_at = None;
         let git = Arc::clone(&self.git);
         let tx = self.remote_op_tx.clone();
+        let is_checkout = self.pending_checkout_by_name.is_some();
         std::thread::spawn(move || {
-            let result = op(&git);
+            let result = op(&git).map(|()| {
+                if is_checkout {
+                    // Read on the worker, never on the UI thread. If this read
+                    // fails, checkout still succeeded; the refresh is the fallback.
+                    git.head_state().ok()
+                } else {
+                    None
+                }
+            });
             let _ = tx.send(result);
         });
     }
@@ -2951,6 +3073,7 @@ impl Gui {
                     let has_staged = file.has_staged_changes;
                     let has_unstaged = file.has_unstaged_changes;
                     let tracked = file.tracked;
+                    let conflicted = file.has_merge_conflicts;
                     drop(model);
 
                     let git = Arc::clone(&self.git);
@@ -2959,6 +3082,39 @@ impl Gui {
                     self.diff_loading_since = Some(Instant::now());
                     self.queue_diff_job(generation, diff_key, move || {
                         let path_refs: Vec<&str> = diff_paths.iter().map(String::as_str).collect();
+                        use crate::pager::image_preview::ImageSource;
+                        let old_path = path_refs[0];
+                        let old = if !tracked {
+                            ImageSource::Missing
+                        } else {
+                            ImageSource::Revision {
+                                revision: if has_staged { "HEAD" } else { "" },
+                                path: old_path,
+                            }
+                        };
+                        let new = if has_staged && !has_unstaged {
+                            ImageSource::Revision {
+                                revision: "",
+                                path: &current_path,
+                            }
+                        } else {
+                            ImageSource::Worktree(&current_path)
+                        };
+                        if let Some(parsed) = (!conflicted)
+                            .then(|| {
+                                image_diff_payload(
+                                    &git,
+                                    &name,
+                                    "",
+                                    git.repo_path().join(&current_path).exists(),
+                                    old,
+                                    new,
+                                )
+                            })
+                            .flatten()
+                        {
+                            return DiffPayload::Parsed(parsed);
+                        }
                         // Single HEAD buffer with coherent line numbers;
                         // hunks are dimmed/tinted staged vs unstaged via
                         // overlap with the unstaged diff. Falls back to the
@@ -3069,6 +3225,13 @@ impl Gui {
                                 .filter(|f| !f.tracked)
                                 .map(|f| f.current_path().to_string())
                                 .collect();
+                            let excluded: std::collections::HashSet<String> = node
+                                .child_file_indices
+                                .iter()
+                                .filter_map(|&i| model.files.get(i))
+                                .filter(|f| f.has_merge_conflicts)
+                                .flat_map(|f| f.diff_paths().into_iter().map(str::to_string))
+                                .collect();
                             let pathspec = pathspec_for_tree_path(&node.path);
                             let dir_name = node.name.clone();
                             drop(model);
@@ -3137,6 +3300,14 @@ impl Gui {
                                     if parsed.hunk_staged.len() != parsed.hunk_starts.len() {
                                         parsed.hunk_staged = vec![false; parsed.hunk_starts.len()];
                                     }
+                                    crate::pager::image_preview::attach_inline_image_previews(
+                                        &mut parsed,
+                                        git.repo_path(),
+                                        &combined_diff,
+                                        "HEAD",
+                                        None,
+                                        &excluded,
+                                    );
                                     if parsed.lines.is_empty() {
                                         DiffPayload::Empty
                                     } else {
@@ -3293,12 +3464,22 @@ impl Gui {
                                 if combined_diff.is_empty() {
                                     DiffPayload::Empty
                                 } else {
-                                    DiffPayload::Parsed(DiffViewState::parse_diff_output(
+                                    let mut parsed = DiffViewState::parse_diff_output(
                                         &dir_name,
                                         &combined_diff,
                                         4,
                                         true,
-                                    ))
+                                    );
+                                    let parent = format!("{hash}^1");
+                                    crate::pager::image_preview::attach_inline_image_previews(
+                                        &mut parsed,
+                                        git.repo_path(),
+                                        &combined_diff,
+                                        &parent,
+                                        Some(&hash),
+                                        &HashSet::new(),
+                                    );
+                                    DiffPayload::Parsed(parsed)
                                 }
                             });
                         } else {
@@ -3334,7 +3515,66 @@ impl Gui {
         Ok(false)
     }
 
+    /// Split-resize shortcuts shared by the main UI and compare mode.
+    fn try_handle_panel_resize_key(&mut self, key: KeyEvent) -> bool {
+        let keybindings = &self.config.user_config.keybinding;
+        // Side-panel resize: orientation-aware.
+        // Portrait (vertical stack): side on top, diff on bottom.
+        //   Alt+h/l → shrink/expand by step
+        //   Alt+k → diff pane full (ratio 0.0), Alt+j → side pane full (ratio 1.0)
+        // Landscape (horizontal split): side on left, diff on right.
+        //   Alt+h/l → shrink/expand by step, Alt+k → side full, Alt+j → main full
+        let portrait =
+            layout::should_use_portrait(self.layout.width, self.layout.height, self.screen_mode);
+        let shrink_key = matches_key(key, &keybindings.universal.shrink_side_panel);
+        let expand_key = matches_key(key, &keybindings.universal.expand_side_panel);
+        if shrink_key || expand_key {
+            const STEP: f64 = 0.05;
+            let delta = if shrink_key { -STEP } else { STEP };
+            self.layout.side_panel_ratio = (self.layout.side_panel_ratio + delta).clamp(0.0, 1.0);
+            return true;
+        }
+        if matches_key(key, &keybindings.universal.side_panel_full) {
+            // Alt+k: diff full in portrait, side full in landscape
+            self.layout.side_panel_ratio = if portrait { 0.0 } else { 1.0 };
+            return true;
+        }
+        if matches_key(key, &keybindings.universal.main_panel_full) {
+            // Alt+j: side full in portrait, main full in landscape
+            self.layout.side_panel_ratio = if portrait { 1.0 } else { 0.0 };
+            return true;
+        }
+        if matches_key(key, &keybindings.universal.reset_side_panel) {
+            self.layout.side_panel_ratio = self.config.user_config.gui.side_panel_width;
+            return true;
+        }
+
+        false
+    }
+
+    /// Compare layout shortcuts run only after its text-input handlers.
+    fn try_handle_layout_key(&mut self, mut key: KeyEvent) -> bool {
+        if self.try_handle_panel_resize_key(key) {
+            return true;
+        }
+        // Terminals may report shifted punctuation with or without SHIFT.
+        if matches!(key.code, KeyCode::Char('+') | KeyCode::Char('_')) {
+            key.modifiers.remove(KeyModifiers::SHIFT);
+        }
+        let keybindings = &self.config.user_config.keybinding;
+        if matches_key(key, &keybindings.universal.next_screen_mode) {
+            self.next_screen_mode();
+            return true;
+        }
+        if matches_key(key, &keybindings.universal.prev_screen_mode) {
+            self.prev_screen_mode();
+            return true;
+        }
+        false
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        self.pending_startup_head = false;
         if self.handle_ai_commit_cancel_key(key) {
             return Ok(());
         }
@@ -3370,39 +3610,10 @@ impl Gui {
             return controller::diff_mode::handle_key(self, key);
         }
 
+        if self.try_handle_panel_resize_key(key) {
+            return Ok(());
+        }
         let keybindings = &self.config.user_config.keybinding;
-
-        // Side-panel resize: orientation-aware.
-        // Portrait (vertical stack): side on top, diff on bottom.
-        //   Alt+h/l → shrink/expand by step
-        //   Alt+k → diff pane full (ratio 0.0), Alt+j → side pane full (ratio 1.0)
-        // Landscape (horizontal split): side on left, diff on right.
-        //   Alt+h/l → shrink/expand by step, Alt+k → side full, Alt+j → main full
-        let portrait = self.screen_mode != ScreenMode::Full
-            && self.layout.width <= 84
-            && self.layout.height > 25;
-        let shrink_key = matches_key(key, &keybindings.universal.shrink_side_panel);
-        let expand_key = matches_key(key, &keybindings.universal.expand_side_panel);
-        if shrink_key || expand_key {
-            const STEP: f64 = 0.05;
-            let delta = if shrink_key { -STEP } else { STEP };
-            self.layout.side_panel_ratio = (self.layout.side_panel_ratio + delta).clamp(0.0, 1.0);
-            return Ok(());
-        }
-        if matches_key(key, &keybindings.universal.side_panel_full) {
-            // Alt+k: diff full in portrait, side full in landscape
-            self.layout.side_panel_ratio = if portrait { 0.0 } else { 1.0 };
-            return Ok(());
-        }
-        if matches_key(key, &keybindings.universal.main_panel_full) {
-            // Alt+j: side full in portrait, main full in landscape
-            self.layout.side_panel_ratio = if portrait { 1.0 } else { 0.0 };
-            return Ok(());
-        }
-        if matches_key(key, &keybindings.universal.reset_side_panel) {
-            self.layout.side_panel_ratio = self.config.user_config.gui.side_panel_width;
-            return Ok(());
-        }
 
         if matches_key(key, &keybindings.universal.toggle_diff_view_layout) {
             self.diff_view.toggle_view_layout();
@@ -3429,8 +3640,9 @@ impl Gui {
             return self.handle_diff_focused_key(key);
         }
 
-        if matches_key(key, &keybindings.universal.custom_command_prompt) {
-            return controller::custom_commands::open_custom_command_prompt(self);
+        // Toggle between working-tree changes and the actual checked-out HEAD.
+        if matches_key(key, &keybindings.universal.toggle_working_tree_and_head) {
+            return self.toggle_working_tree_and_head();
         }
 
         // Global keybindings
@@ -3495,6 +3707,11 @@ impl Gui {
             self.context_mgr.prev_window();
             return Ok(());
         }
+
+        if self.try_handle_tree_navigation(key) {
+            return Ok(());
+        }
+        let keybindings = &self.config.user_config.keybinding;
 
         // Arrow keys / h/l to switch windows
         if matches_key(key, &keybindings.universal.prev_block)
@@ -3709,10 +3926,10 @@ impl Gui {
             return Ok(());
         }
 
-        // `.` toggles the commit-details box when in any commit-related
+        // `'` toggles the commit-details box when in any commit-related
         // context.  Kept outside per-context controllers so the binding is
         // consistent across Commits / BranchCommits / Reflog / CommitFiles.
-        if key.code == KeyCode::Char('.') && self.context_has_commit_details() {
+        if key.code == KeyCode::Char('\'') && self.context_has_commit_details() {
             self.show_commit_details = !self.show_commit_details;
             self.persist_commit_details_visibility();
             return Ok(());
@@ -3725,6 +3942,41 @@ impl Gui {
         controller::custom_commands::try_handle_key(self, key)?;
 
         Ok(())
+    }
+
+    fn active_file_tree(&self) -> bool {
+        match self.context_mgr.active() {
+            ContextId::Files => self.show_file_tree,
+            ContextId::CommitFiles | ContextId::BranchCommitFiles | ContextId::StashFiles => {
+                self.show_commit_file_tree
+            }
+            _ => false,
+        }
+    }
+
+    fn try_handle_tree_navigation(&mut self, key: KeyEvent) -> bool {
+        let active = self.context_mgr.active();
+        let selected = self.context_mgr.selected_active();
+        let kb = &self.config.user_config.keybinding;
+        let destination = match active {
+            ContextId::Files if self.show_file_tree => {
+                controller::tree::destination(key, kb, &self.file_tree_nodes, selected)
+            }
+            ContextId::CommitFiles | ContextId::BranchCommitFiles | ContextId::StashFiles
+                if self.show_commit_file_tree =>
+            {
+                controller::tree::destination(key, kb, &self.commit_file_tree_nodes, selected)
+            }
+            _ => None,
+        };
+        if let Some(destination) = destination {
+            if let Some(idx) = destination {
+                self.context_mgr.set_selection(idx);
+                self.needs_diff_refresh = true;
+            }
+            return true;
+        }
+        false
     }
 
     fn handle_context_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -3831,7 +4083,7 @@ impl Gui {
                             .map(|(line_idx, _, panel)| (line_idx, panel))
                             .unwrap_or_else(|| {
                                 (
-                                    self.diff_view.scroll_offset + (top_row - pl.inner_y) as usize,
+                                    self.diff_view.fallback_line_idx_for_row(top_row, &pl),
                                     sel_ref.panel,
                                 )
                             })
@@ -3952,6 +4204,16 @@ impl Gui {
             }
             return Ok(());
         }
+
+        // Respect the configured binding in the diff pane too.
+        if matches_key(key, &keybindings.universal.toggle_working_tree_and_head) {
+            return self.toggle_working_tree_and_head();
+        }
+
+        if self.try_handle_tree_navigation(key) {
+            return Ok(());
+        }
+        let keybindings = &self.config.user_config.keybinding;
 
         // Toggle command log (;)
         if key.code == KeyCode::Char(';') {
@@ -5542,7 +5804,11 @@ impl Gui {
         for commit in model.commits.iter().skip(1) {
             items.push(ListPickerItem {
                 value: commit.hash.clone(),
-                label: format!("{} {}", commit.short_hash(), commit.name),
+                label: format!(
+                    "{} {}",
+                    commit.short_hash(),
+                    presentation::text::plain_text(&commit.name)
+                ),
                 category: "Commits".to_string(),
                 description: None,
             });
@@ -5615,16 +5881,16 @@ impl Gui {
                     kb.universal.create_patch_options_menu.clone(),
                     "Patch options".into(),
                 ),
+                CommandEntry::keybinding(
+                    kb.universal.toggle_working_tree_and_head.clone(),
+                    "Toggle files / commit HEAD".into(),
+                ),
                 CommandEntry::keybinding("{/}".into(), "Previous/next hunk".into()),
                 CommandEntry::keybinding(";".into(), "Toggle command log".into()),
                 CommandEntry::keybinding("W".into(), "Compare / Diff mode".into()),
                 CommandEntry::keybinding("I".into(), "Interactive rebase onto...".into()),
                 CommandEntry::keybinding("G".into(), "Reset to...".into()),
                 CommandEntry::keybinding("1-5".into(), "Jump to panel".into()),
-                CommandEntry::keybinding(
-                    kb.universal.custom_command_prompt.clone(),
-                    "Execute shell command".into(),
-                ),
                 CommandEntry::keybinding("?".into(), "Show command palette".into()),
                 CommandEntry::action(
                     "".into(),
@@ -5639,7 +5905,10 @@ impl Gui {
             ContextId::Files => CommandSection {
                 title: "Files".into(),
                 entries: vec![
-                    CommandEntry::keybinding("<enter>".into(), "Toggle dir / Focus diff".into()),
+                    CommandEntry::keybinding(
+                        "<enter>".into(),
+                        "Focus file / directory diff".into(),
+                    ),
                     CommandEntry::keybinding("<space>".into(), "Stage / Unstage".into()),
                     CommandEntry::keybinding(
                         kb.universal.toggle_diff_view_layout.clone(),
@@ -5760,7 +6029,7 @@ impl Gui {
                             kb.universal.toggle_diff_view_layout.clone(),
                             "Toggle unified / side-by-side view".into(),
                         ),
-                        CommandEntry::keybinding(".".into(), "Toggle commit details panel".into()),
+                        CommandEntry::keybinding("'".into(), "Toggle commit details panel".into()),
                     ];
                     // Grep only applies to the files list, not the commits list.
                     if active == ContextId::BranchCommitFiles {
@@ -5844,7 +6113,7 @@ impl Gui {
                         kb.commits.open_log_menu.clone(),
                         "Filter commits".into(),
                     ),
-                    CommandEntry::keybinding(".".into(), "Toggle commit details panel".into()),
+                    CommandEntry::keybinding("'".into(), "Toggle commit details panel".into()),
                 ];
                 if !self.cherry_pick_clipboard.is_empty() {
                     entries.insert(
@@ -5855,6 +6124,15 @@ impl Gui {
                         ),
                     );
                 }
+                if self.commit_path_filter.is_some()
+                    || !self.commit_author_filter.is_empty()
+                    || !self.commit_branch_filter.is_empty()
+                {
+                    entries.insert(
+                        0,
+                        CommandEntry::keybinding("<esc>".into(), "Reset commit filter".into()),
+                    );
+                }
                 CommandSection {
                     title: "Commits".into(),
                     entries,
@@ -5863,7 +6141,10 @@ impl Gui {
             ContextId::CommitFiles => CommandSection {
                 title: "Commit Files".into(),
                 entries: vec![
-                    CommandEntry::keybinding("<enter>".into(), "Toggle dir / Focus diff".into()),
+                    CommandEntry::keybinding(
+                        "<enter>".into(),
+                        "Focus file / directory diff".into(),
+                    ),
                     CommandEntry::keybinding("<esc>".into(), "Back to commits".into()),
                     CommandEntry::keybinding("<c-f>".into(), "Grep diff contents".into()),
                     CommandEntry::keybinding(kb.universal.edit.clone(), "Edit file".into()),
@@ -5877,7 +6158,7 @@ impl Gui {
                         "Toggle tree view".into(),
                     ),
                     CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
-                    CommandEntry::keybinding(".".into(), "Toggle commit details panel".into()),
+                    CommandEntry::keybinding("'".into(), "Toggle commit details panel".into()),
                 ],
             },
             ContextId::Reflog => CommandSection {
@@ -5901,7 +6182,7 @@ impl Gui {
                         "Copy (cherry-pick)".into(),
                     ),
                     CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
-                    CommandEntry::keybinding(".".into(), "Toggle commit details panel".into()),
+                    CommandEntry::keybinding("'".into(), "Toggle commit details panel".into()),
                 ],
             },
             ContextId::Stash => CommandSection {
@@ -5921,7 +6202,10 @@ impl Gui {
             ContextId::StashFiles => CommandSection {
                 title: "Stash Files".into(),
                 entries: vec![
-                    CommandEntry::keybinding("<enter>".into(), "Toggle dir / Focus diff".into()),
+                    CommandEntry::keybinding(
+                        "<enter>".into(),
+                        "Focus file / directory diff".into(),
+                    ),
                     CommandEntry::keybinding("<esc>".into(), "Back to stash".into()),
                     CommandEntry::keybinding("<c-f>".into(), "Grep diff contents".into()),
                     CommandEntry::keybinding(
@@ -5989,7 +6273,10 @@ impl Gui {
             },
         };
 
-        let sections = vec![context_section, universal];
+        let mut sections = vec![context_section, universal];
+        if self.active_file_tree() {
+            sections.insert(1, controller::tree::command_section(kb, true));
+        }
 
         self.popup = PopupState::CommandPalette {
             sections,
@@ -6026,6 +6313,15 @@ impl Gui {
                     .toggle_diff_view_layout
                     .clone(),
                 "Toggle unified / side-by-side view".into(),
+            ),
+            CommandEntry::keybinding(
+                self.config
+                    .user_config
+                    .keybinding
+                    .universal
+                    .toggle_working_tree_and_head
+                    .clone(),
+                "Toggle files / commit HEAD".into(),
             ),
             CommandEntry::keybinding("z".into(), "Toggle line wrap".into()),
             CommandEntry::keybinding("g/G".into(), "Go to top / bottom".into()),
@@ -6080,8 +6376,15 @@ impl Gui {
             entries,
         };
 
+        let mut sections = vec![diff_section];
+        if self.active_file_tree() {
+            sections.push(controller::tree::command_section(
+                &self.config.user_config.keybinding,
+                false,
+            ));
+        }
         self.popup = PopupState::CommandPalette {
-            sections: vec![diff_section],
+            sections,
             selected: 0,
             search_textarea: popup::make_command_palette_search_textarea(),
             scroll_offset: 0,
@@ -6700,6 +7003,7 @@ impl Gui {
             }
         } else if self.popup == PopupState::None
             && self.screen_mode == ScreenMode::Normal
+            && (!self.diff_mode.active || self.diff_mode.editing.is_none())
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && self.sidebar_divider_hit(mouse.column, mouse.row)
         {
@@ -7042,6 +7346,13 @@ impl Gui {
                         self.diff_focused = true;
                         return;
                     }
+                    // Clicks on the pinned sticky file header don't start a
+                    // text selection — there is no content to select there.
+                    if self.diff_view.is_sticky_row(mouse.row, &pl) {
+                        self.diff_view.selection = None;
+                        self.diff_focused = true;
+                        return;
+                    }
                     if let Some(panel) = pl.panel_at_x(mouse.column) {
                         self.diff_view.selection = Some(TextSelection {
                             panel,
@@ -7175,7 +7486,7 @@ impl Gui {
     fn handle_diff_mode_mouse(&mut self, mouse: MouseEvent) {
         use self::modes::diff_mode::{DiffModeFocus, DiffModeSelector};
         use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
-        use ratatui::layout::{Constraint, Direction, Layout, Rect};
+        use ratatui::layout::Rect;
 
         // Help popup intercepts mouse scroll
         if let PopupState::CommandPalette {
@@ -7234,30 +7545,14 @@ impl Gui {
 
         let area = Rect::new(0, 0, self.layout.width, self.layout.height);
 
-        // Replicate the diff mode layout to determine regions
-        let outer = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(1)])
-            .split(area);
-
-        let content = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(33), Constraint::Percentage(67)])
-            .split(outer[0]);
-
-        let sidebar = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Min(1),
-            ])
-            .split(content[0]);
+        let compare_layout = self.compute_compare_layout();
+        let sidebar = compare_layout.sidebar;
 
         let selector_a_rect = sidebar[0];
         let selector_b_rect = sidebar[1];
         let files_rect = sidebar[2];
-        let diff_rect = content[1];
+        let commits_rect = sidebar[3];
+        let diff_rect = compare_layout.diff;
 
         let col = mouse.column;
         let row = mouse.row;
@@ -7294,9 +7589,9 @@ impl Gui {
                             self.diff_mode.confirm_selection();
                             if self.diff_mode.has_both_refs() {
                                 let _ = crate::gui::controller::diff_mode::reload_diff_files(self);
-                                self.diff_mode.focus = DiffModeFocus::CommitFiles;
+                                self.diff_mode.set_focus(DiffModeFocus::CommitFiles);
                             } else if self.diff_mode.ref_a.is_empty() {
-                                self.diff_mode.focus = DiffModeFocus::SelectorA;
+                                self.diff_mode.set_focus(DiffModeFocus::SelectorA);
                                 self.diff_mode.start_editing(DiffModeSelector::A);
                                 let model = self.model.lock().unwrap();
                                 self.diff_mode.search_refs(
@@ -7307,7 +7602,7 @@ impl Gui {
                                     &model.head_branch_name,
                                 );
                             } else {
-                                self.diff_mode.focus = DiffModeFocus::SelectorB;
+                                self.diff_mode.set_focus(DiffModeFocus::SelectorB);
                                 self.diff_mode.start_editing(DiffModeSelector::B);
                                 let model = self.model.lock().unwrap();
                                 self.diff_mode.search_refs(
@@ -7350,7 +7645,12 @@ impl Gui {
                 if rect_contains(diff_rect, col, row) && !self.diff_view.is_empty() {
                     let pl = DiffPanelLayout::compute(diff_rect, &self.diff_view);
                     if self.try_handle_revert_block_click(diff_rect, pl, col, row) {
-                        self.diff_mode.focus = DiffModeFocus::DiffExploration;
+                        self.diff_mode.set_focus(DiffModeFocus::DiffExploration);
+                        return;
+                    }
+                    if self.diff_view.is_sticky_row(row, &pl) {
+                        self.diff_view.selection = None;
+                        self.diff_mode.set_focus(DiffModeFocus::DiffExploration);
                         return;
                     }
                     if let Some(panel) = pl.panel_at_x(col) {
@@ -7369,13 +7669,13 @@ impl Gui {
                     } else {
                         self.diff_view.selection = None;
                     }
-                    self.diff_mode.focus = DiffModeFocus::DiffExploration;
+                    self.diff_mode.set_focus(DiffModeFocus::DiffExploration);
                 } else {
                     self.diff_view.selection = None;
 
                     // Click on panels to switch focus
                     if rect_contains(selector_a_rect, col, row) {
-                        self.diff_mode.focus = DiffModeFocus::SelectorA;
+                        self.diff_mode.set_focus(DiffModeFocus::SelectorA);
                         // Start editing on click
                         self.diff_mode.start_editing(DiffModeSelector::A);
                         let model = self.model.lock().unwrap();
@@ -7387,7 +7687,7 @@ impl Gui {
                             &model.head_branch_name,
                         );
                     } else if rect_contains(selector_b_rect, col, row) {
-                        self.diff_mode.focus = DiffModeFocus::SelectorB;
+                        self.diff_mode.set_focus(DiffModeFocus::SelectorB);
                         // Start editing on click
                         self.diff_mode.start_editing(DiffModeSelector::B);
                         let model = self.model.lock().unwrap();
@@ -7399,7 +7699,8 @@ impl Gui {
                             &model.head_branch_name,
                         );
                     } else if rect_contains(files_rect, col, row) {
-                        self.diff_mode.focus = DiffModeFocus::CommitFiles;
+                        self.diff_mode.set_focus(DiffModeFocus::CommitFiles);
+                        self.needs_diff_refresh = true;
                         // Click to select a file — use stored scroll offset
                         let inner_y = row.saturating_sub(files_rect.y + 1);
                         let len = self.diff_mode.visible_files_len();
@@ -7409,8 +7710,20 @@ impl Gui {
                             self.diff_mode.viewport_manually_scrolled = false;
                             self.needs_diff_refresh = true;
                         }
+                    } else if rect_contains(commits_rect, col, row) {
+                        self.diff_mode.set_focus(DiffModeFocus::Commits);
+                        let inner_y = row.saturating_sub(commits_rect.y + 1);
+                        let clicked_idx = self.diff_mode.commits_scroll + inner_y as usize;
+                        if row > commits_rect.y
+                            && row < commits_rect.bottom().saturating_sub(1)
+                            && clicked_idx < self.diff_mode.commits.len()
+                        {
+                            self.diff_mode.commits_selected = clicked_idx;
+                            self.diff_mode.commits_viewport_manually_scrolled = false;
+                        }
+                        self.needs_diff_refresh = true;
                     } else if rect_contains(diff_rect, col, row) {
-                        self.diff_mode.focus = DiffModeFocus::DiffExploration;
+                        self.diff_mode.set_focus(DiffModeFocus::DiffExploration);
                     }
                 }
             }
@@ -7456,6 +7769,14 @@ impl Gui {
                         visible_height,
                     );
                     self.diff_mode.viewport_manually_scrolled = true;
+                } else if rect_contains(commits_rect, col, row) {
+                    scroll::scroll_viewport(
+                        &mut self.diff_mode.commits_scroll,
+                        -3,
+                        self.diff_mode.commits.len(),
+                        commits_rect.height.saturating_sub(2) as usize,
+                    );
+                    self.diff_mode.commits_viewport_manually_scrolled = true;
                 }
             }
             MouseEventKind::ScrollDown => {
@@ -7477,6 +7798,26 @@ impl Gui {
                         visible_height,
                     );
                     self.diff_mode.viewport_manually_scrolled = true;
+                } else if rect_contains(commits_rect, col, row) {
+                    let visible_height = commits_rect.height.saturating_sub(2) as usize;
+                    if self.diff_mode.commits_scroll + visible_height + 3
+                        >= self.diff_mode.commits.len()
+                    {
+                        if let Err(error) = controller::diff_mode::load_more_commits(self) {
+                            self.popup = PopupState::Message {
+                                title: "Compare commits".into(),
+                                message: error.to_string(),
+                                kind: popup::MessageKind::Error,
+                            };
+                        }
+                    }
+                    scroll::scroll_viewport(
+                        &mut self.diff_mode.commits_scroll,
+                        3,
+                        self.diff_mode.commits.len(),
+                        visible_height,
+                    );
+                    self.diff_mode.commits_viewport_manually_scrolled = true;
                 }
             }
             MouseEventKind::ScrollLeft => {
@@ -7629,6 +7970,15 @@ impl Gui {
         )
     }
 
+    fn compute_compare_layout(&self) -> modes::diff_mode::CompareLayout {
+        modes::diff_mode::CompareLayout::new(
+            ratatui::layout::Rect::new(0, 0, self.layout.width, self.layout.height),
+            self.layout.side_panel_ratio,
+            self.screen_mode,
+            &self.diff_mode,
+        )
+    }
+
     /// Content area above the status bar (side + main live here).
     fn content_area_rect(&self) -> ratatui::layout::Rect {
         ratatui::layout::Rect::new(
@@ -7651,6 +8001,9 @@ impl Gui {
             return false;
         }
 
+        if self.diff_mode.active {
+            return self.compute_compare_layout().divider_hit(content, col, row);
+        }
         let fl = self.compute_current_frame_layout();
 
         if fl.portrait {
@@ -7700,6 +8053,9 @@ impl Gui {
     /// Main/diff top border: 0 (row is already the split). Expanded panel bottom:
     /// 1 + trailing collapsed panels so both grabs drive the same ratio.
     fn portrait_sidebar_resize_offset(&self, row: u16) -> u16 {
+        if self.diff_mode.active {
+            return self.compute_compare_layout().resize_row_offset(row);
+        }
         let fl = self.compute_current_frame_layout();
         if !fl.portrait {
             return 0;
@@ -7725,8 +8081,12 @@ impl Gui {
         if content.width == 0 || content.height == 0 {
             return;
         }
-        let fl = self.compute_current_frame_layout();
-        let ratio = if fl.portrait {
+        let portrait = if self.diff_mode.active {
+            self.compute_compare_layout().portrait
+        } else {
+            self.compute_current_frame_layout().portrait
+        };
+        let ratio = if portrait {
             let side_end = row
                 .saturating_sub(content.y)
                 .saturating_add(self.sidebar_resize_row_offset)
@@ -7740,7 +8100,7 @@ impl Gui {
     }
 
     /// True when the active context is one where commit-details makes sense
-    /// (drives both the `.` toggle and layout-time `show_details`).
+    /// (drives both the `'` toggle and layout-time `show_details`).
     fn context_has_commit_details(&self) -> bool {
         matches!(
             self.context_mgr.active(),
@@ -8499,6 +8859,62 @@ impl Gui {
         }
     }
 
+    fn select_startup_head(&mut self) -> Result<()> {
+        if std::mem::take(&mut self.pending_startup_head)
+            && self.context_mgr.active() == ContextId::Commits
+        {
+            self.focus_head_commit()?;
+        }
+        Ok(())
+    }
+
+    fn focus_head_commit(&mut self) -> Result<()> {
+        // HEAD may not be the first all-ref commit, and may be absent from a
+        // filtered or paginated list. Never change filters or inject a commit
+        // that doesn't match them: reuse the separate revision-history view.
+        let hash = self.git.head_hash().unwrap_or_default();
+        let selected = self
+            .model
+            .lock()
+            .unwrap()
+            .commits
+            .iter()
+            .position(|commit| commit.hash == hash);
+        let (context, index) = if let Some(index) = selected {
+            (ContextId::Commits, index)
+        } else if hash.is_empty() {
+            // Unborn repository: an empty commit panel is still a valid target.
+            (ContextId::Commits, 0)
+        } else {
+            let commits = self.git.load_commits_for_branch(&hash, 300)?;
+            self.model.lock().unwrap().set_sub_commits(commits);
+            self.branch_commits_name = "HEAD".to_string();
+            self.sub_commits_parent_context = ContextId::Commits;
+            (ContextId::BranchCommits, 0)
+        };
+        self.context_mgr.set_active(context);
+        self.context_mgr.set_selection(index);
+        self.context_mgr.set_scroll_offset(context, index);
+        self.needs_diff_refresh = true;
+        Ok(())
+    }
+
+    pub fn toggle_working_tree_and_head(&mut self) -> Result<()> {
+        self.range_select_anchor = None;
+        match self.context_mgr.active() {
+            ContextId::Commits
+            | ContextId::CommitFiles
+            | ContextId::Reflog
+            | ContextId::BranchCommits
+            | ContextId::BranchCommitFiles => {
+                self.context_mgr.set_active(ContextId::Files);
+                self.needs_diff_refresh = true;
+            }
+            _ => self.focus_head_commit()?,
+        }
+        Ok(())
+    }
+
     fn next_screen_mode(&mut self) {
         self.screen_mode = match self.screen_mode {
             ScreenMode::Normal => ScreenMode::Half,
@@ -8913,6 +9329,7 @@ mod terminal_mouse_tests {
                 old_segments: None,
                 new_segments: None,
                 file_header: None,
+                preview_placeholder: None,
                 section_index: 0,
             });
             cache.insert(format!("key-{index}"), view);
@@ -8959,6 +9376,7 @@ mod terminal_mouse_tests {
                 old_segments: None,
                 new_segments: None,
                 file_header: None,
+                preview_placeholder: None,
                 section_index: 0,
             });
             cache.insert(key.to_string(), view);
@@ -9007,7 +9425,7 @@ mod terminal_mouse_tests {
     impl TempRepo {
         fn new(name: &str) -> Self {
             let path = std::env::temp_dir().join(format!(
-                "lazygitrs-shell-test-{}-{}-{}",
+                "lazygitrs-gui-test-{}-{}-{}",
                 name,
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -9026,6 +9444,28 @@ mod terminal_mouse_tests {
         fn path(&self) -> &std::path::Path {
             &self.path
         }
+
+        fn git(&self, args: &[&str]) -> String {
+            let output = std::process::Command::new("git")
+                .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+                .args(args)
+                .current_dir(&self.path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        }
+
+        fn commit(&self, path: &str, contents: &str) -> String {
+            std::fs::write(self.path.join(path), contents).unwrap();
+            self.git(&["add", path]);
+            self.git(&["commit", "-m", contents]);
+            self.git(&["rev-parse", "HEAD"])
+        }
     }
 
     impl Drop for TempRepo {
@@ -9034,39 +9474,1092 @@ mod terminal_mouse_tests {
         }
     }
 
-    #[test]
-    fn colon_key_opens_custom_command_prompt() {
-        let repo = TempRepo::new("colon-shell-prompt");
-        let config = crate::config::AppConfig::load(false).unwrap_or_else(|_| {
-            let mut c = crate::config::AppConfig {
-                debug: false,
-                version: "test".into(),
-                user_config: crate::config::UserConfig::default(),
-                app_state: crate::config::AppState::default(),
-                config_dir: repo.path().to_path_buf(),
-                state_dir: repo.path().to_path_buf(),
-                state_path: repo.path().join("state.yml"),
-            };
-            c
-        });
+    fn checkout_test_gui(repo: &TempRepo) -> Gui {
+        repo.commit("file", "main contents");
+        repo.git(&["checkout", "-b", "feature"]);
+        repo.commit("file", "feature contents");
         let git = crate::git::GitCommands::new(repo.path()).unwrap();
-        let mut gui = Gui::new(config, git, None).unwrap();
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+        // Finish startup loading before exercising checkout and its refresh.
+        for _ in gui.initial_load_rx.take().unwrap() {}
+        *gui.model.lock().unwrap() = gui.git.load_model().unwrap();
+        gui.context_mgr.set_active(ContextId::Branches);
+        gui
+    }
 
-        assert!(matches!(gui.popup, PopupState::None));
-
-        // Send ':' key
-        let colon = KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE);
-        gui.handle_key(colon).unwrap();
-
-        match &gui.popup {
-            PopupState::Input {
-                title, is_commit, ..
-            } => {
-                assert_eq!(title, "Execute Shell Command");
-                assert!(!is_commit);
-            }
-            _ => panic!("Expected PopupState::Input"),
+    fn request_test_checkout(gui: &mut Gui, key: char, target: &str) {
+        let selected = gui
+            .model
+            .lock()
+            .unwrap()
+            .branches
+            .iter()
+            .position(|b| b.name == target)
+            .unwrap_or(0);
+        gui.context_mgr.set_selection(selected);
+        gui.handle_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE))
+            .unwrap();
+        if key == 'c' {
+            let PopupState::RefPicker { core, .. } = &mut gui.popup else {
+                panic!("expected checkout ref picker");
+            };
+            core.search_textarea = popup::make_command_palette_search_textarea();
+            core.search_textarea.insert_str(target);
+            core.selected = core
+                .items
+                .iter()
+                .position(|i| i.value == target)
+                .unwrap_or(core.items.len());
+            gui.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .unwrap();
         }
+    }
+
+    fn wait_for_test_checkout(gui: &mut Gui) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while gui.remote_op_label.is_some() {
+            assert!(Instant::now() < deadline, "checkout did not finish");
+            gui.receive_remote_op_results();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    #[ignore = "manual checkout visibility benchmark; timing is machine-dependent"]
+    fn checkout_visibility_latency() {
+        for auto_refresh in [true, false] {
+            let repo = TempRepo::new("checkout-latency");
+            let mut gui = checkout_test_gui(&repo);
+            let mut config = crate::config::AppConfig::default();
+            config.user_config.git.auto_refresh = auto_refresh;
+            gui.config = Arc::new(config);
+            let mut samples = Vec::new();
+            for target in ["main", "feature"].into_iter().cycle().take(10) {
+                let start = Instant::now();
+                request_test_checkout(&mut gui, ' ', target);
+                loop {
+                    if let Some(rx) = &gui.initial_load_rx {
+                        while let Ok(part) = rx.try_recv() {
+                            let mut model = gui.model.lock().unwrap();
+                            match part {
+                                ModelPart::Branches(branches) => model.branches = branches,
+                                ModelPart::Head { hash, branch_name } => {
+                                    model.head_hash = hash;
+                                    model.head_branch_name = branch_name;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    gui.receive_remote_op_results();
+                    {
+                        let model = gui.model.lock().unwrap();
+                        if model.head_branch_name == target
+                            && model.branches.iter().any(|b| b.head && b.name == target)
+                        {
+                            samples.push(start.elapsed().as_secs_f64() * 1000.0);
+                            break;
+                        }
+                    }
+                    assert!(start.elapsed() < Duration::from_secs(10));
+                    // Mirror the main loop's input wait before dispatching refresh.
+                    std::thread::sleep(gui.input_wait_timeout());
+                    if gui.needs_refresh
+                        && !gui.refresh_in_progress
+                        && gui.initial_load_rx.is_none()
+                    {
+                        gui.start_background_refresh();
+                    }
+                }
+                if let Some(rx) = gui.initial_load_rx.take() {
+                    for _ in rx {}
+                }
+                gui.refresh_in_progress = false;
+                gui.needs_refresh = false;
+            }
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "auto_refresh={auto_refresh}: median={:.1}ms, min={:.1}ms, max={:.1}ms (10 checkouts)",
+                (samples[4] + samples[5]) / 2.0,
+                samples[0],
+                samples[9]
+            );
+        }
+    }
+
+    fn assert_checkout_head(gui: &Gui, branch: &str, hash: &str) {
+        let model = gui.model.lock().unwrap();
+        let heads: Vec<_> = model
+            .branches
+            .iter()
+            .filter(|b| b.head)
+            .map(|b| b.name.as_str())
+            .collect();
+        assert_eq!(heads, vec![branch]);
+        assert_eq!(model.head_branch_name, branch);
+        assert_eq!(model.head_hash, hash);
+        assert_eq!(gui.git.current_branch_name().unwrap(), branch);
+        assert_eq!(gui.git.head_hash().unwrap(), hash);
+    }
+
+    #[test]
+    fn failed_checkout_preserves_head_after_error_dismissal_and_retry() {
+        for key in [' ', '-', 'c'] {
+            let repo = TempRepo::new("failed-checkout");
+            let mut gui = checkout_test_gui(&repo);
+            let head = repo.git(&["rev-parse", "HEAD"]);
+            std::fs::write(repo.path().join("file"), "local changes").unwrap();
+
+            for _ in 0..2 {
+                request_test_checkout(&mut gui, key, "main");
+                assert_eq!(gui.remote_op_label.as_deref(), Some("Checking out"));
+                wait_for_test_checkout(&mut gui);
+                assert!(matches!(
+                    &gui.popup,
+                    PopupState::Message { message, kind: MessageKind::Error, .. }
+                        if message.contains("would be overwritten by checkout")
+                ));
+                assert_checkout_head(&gui, "feature", &head);
+                assert!(gui.pending_checkout_by_name.is_none());
+                gui.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                    .unwrap();
+                assert!(matches!(gui.popup, PopupState::None));
+                assert_checkout_head(&gui, "feature", &head);
+                assert_eq!(
+                    std::fs::read_to_string(repo.path().join("file")).unwrap(),
+                    "local changes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn missing_checkout_ref_preserves_head_and_offers_branch_creation() {
+        let repo = TempRepo::new("missing-checkout-ref");
+        let mut gui = checkout_test_gui(&repo);
+        let head = repo.git(&["rev-parse", "HEAD"]);
+        request_test_checkout(&mut gui, 'c', "brand-new-branch");
+        wait_for_test_checkout(&mut gui);
+        assert_checkout_head(&gui, "feature", &head);
+        assert!(matches!(
+            &gui.popup,
+            PopupState::Confirm { title, .. } if title == "Branch not found"
+        ));
+        gui.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        gui.refresh().unwrap();
+        assert_checkout_head(&gui, "brand-new-branch", &head);
+    }
+
+    #[test]
+    fn tag_checkout_updates_detached_head_before_refresh() {
+        let repo = TempRepo::new("tag-checkout");
+        let mut gui = checkout_test_gui(&repo);
+        let head = repo.git(&["rev-parse", "main"]);
+        repo.git(&["tag", "release", "main"]);
+        gui.model.lock().unwrap().tags = gui.git.load_tags().unwrap();
+        request_test_checkout(&mut gui, 'c', "release");
+        wait_for_test_checkout(&mut gui);
+        assert!(gui.refresh_in_progress);
+        assert!(matches!(gui.popup, PopupState::None));
+        let model = gui.model.lock().unwrap();
+        assert!(!model.branches.iter().any(|b| b.head));
+        assert!(model.head_branch_name.is_empty());
+        assert_eq!(model.head_hash, head);
+        assert_eq!(gui.git.head_hash().unwrap(), head);
+        assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "HEAD");
+        drop(model);
+        gui.refresh().unwrap();
+        assert_eq!(gui.model.lock().unwrap().head_hash, head);
+    }
+
+    #[test]
+    fn successful_checkout_updates_head_before_refresh() {
+        for key in [' ', '-', 'c'] {
+            let repo = TempRepo::new("successful-checkout");
+            let mut gui = checkout_test_gui(&repo);
+            request_test_checkout(&mut gui, key, "main");
+            let pending_head = gui
+                .model
+                .lock()
+                .unwrap()
+                .branches
+                .iter()
+                .find(|b| b.head)
+                .map(|b| b.name.clone());
+            wait_for_test_checkout(&mut gui);
+            assert_eq!(pending_head.as_deref(), Some("feature"));
+            assert!(gui.refresh_in_progress);
+            assert!(gui.initial_load_rx.is_some());
+            assert!(matches!(gui.popup, PopupState::None));
+            assert!(gui.pending_checkout_by_name.is_none());
+            assert_checkout_head(&gui, "main", &repo.git(&["rev-parse", "main"]));
+            gui.refresh().unwrap();
+            assert_checkout_head(&gui, "main", &repo.git(&["rev-parse", "main"]));
+        }
+    }
+
+    #[test]
+    fn checkout_discards_pre_checkout_refresh_results() {
+        let repo = TempRepo::new("checkout-stale-refresh");
+        let mut gui = checkout_test_gui(&repo);
+        let old_head = repo.git(&["rev-parse", "HEAD"]);
+        let (model_tx, model_rx) = mpsc::channel();
+        let (files_tx, files_rx) = mpsc::channel();
+        gui.initial_load_rx = Some(model_rx);
+        gui.initial_load_received = 5;
+        gui.refresh_in_progress = true;
+        gui.files_refresh_rx = Some(files_rx);
+        gui.files_refresh_in_progress = true;
+        model_tx
+            .send(ModelPart::Head {
+                hash: old_head.clone(),
+                branch_name: "feature".into(),
+            })
+            .unwrap();
+        files_tx.send(Ok(Vec::new())).unwrap();
+
+        request_test_checkout(&mut gui, ' ', "main");
+        wait_for_test_checkout(&mut gui);
+        assert_checkout_head(&gui, "main", &repo.git(&["rev-parse", "main"]));
+        assert!(
+            model_tx
+                .send(ModelPart::Head {
+                    hash: old_head,
+                    branch_name: "feature".into(),
+                })
+                .is_err()
+        );
+        assert!(files_tx.send(Ok(Vec::new())).is_err());
+        assert!(gui.files_refresh_rx.is_none());
+        assert!(!gui.files_refresh_in_progress);
+        assert!(gui.refresh_in_progress);
+        assert_eq!(gui.initial_load_received, 0);
+        let parts: Vec<_> = gui.initial_load_rx.take().unwrap().into_iter().collect();
+        assert_eq!(parts.len(), MODEL_PART_COUNT);
+        assert!(parts.iter().any(|part| matches!(
+            part, ModelPart::Head { branch_name, .. } if branch_name == "main"
+        )));
+        assert!(parts.iter().any(|part| matches!(
+            part, ModelPart::Branches(branches)
+                if branches.iter().any(|b| b.head && b.name == "main")
+        )));
+    }
+
+    #[test]
+    fn pending_refresh_keeps_input_polling_fast() {
+        let repo = TempRepo::new("refresh-polling");
+        let mut gui = checkout_test_gui(&repo);
+        let mut config = crate::config::AppConfig::default();
+        config.user_config.git.auto_refresh = false;
+        gui.config = Arc::new(config);
+        gui.needs_refresh = false;
+        assert_eq!(gui.input_wait_timeout(), Duration::from_millis(200));
+        gui.needs_refresh = true;
+        assert_eq!(gui.input_wait_timeout(), Duration::from_millis(16));
+    }
+
+    #[test]
+    fn ordinary_remote_operation_keeps_normal_refresh_behavior() {
+        let repo = TempRepo::new("remote-op-refresh");
+        let mut gui = checkout_test_gui(&repo);
+        let head = repo.git(&["rev-parse", "HEAD"]);
+        gui.start_remote_op("Fetch", "", |_| Ok(()));
+        wait_for_test_checkout(&mut gui);
+        assert_checkout_head(&gui, "feature", &head);
+        assert!(gui.needs_refresh);
+        assert!(!gui.refresh_in_progress);
+        assert!(gui.initial_load_rx.is_none());
+        assert!(matches!(gui.popup, PopupState::None));
+    }
+
+    #[test]
+    fn successful_checkout_without_head_metadata_still_refreshes() {
+        let repo = TempRepo::new("checkout-metadata-fallback");
+        let mut gui = checkout_test_gui(&repo);
+        repo.git(&["checkout", "main"]);
+        gui.remote_op_label = Some("Checking out".into());
+        gui.pending_checkout_by_name = Some("main".into());
+        gui.remote_op_tx.send(Ok(None)).unwrap();
+        gui.receive_remote_op_results();
+        assert!(matches!(gui.popup, PopupState::None));
+        assert!(gui.pending_checkout_by_name.is_none());
+        assert!(gui.refresh_in_progress);
+        gui.refresh().unwrap();
+        assert_checkout_head(&gui, "main", &repo.git(&["rev-parse", "main"]));
+    }
+
+    #[test]
+    fn busy_checkout_does_not_change_head_or_pending_checkout() {
+        for key in [' ', '-', 'c'] {
+            let repo = TempRepo::new("busy-checkout");
+            let mut gui = checkout_test_gui(&repo);
+            let head = repo.git(&["rev-parse", "HEAD"]);
+            for pending in [None, Some("already-pending".to_string())] {
+                gui.remote_op_label = Some("Busy".to_string());
+                gui.pending_checkout_by_name = pending.clone();
+                request_test_checkout(&mut gui, key, "main");
+                assert_checkout_head(&gui, "feature", &head);
+                assert_eq!(gui.pending_checkout_by_name, pending);
+                assert_eq!(gui.remote_op_label.as_deref(), Some("Busy"));
+            }
+        }
+    }
+
+    #[test]
+    fn tree_compare_navigation_folding_and_focus_preserve_current_layout() {
+        use crate::gui::modes::diff_mode::DiffModeFocus;
+        let repo = TempRepo::new("tree-compare");
+        let mut gui = tree_test_gui(&repo);
+        gui.diff_mode.enter(true);
+        gui.diff_mode.diff_files = gui.model.lock().unwrap().commit_files.clone();
+        gui.diff_mode.tree_nodes = gui.commit_file_tree_nodes.clone();
+        for focus in [DiffModeFocus::CommitFiles, DiffModeFocus::DiffExploration] {
+            gui.diff_mode.set_focus(focus);
+            gui.diff_mode.diff_files_selected = 0;
+            gui.diff_mode.viewport_manually_scrolled = true;
+            gui.needs_diff_refresh = false;
+            gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(gui.diff_mode.diff_files_selected, 1);
+            assert!(!gui.diff_mode.viewport_manually_scrolled);
+            assert!(gui.needs_diff_refresh);
+            gui.handle_key(KeyEvent::new(KeyCode::Char('>'), KeyModifiers::SHIFT))
+                .unwrap();
+            assert_eq!(gui.diff_mode.diff_files_selected, 4);
+            gui.handle_key(KeyEvent::new(KeyCode::Char('<'), KeyModifiers::SHIFT))
+                .unwrap();
+            assert_eq!(gui.diff_mode.diff_files_selected, 1);
+        }
+        for mode in [ScreenMode::Normal, ScreenMode::Half, ScreenMode::Full] {
+            gui.screen_mode = mode;
+            gui.diff_mode.set_focus(DiffModeFocus::CommitFiles);
+            gui.diff_mode.diff_files_selected = 0;
+            gui.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(gui.diff_mode.focus, DiffModeFocus::DiffExploration);
+            assert_eq!(gui.screen_mode, mode);
+            gui.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(gui.diff_mode.focus, DiffModeFocus::CommitFiles);
+            assert_eq!(gui.screen_mode, mode);
+        }
+        gui.handle_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.diff_mode.tree_nodes.len(), 1);
+        gui.handle_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.diff_mode.tree_nodes.len(), 5);
+        Arc::get_mut(&mut gui.config)
+            .unwrap()
+            .user_config
+            .keybinding
+            .universal
+            .tree_child = "<c-t>".into();
+        gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.diff_mode.diff_files_selected, 0);
+        gui.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(gui.diff_mode.diff_files_selected, 1);
+    }
+
+    #[test]
+    fn tree_commit_details_conflict_is_limited_to_active_tree_bindings() {
+        let repo = TempRepo::new("tree-details");
+        let mut gui = tree_test_gui(&repo);
+        gui.context_mgr.set_active(ContextId::CommitFiles);
+        let details = gui.show_commit_details;
+        gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.context_mgr.selected_active(), 1);
+        assert_eq!(gui.show_commit_details, details);
+        // Other tree actions remapped to apostrophe also take precedence, even at a boundary.
+        let kb = &mut Arc::get_mut(&mut gui.config)
+            .unwrap()
+            .user_config
+            .keybinding;
+        kb.universal.tree_child.clear();
+        kb.universal.tree_parent = "'".into();
+        gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.context_mgr.selected_active(), 0);
+        gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.show_commit_details, details);
+        gui.show_commit_file_tree = false;
+        gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
+            .unwrap();
+        assert_ne!(gui.show_commit_details, details);
+    }
+
+    #[test]
+    fn tree_default_child_key_preserves_commit_details_toggle() {
+        let repo = TempRepo::new("tree-default-details");
+        let mut gui = tree_test_gui(&repo);
+        for ctx in [ContextId::CommitFiles, ContextId::BranchCommitFiles] {
+            for tree in [false, true] {
+                gui.context_mgr.set_active(ctx);
+                gui.context_mgr.set_selection(0);
+                gui.show_commit_file_tree = tree;
+                let details = gui.show_commit_details;
+                gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
+                    .unwrap();
+                assert_ne!(gui.show_commit_details, details, "{ctx:?} {tree}");
+                assert_eq!(gui.context_mgr.selected_active(), 0);
+                gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+                    .unwrap();
+                assert_eq!(gui.context_mgr.selected_active(), usize::from(tree));
+                assert_ne!(gui.show_commit_details, details);
+            }
+        }
+    }
+
+    #[test]
+    fn apostrophe_toggles_details_and_is_documented_in_commit_context_help() {
+        let repo = TempRepo::new("apostrophe-details-help");
+        let mut gui = tree_test_gui(&repo);
+        for ctx in [
+            ContextId::Commits,
+            ContextId::BranchCommits,
+            ContextId::Reflog,
+            ContextId::CommitFiles,
+            ContextId::BranchCommitFiles,
+            ContextId::StashFiles,
+        ] {
+            gui.popup = PopupState::None;
+            gui.context_mgr.set_active(ctx);
+            let details = gui.show_commit_details;
+            gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
+                .unwrap();
+            assert_ne!(gui.show_commit_details, details, "{ctx:?}");
+            gui.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT))
+                .unwrap();
+            let PopupState::CommandPalette { sections, .. } = &gui.popup else {
+                panic!("expected help palette");
+            };
+            let details_entries: Vec<_> = sections
+                .iter()
+                .flat_map(|s| &s.entries)
+                .filter(|e| e.description == "Toggle commit details panel")
+                .collect();
+            // Stash-file help did not previously include a details entry.
+            if ctx != ContextId::StashFiles {
+                assert_eq!(details_entries.len(), 1, "{ctx:?}");
+                assert_eq!(details_entries[0].key, "'", "{ctx:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn tree_help_is_only_available_in_active_tree_contexts() {
+        use crate::gui::modes::diff_mode::DiffModeFocus;
+        let repo = TempRepo::new("tree-contextual-help");
+        let mut gui = tree_test_gui(&repo);
+        for ctx in [
+            ContextId::Files,
+            ContextId::CommitFiles,
+            ContextId::BranchCommitFiles,
+            ContextId::StashFiles,
+            ContextId::Commits,
+        ] {
+            for tree in [false, true] {
+                for diff in [false, true] {
+                    gui.popup = PopupState::None;
+                    gui.context_mgr.set_active(ctx);
+                    gui.show_file_tree = tree;
+                    gui.show_commit_file_tree = tree;
+                    gui.diff_focused = diff;
+                    gui.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT))
+                        .unwrap();
+                    let PopupState::CommandPalette { sections, .. } = &gui.popup else {
+                        panic!("expected help palette");
+                    };
+                    let tree_section = sections.iter().find(|s| s.title == "File Tree");
+                    assert_eq!(
+                        tree_section.is_some(),
+                        tree && ctx != ContextId::Commits,
+                        "{ctx:?} tree={tree} diff={diff}"
+                    );
+                    if let Some(section) = tree_section {
+                        assert!(
+                            section
+                                .entries
+                                .iter()
+                                .any(|e| e.key == "."
+                                    && e.description == "Select first visible child")
+                        );
+                        assert_eq!(section.entries.iter().any(|e| e.key == "-"), !diff);
+                    }
+                }
+            }
+        }
+        gui.diff_mode.enter(true);
+        for tree in [false, true] {
+            for focus in [
+                DiffModeFocus::CommitFiles,
+                DiffModeFocus::DiffExploration,
+                DiffModeFocus::Commits,
+                DiffModeFocus::SelectorA,
+                DiffModeFocus::SelectorB,
+            ] {
+                gui.popup = PopupState::None;
+                gui.diff_mode.show_tree = tree;
+                gui.diff_mode.set_focus(focus);
+                gui.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT))
+                    .unwrap();
+                let PopupState::CommandPalette { sections, .. } = &gui.popup else {
+                    panic!("expected compare help palette");
+                };
+                let tree_section = sections.iter().find(|s| s.title == "File Tree");
+                assert_eq!(
+                    tree_section.is_some(),
+                    tree && matches!(
+                        focus,
+                        DiffModeFocus::CommitFiles | DiffModeFocus::DiffExploration
+                    )
+                );
+                if let Some(section) = tree_section {
+                    assert!(section.entries.iter().any(|e| e.key == "."));
+                    assert_eq!(
+                        section.entries.iter().any(|e| e.key == "-"),
+                        focus == DiffModeFocus::CommitFiles
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tree_fold_binding_does_not_override_flat_list_actions() {
+        use crate::gui::modes::diff_mode::DiffModeFocus;
+        let repo = TempRepo::new("tree-flat-fold");
+        let mut gui = tree_test_gui(&repo);
+        // A remapped fold key must not swallow a flat list's tree-toggle action.
+        Arc::get_mut(&mut gui.config)
+            .unwrap()
+            .user_config
+            .keybinding
+            .universal
+            .fold_directory = "`".into();
+        for ctx in [
+            ContextId::Files,
+            ContextId::CommitFiles,
+            ContextId::BranchCommitFiles,
+            ContextId::StashFiles,
+        ] {
+            gui.context_mgr.set_active(ctx);
+            gui.show_file_tree = false;
+            gui.show_commit_file_tree = false;
+            gui.handle_key(KeyEvent::new(KeyCode::Char('`'), KeyModifiers::NONE))
+                .unwrap();
+            assert!(gui.active_file_tree(), "{ctx:?}");
+        }
+        gui.diff_mode.enter(false);
+        gui.diff_mode.set_focus(DiffModeFocus::CommitFiles);
+        gui.handle_key(KeyEvent::new(KeyCode::Char('`'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(gui.diff_mode.show_tree);
+    }
+
+    fn tree_test_gui(repo: &TempRepo) -> Gui {
+        std::fs::create_dir_all(repo.path.join("src/deep")).unwrap();
+        repo.commit("src/deep/a.txt", "base\n");
+        repo.commit("src/deep/b.txt", "base\n");
+        repo.commit("top.txt", "base\n");
+        for path in ["src/deep/a.txt", "src/deep/b.txt", "top.txt"] {
+            std::fs::write(repo.path.join(path), "changed\n").unwrap();
+        }
+        let mut config = crate::config::AppConfig::default();
+        config.state_path = repo.path.join("state.yml");
+        let mut gui = Gui::new(
+            config,
+            crate::git::GitCommands::new(repo.path()).unwrap(),
+            None,
+            false,
+        )
+        .unwrap();
+        let files = gui.git.load_files().unwrap();
+        gui.model.lock().unwrap().files = files;
+        gui.show_file_tree = true;
+        gui.show_commit_file_tree = true;
+        gui.update_file_tree_state();
+        gui.model.lock().unwrap().commit_files = ["src/deep/a.txt", "src/deep/b.txt", "top.txt"]
+            .into_iter()
+            .map(|name| crate::model::CommitFile {
+                name: name.into(),
+                status: crate::model::FileChangeStatus::Modified,
+                hunk_count: 0,
+                additions: 0,
+                deletions: 0,
+            })
+            .collect();
+        controller::commit_files::update_commit_file_tree_state(&mut gui);
+        gui.diff_view.load("test.txt", "old\n", "new\n");
+        gui
+    }
+
+    #[test]
+    fn tree_enter_and_escape_preserve_all_screen_modes() {
+        let repo = TempRepo::new("tree-layout");
+        let mut gui = tree_test_gui(&repo);
+        for ctx in [
+            ContextId::Files,
+            ContextId::CommitFiles,
+            ContextId::BranchCommitFiles,
+            ContextId::StashFiles,
+        ] {
+            for mode in [ScreenMode::Normal, ScreenMode::Half, ScreenMode::Full] {
+                for tree in [false, true] {
+                    gui.context_mgr.set_active(ctx);
+                    gui.context_mgr.set_selection(0);
+                    gui.show_file_tree = tree;
+                    gui.show_commit_file_tree = tree;
+                    gui.screen_mode = mode;
+                    gui.diff_focused = false;
+                    gui.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                        .unwrap();
+                    assert!(gui.diff_focused, "{ctx:?} {tree}");
+                    assert_eq!(gui.screen_mode, mode);
+                    gui.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                        .unwrap();
+                    assert!(!gui.diff_focused);
+                    assert_eq!(gui.screen_mode, mode);
+                    assert_eq!(gui.context_mgr.active(), ctx);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tree_navigation_resumes_viewport_following_in_sidebar_and_diff() {
+        let repo = TempRepo::new("tree-navigation");
+        let mut gui = tree_test_gui(&repo);
+        for ctx in [
+            ContextId::Files,
+            ContextId::CommitFiles,
+            ContextId::BranchCommitFiles,
+            ContextId::StashFiles,
+        ] {
+            for diff in [false, true] {
+                gui.context_mgr.set_active(ctx);
+                gui.context_mgr.set_selection(0);
+                gui.diff_focused = diff;
+                gui.context_mgr.viewport_manually_scrolled = true;
+                gui.needs_diff_refresh = false;
+                gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+                    .unwrap();
+                assert_eq!(gui.context_mgr.selected_active(), 1);
+                assert!(!gui.context_mgr.viewport_manually_scrolled);
+                assert!(gui.needs_diff_refresh);
+                gui.context_mgr.set_scroll_offset(ctx, 100);
+                gui.context_mgr.ensure_scroll_visible(ctx, 2);
+                assert!(gui.context_mgr.scroll_offset(ctx) <= 1);
+                gui.handle_key(KeyEvent::new(KeyCode::Char('>'), KeyModifiers::SHIFT))
+                    .unwrap();
+                assert_eq!(gui.context_mgr.selected_active(), 4);
+                gui.handle_key(KeyEvent::new(KeyCode::Char('<'), KeyModifiers::SHIFT))
+                    .unwrap();
+                assert_eq!(gui.context_mgr.selected_active(), 1);
+                gui.handle_key(KeyEvent::new(KeyCode::Char(','), KeyModifiers::NONE))
+                    .unwrap();
+                assert_eq!(gui.context_mgr.selected_active(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn tree_custom_and_disabled_keys_work_without_swallowing_flat_diff_keys() {
+        let repo = TempRepo::new("tree-custom-bindings");
+        let mut gui = tree_test_gui(&repo);
+        for diff in [false, true] {
+            gui.diff_focused = diff;
+            gui.context_mgr.set_selection(0);
+            Arc::get_mut(&mut gui.config)
+                .unwrap()
+                .user_config
+                .keybinding
+                .universal
+                .tree_child = "<c-t>".into();
+            let details = gui.show_commit_details;
+            gui.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))
+                .unwrap();
+            assert_eq!(gui.context_mgr.selected_active(), 1);
+            assert_eq!(gui.show_commit_details, details);
+            gui.context_mgr.set_selection(0);
+            Arc::get_mut(&mut gui.config)
+                .unwrap()
+                .user_config
+                .keybinding
+                .universal
+                .tree_child
+                .clear();
+            gui.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))
+                .unwrap();
+            assert_eq!(gui.context_mgr.selected_active(), 0);
+        }
+        // A remap to a diff shortcut must not claim that key outside tree contexts.
+        Arc::get_mut(&mut gui.config)
+            .unwrap()
+            .user_config
+            .keybinding
+            .universal
+            .tree_child = "j".into();
+        gui.show_file_tree = false;
+        gui.diff_focused = true;
+        gui.diff_view.load("long", "", &"line\n".repeat(100));
+        gui.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.diff_view.scroll_offset, 1);
+    }
+
+    #[test]
+    fn tree_fold_is_explicit_and_enter_does_not_collapse_directories() {
+        let repo = TempRepo::new("tree-fold");
+        let mut gui = tree_test_gui(&repo);
+        for ctx in [ContextId::Files, ContextId::CommitFiles] {
+            gui.context_mgr.set_active(ctx);
+            gui.context_mgr.set_selection(0);
+            gui.diff_focused = false;
+            gui.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .unwrap();
+            assert!(gui.diff_focused);
+            gui.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                .unwrap();
+            gui.handle_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(
+                if ctx == ContextId::Files {
+                    gui.file_tree_nodes.len()
+                } else {
+                    gui.commit_file_tree_nodes.len()
+                },
+                1
+            );
+            gui.handle_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(
+                if ctx == ContextId::Files {
+                    gui.file_tree_nodes.len()
+                } else {
+                    gui.commit_file_tree_nodes.len()
+                },
+                5
+            );
+            Arc::get_mut(&mut gui.config)
+                .unwrap()
+                .user_config
+                .keybinding
+                .universal
+                .fold_directory = "_".into();
+            let kb = gui.config.user_config.keybinding.clone();
+            gui.handle_context_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(
+                if ctx == ContextId::Files {
+                    gui.file_tree_nodes.len()
+                } else {
+                    gui.commit_file_tree_nodes.len()
+                },
+                5
+            );
+            if ctx == ContextId::Files {
+                controller::files::handle_key(
+                    &mut gui,
+                    KeyEvent::new(KeyCode::Char('_'), KeyModifiers::SHIFT),
+                    &kb,
+                )
+                .unwrap();
+            } else {
+                controller::commit_files::handle_key(
+                    &mut gui,
+                    KeyEvent::new(KeyCode::Char('_'), KeyModifiers::SHIFT),
+                    &kb,
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                if ctx == ContextId::Files {
+                    gui.file_tree_nodes.len()
+                } else {
+                    gui.commit_file_tree_nodes.len()
+                },
+                1
+            );
+            Arc::get_mut(&mut gui.config)
+                .unwrap()
+                .user_config
+                .keybinding
+                .universal
+                .fold_directory = "-".into();
+        }
+    }
+
+    #[test]
+    fn toggle_working_tree_and_head_toggles_between_files_and_head() {
+        let repo = TempRepo::new("toggle-files-head");
+        let config = crate::config::AppConfig::default();
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(config, git, None, false).unwrap();
+
+        // Starts in Files by default
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+
+        // Toggle to Commits (HEAD at index 0)
+        gui.toggle_working_tree_and_head().unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Commits);
+        assert_eq!(gui.context_mgr.selected(ContextId::Commits), 0);
+        assert_eq!(gui.context_mgr.scroll_offset(ContextId::Commits), 0);
+        assert!(gui.needs_diff_refresh);
+
+        // Move commit selection, then toggle back to Files
+        gui.context_mgr.set_selection_for(ContextId::Commits, 3);
+        gui.toggle_working_tree_and_head().unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+        assert!(gui.needs_diff_refresh);
+
+        // Toggle from CommitFiles subcontext back to Files
+        gui.context_mgr.set_active(ContextId::CommitFiles);
+        gui.toggle_working_tree_and_head().unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+
+        // Toggle from outside context (e.g. Branches) jumps to Commits at HEAD
+        gui.context_mgr.set_active(ContextId::Branches);
+        gui.toggle_working_tree_and_head().unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Commits);
+        assert_eq!(gui.context_mgr.selected(ContextId::Commits), 0);
+    }
+
+    #[test]
+    fn start_in_commits_initializes_context_to_commits_head() {
+        let repo = TempRepo::new("start-in-commits");
+        let config = crate::config::AppConfig::default();
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let gui = Gui::new(config, git, None, true).unwrap();
+
+        assert_eq!(gui.context_mgr.active(), ContextId::Commits);
+        assert_eq!(gui.context_mgr.selected(ContextId::Commits), 0);
+    }
+
+    #[test]
+    fn ctrl_g_key_event_triggers_toggle() {
+        let repo = TempRepo::new("ctrl-g-toggle");
+        let config = crate::config::AppConfig::default();
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(config, git, None, false).unwrap();
+
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+
+        // Send Ctrl+g
+        let ctrl_g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        gui.handle_key(ctrl_g).unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Commits);
+
+        // Send Ctrl+g again to toggle back
+        gui.handle_key(ctrl_g).unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+
+        // Send Ctrl+g while diff is focused
+        gui.diff_focused = true;
+        gui.handle_key(ctrl_g).unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Commits);
+        assert!(gui.diff_focused);
+
+        // The configured shortcut also toggles back while diff-focused.
+        gui.handle_key(ctrl_g).unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+        assert!(gui.diff_focused);
+
+        // Test custom keybinding (e.g. <c-t>)
+        let mut custom_config = crate::config::AppConfig::default();
+        custom_config
+            .user_config
+            .keybinding
+            .universal
+            .toggle_working_tree_and_head = "<c-t>".into();
+        let git2 = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui2 = Gui::new(custom_config, git2, None, false).unwrap();
+        let ctrl_t = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        gui2.handle_key(ctrl_t).unwrap();
+        assert_eq!(gui2.context_mgr.active(), ContextId::Commits);
+    }
+
+    #[test]
+    fn head_toggle_selects_checked_out_hash_not_another_branch_tip() {
+        let repo = TempRepo::new("head-not-first");
+        let head = repo.commit("file", "main commit");
+        repo.git(&["checkout", "-b", "ahead"]);
+        let other = repo.commit("file", "other branch commit");
+        repo.git(&["checkout", "main"]);
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let commits = git.load_commits(300).unwrap();
+        assert_eq!(commits[0].hash, other);
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+        gui.model.lock().unwrap().set_commits(commits);
+        gui.toggle_working_tree_and_head().unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Commits);
+        let index = gui.context_mgr.selected(ContextId::Commits);
+        assert_eq!(gui.model.lock().unwrap().commits[index].hash, head);
+        assert_eq!(gui.context_mgr.scroll_offset(ContextId::Commits), index);
+    }
+
+    #[test]
+    fn head_toggle_preserves_filters_and_uses_separate_head_history() {
+        let repo = TempRepo::new("filtered-head");
+        let older = repo.commit("filtered", "older");
+        let head = repo.commit("other", "head");
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+
+        for filter in [
+            crate::git::commit::CommitFilter {
+                path: Some("filtered".into()),
+                ..Default::default()
+            },
+            crate::git::commit::CommitFilter {
+                authors: vec!["nobody@example.com".into()],
+                ..Default::default()
+            },
+            crate::git::commit::CommitFilter {
+                branches: vec![older.clone()],
+                ..Default::default()
+            },
+        ] {
+            let commits = gui.git.load_filtered_commits_page(&filter, 300, 0).unwrap();
+            let hashes: Vec<_> = commits.iter().map(|c| c.hash.clone()).collect();
+            assert!(!hashes.contains(&head));
+            gui.commit_path_filter = filter.path.clone();
+            gui.commit_author_filter = filter.authors.clone();
+            gui.commit_branch_filter = filter.branches.clone();
+            gui.model.lock().unwrap().set_commits(commits);
+            gui.context_mgr.set_active(ContextId::Files);
+            gui.context_mgr.set_selection(2);
+            gui.diff_focused = true;
+            gui.toggle_working_tree_and_head().unwrap();
+            assert_eq!(gui.context_mgr.active(), ContextId::BranchCommits);
+            assert_eq!(gui.model.lock().unwrap().sub_commits[0].hash, head);
+            assert_eq!(gui.commit_path_filter, filter.path);
+            assert_eq!(gui.commit_author_filter, filter.authors);
+            assert_eq!(gui.commit_branch_filter, filter.branches);
+            assert_eq!(
+                gui.model
+                    .lock()
+                    .unwrap()
+                    .commits
+                    .iter()
+                    .map(|c| c.hash.clone())
+                    .collect::<Vec<_>>(),
+                hashes
+            );
+
+            // Streaming model refreshes do not retain sub-history themselves.
+            gui.model.lock().unwrap().clear_sub_commits();
+            gui.after_model_refresh().unwrap();
+            assert_eq!(gui.model.lock().unwrap().sub_commits[0].hash, head);
+            gui.context_mgr.set_active(ContextId::BranchCommitFiles);
+            gui.toggle_working_tree_and_head().unwrap();
+            assert_eq!(gui.context_mgr.active(), ContextId::Files);
+            assert_eq!(gui.context_mgr.selected(ContextId::Files), 2);
+            assert!(gui.diff_focused);
+        }
+    }
+
+    #[test]
+    fn head_toggle_handles_head_outside_the_loaded_page_and_detached_head() {
+        let repo = TempRepo::new("paged-head");
+        let older = repo.commit("file", "older");
+        let head = repo.commit("file", "head");
+        repo.git(&["checkout", "--detach", &head]);
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let commits = git.load_commits_for_branch(&older, 1).unwrap();
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, false).unwrap();
+        gui.model.lock().unwrap().set_commits(commits);
+        gui.toggle_working_tree_and_head().unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::BranchCommits);
+        assert_eq!(gui.model.lock().unwrap().sub_commits[0].hash, head);
+        assert_eq!(gui.model.lock().unwrap().commits[0].hash, older);
+    }
+
+    #[test]
+    fn head_toggle_does_not_consume_old_binding_when_remapped_or_disabled() {
+        let repo = TempRepo::new("remapped-head");
+        repo.commit("file", "head");
+        for binding in ["<c-t>", ""] {
+            for diff_focused in [false, true] {
+                let mut config = crate::config::AppConfig::default();
+                config
+                    .user_config
+                    .keybinding
+                    .universal
+                    .toggle_working_tree_and_head = binding.into();
+                let git = crate::git::GitCommands::new(repo.path()).unwrap();
+                let mut gui = Gui::new(config, git, None, false).unwrap();
+                gui.diff_focused = diff_focused;
+                gui.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+                    .unwrap();
+                assert_eq!(gui.context_mgr.active(), ContextId::Files);
+                gui.popup = PopupState::None;
+                gui.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))
+                    .unwrap();
+                assert_eq!(
+                    gui.context_mgr.active(),
+                    if binding.is_empty() {
+                        ContextId::Files
+                    } else {
+                        ContextId::BranchCommits
+                    }
+                );
+            }
+        }
+    }
+    #[test]
+    fn commits_startup_selects_actual_head_and_preserves_path_filter() {
+        let repo = TempRepo::new("startup-head");
+        repo.commit("filtered", "older");
+        let head = repo.commit("other", "head");
+        repo.git(&["checkout", "-b", "ahead"]);
+        repo.commit("other", "ahead");
+        repo.git(&["checkout", "main"]);
+        for path in [None, Some(PathBuf::from("filtered"))] {
+            let git = crate::git::GitCommands::new(repo.path()).unwrap();
+            let mut gui =
+                Gui::new(crate::config::AppConfig::default(), git, path.clone(), true).unwrap();
+            let commits = gui
+                .git
+                .load_filtered_commits_page(
+                    &gui.commit_filter_for_load().unwrap_or_default(),
+                    300,
+                    0,
+                )
+                .unwrap();
+            gui.model.lock().unwrap().set_commits(commits);
+            gui.select_startup_head().unwrap();
+            assert!(!gui.pending_startup_head);
+            let model = gui.model.lock().unwrap();
+            let selected = gui.context_mgr.selected_active();
+            let commit = if path.is_some() {
+                &model.sub_commits[selected]
+            } else {
+                &model.commits[selected]
+            };
+            assert_eq!(commit.hash, head);
+            assert_eq!(
+                gui.commit_path_filter,
+                path.map(|p| p.to_string_lossy().to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn startup_head_does_not_override_navigation() {
+        let repo = TempRepo::new("startup-navigation");
+        let git = crate::git::GitCommands::new(repo.path()).unwrap();
+        let mut gui = Gui::new(crate::config::AppConfig::default(), git, None, true).unwrap();
+        gui.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
+        gui.select_startup_head().unwrap();
+        assert_eq!(gui.context_mgr.active(), ContextId::Files);
     }
 }
 
@@ -9083,6 +10576,8 @@ fn setup_terminal() -> Result<(Term, bool)> {
         crossterm::event::EnableBracketedPaste,
         cursor::Hide
     )?;
+    // Detect graphics before Crossterm creates its internal response reader.
+    crate::pager::image_preview::initialize();
     // Helix leaves progressive kitty keyboard enhancement enabled across
     // `:insert-output` and keeps a `/dev/tty` EventStream open. Probing races
     // that reader (blank hang); instead pop leftover stacks and push our flags
@@ -9112,6 +10607,7 @@ fn setup_terminal() -> Result<(Term, bool)> {
 /// process-wide mutex that the input thread holds for the duration of its
 /// blocking read, so any drain from this thread would silently no-op.
 fn restore_terminal(terminal: &mut Term, keyboard_enhanced: bool) -> Result<()> {
+    crate::pager::image_preview::flush_cleanup(terminal.backend_mut());
     // Helix `:insert-output` keeps its own alt-screen / raw mode / mouse / focus
     // / bracketed-paste / kitty stack across the child. If we tear those down
     // here, Helix resumes drawing into a world that no longer exists and the

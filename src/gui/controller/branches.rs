@@ -106,13 +106,6 @@ fn checkout_branch(gui: &mut Gui) -> Result<()> {
         }
         let name = branch.name.clone();
         drop(model);
-        // Optimistic head flip so the UI reacts immediately.
-        {
-            let mut model = gui.model.lock().unwrap();
-            for (i, b) in model.branches.iter_mut().enumerate() {
-                b.head = i == selected;
-            }
-        }
         start_async_checkout(gui, name);
     }
     Ok(())
@@ -126,13 +119,6 @@ fn checkout_previous(gui: &mut Gui) -> Result<()> {
         .git
         .previous_branch_name()
         .unwrap_or_else(|| "-".to_string());
-    // Optimistic: mark matching local branch as head if we can resolve it.
-    if name != "-" {
-        let mut model = gui.model.lock().unwrap();
-        for b in model.branches.iter_mut() {
-            b.head = b.name == name;
-        }
-    }
     start_async_checkout(gui, name);
     Ok(())
 }
@@ -207,13 +193,6 @@ fn checkout_picker(gui: &mut Gui) -> Result<()> {
             scroll_offset: 0,
         },
         on_confirm: Box::new(|gui, ref_name| {
-            // Optimistic head flip for local branches.
-            {
-                let mut model = gui.model.lock().unwrap();
-                for b in model.branches.iter_mut() {
-                    b.head = b.name == ref_name;
-                }
-            }
             start_async_checkout(gui, ref_name.to_string());
             Ok(())
         }),
@@ -222,6 +201,12 @@ fn checkout_picker(gui: &mut Gui) -> Result<()> {
 }
 
 fn start_async_checkout(gui: &mut Gui, name: String) {
+    if gui.remote_op_label.is_some() {
+        return;
+    }
+
+    // Keep HEAD sourced from Git: a rejected checkout must not change the
+    // displayed branch. Successful completion triggers the normal model refresh.
     gui.pending_checkout_by_name = Some(name.clone());
     gui.start_remote_op(
         "Checking out",

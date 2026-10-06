@@ -38,6 +38,10 @@ struct Cli {
     /// Filter commits by path (file or directory), like lazygit -f
     #[arg(short = 'f', long = "filter", value_name = "PATH")]
     filter_path: Option<PathBuf>,
+
+    /// Launch directly in the commits panel
+    #[arg(long)]
+    commits: bool,
 }
 
 #[derive(Subcommand)]
@@ -115,7 +119,7 @@ fn main() {
         .or(cli.work_tree)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    match app::App::new(repo_path, cli.debug, cli.filter_path) {
+    match app::App::new(repo_path, cli.debug, cli.filter_path, cli.commits) {
         Ok(app) => {
             if let Err(e) = app.run() {
                 eprintln!("Error: {:#}", e);
@@ -126,5 +130,19 @@ fn main() {
             eprintln!("Error: {:#}", e);
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cli_commits_flag() {
+        let cli = Cli::parse_from(["lazygitrs", "--commits"]);
+        assert!(cli.commits);
+
+        let cli_default = Cli::parse_from(["lazygitrs"]);
+        assert!(!cli_default.commits);
     }
 }

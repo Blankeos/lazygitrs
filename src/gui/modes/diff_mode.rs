@@ -6,7 +6,471 @@ pub enum DiffModeFocus {
     SelectorA,
     SelectorB,
     CommitFiles,
+    Commits,
     DiffExploration,
+}
+
+/// The diff being previewed remains stable when focus moves to the diff panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompareDiffSource {
+    Comparison,
+    Commit,
+    CommitFiles,
+}
+
+/// Shared by rendering, mouse hit-testing, and diff text-selection geometry.
+pub struct CompareLayout {
+    pub sidebar: [ratatui::layout::Rect; 4],
+    pub diff: ratatui::layout::Rect,
+    pub status: ratatui::layout::Rect,
+    pub portrait: bool,
+}
+
+impl CompareLayout {
+    pub fn new(
+        area: ratatui::layout::Rect,
+        side_ratio: f64,
+        screen_mode: crate::gui::ScreenMode,
+        state: &DiffModeState,
+    ) -> Self {
+        use crate::gui::ScreenMode;
+        use ratatui::layout::{Constraint, Direction, Layout, Rect};
+        let outer = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(area);
+        let content = outer[0];
+        let portrait =
+            crate::gui::layout::should_use_portrait(area.width, area.height, screen_mode);
+        let mut result = Self {
+            sidebar: [Rect::default(); 4],
+            diff: Rect::default(),
+            status: outer[1],
+            portrait,
+        };
+        if screen_mode == ScreenMode::Full {
+            if state.focus == DiffModeFocus::DiffExploration {
+                result.diff = content;
+            } else {
+                let index = state.focus.sidebar_index().unwrap();
+                // Keep ref inputs compact with room below for their dropdowns.
+                result.sidebar[index] = if index < 2 {
+                    Rect {
+                        height: content.height.min(3),
+                        ..content
+                    }
+                } else {
+                    content
+                };
+            }
+            return result;
+        }
+        let ratio = if screen_mode == ScreenMode::Half {
+            0.5
+        } else {
+            side_ratio.clamp(0.0, 1.0)
+        };
+        let direction = if portrait {
+            Direction::Vertical
+        } else {
+            Direction::Horizontal
+        };
+        let extent = if portrait {
+            content.height
+        } else {
+            content.width
+        };
+        let side_extent = (f64::from(extent) * ratio).round() as u16;
+        let split = Layout::default()
+            .direction(direction)
+            .constraints([Constraint::Length(side_extent), Constraint::Min(0)])
+            .split(content);
+        result.diff = split[1];
+        let constraints = if portrait {
+            // Like the main view, collapse inactive panels to title rows when
+            // stacked above the diff, giving the last-focused list the space.
+            let active = state.sidebar_focus.sidebar_index().unwrap_or(2);
+            std::array::from_fn(|i| {
+                if i == active {
+                    if i < 2 {
+                        Constraint::Length(3)
+                    } else {
+                        Constraint::Min(1)
+                    }
+                } else if active < 2 && i == 2 {
+                    Constraint::Min(1)
+                } else {
+                    Constraint::Length(1)
+                }
+            })
+        } else {
+            [
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Fill(1),
+                Constraint::Fill(1),
+            ]
+        };
+        result.sidebar.copy_from_slice(
+            &Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(constraints)
+                .split(split[0]),
+        );
+        result
+    }
+
+    /// Both borders of the actual side/diff split can start a resize. At
+    /// either extreme, the outermost border allows the hidden pane to reopen.
+    pub fn divider_hit(&self, content: ratatui::layout::Rect, col: u16, row: u16) -> bool {
+        if content.width == 0 || content.height == 0 || !content.contains((col, row).into()) {
+            return false;
+        }
+        if self.portrait {
+            let split = self
+                .sidebar
+                .iter()
+                .map(|r| r.bottom())
+                .max()
+                .unwrap_or(content.y);
+            row == split.min(content.bottom().saturating_sub(1))
+                || (split > content.y && row == split - 1)
+        } else {
+            let split = self.diff.x;
+            col == split.min(content.right().saturating_sub(1))
+                || (split > content.x && col == split - 1)
+        }
+    }
+
+    pub fn resize_row_offset(&self, row: u16) -> u16 {
+        if self.portrait && self.diff.height > 0 && row < self.diff.y {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+impl DiffModeState {
+    pub fn clear_commits(&mut self) {
+        self.commits.clear();
+        self.commits_selected = 0;
+        self.commits_scroll = 0;
+        self.commits_viewport_manually_scrolled = false;
+        self.commits_revision = self.commits_revision.wrapping_add(1);
+        self.diff_source = CompareDiffSource::Comparison;
+        self.files_commit = None;
+        self.clear_list_search();
+    }
+
+    pub fn clear_list_search(&mut self) {
+        self.file_search_active = false;
+        self.file_search_query.clear();
+        self.file_search_matches.clear();
+        self.file_search_match_idx = 0;
+        self.file_search_textarea = None;
+    }
+
+    pub fn set_focus(&mut self, focus: DiffModeFocus) {
+        if (self.focus == DiffModeFocus::Commits) != (focus == DiffModeFocus::Commits) {
+            self.clear_list_search();
+        }
+        self.focus = focus;
+        if focus != DiffModeFocus::DiffExploration {
+            self.sidebar_focus = focus;
+        }
+        match focus {
+            DiffModeFocus::Commits => self.diff_source = CompareDiffSource::Commit,
+            DiffModeFocus::CommitFiles => {
+                self.diff_source = if self.files_commit.is_some() {
+                    CompareDiffSource::CommitFiles
+                } else {
+                    CompareDiffSource::Comparison
+                };
+            }
+            _ => {}
+        }
+    }
+
+    pub fn selected_commit(&self) -> Option<&Commit> {
+        self.commits.get(self.commits_selected)
+    }
+
+    pub fn has_more_commits(&self) -> bool {
+        self.ahead_behind
+            .is_some_and(|(ahead, behind)| self.commits.len() < ahead + behind)
+    }
+
+    pub fn select_list_match(&mut self, index: usize) {
+        if self.focus == DiffModeFocus::Commits {
+            self.commits_selected = index;
+            self.commits_viewport_manually_scrolled = false;
+        } else {
+            self.diff_files_selected = index;
+            self.viewport_manually_scrolled = false;
+        }
+    }
+
+    pub fn diff_key(&self) -> String {
+        if self.diff_source == CompareDiffSource::Commit {
+            return format!(
+                "DiffMode:commit:{}",
+                self.selected_commit()
+                    .map(|c| c.hash.as_str())
+                    .unwrap_or("none")
+            );
+        }
+        let item = if self.show_tree {
+            self.tree_nodes.get(self.diff_files_selected).map(|node| {
+                node.file_index
+                    .and_then(|i| self.diff_files.get(i))
+                    .map(|file| format!("file:{}", file.name))
+                    .unwrap_or_else(|| format!("dir:{}", node.path))
+            })
+        } else {
+            self.diff_files
+                .get(self.diff_files_selected)
+                .map(|file| format!("file:{}", file.name))
+        }
+        .unwrap_or_else(|| "none".into());
+        if self.diff_source == CompareDiffSource::CommitFiles {
+            format!(
+                "DiffMode:commit-files:{}:{item}",
+                self.files_commit.as_deref().unwrap_or("none")
+            )
+        } else {
+            format!("DiffMode:{}..{}:{item}", self.ref_a, self.ref_b)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn commit(hash: &str, name: &str) -> Commit {
+        Commit {
+            hash: hash.into(),
+            name: name.into(),
+            status: crate::model::CommitStatus::Pushed,
+            action: String::new(),
+            tags: vec![],
+            refs: vec![],
+            extra_info: String::new(),
+            author_name: "Test".into(),
+            author_email: String::new(),
+            unix_timestamp: 0,
+            parents: vec![],
+            divergence: crate::model::commit::Divergence::Left,
+        }
+    }
+
+    #[test]
+    fn compare_four_focuses_commits_and_tab_visits_all_five_panels() {
+        let panels = [
+            DiffModeFocus::SelectorA,
+            DiffModeFocus::SelectorB,
+            DiffModeFocus::CommitFiles,
+            DiffModeFocus::Commits,
+            DiffModeFocus::DiffExploration,
+        ];
+        for (i, panel) in panels.iter().enumerate() {
+            assert_eq!(DiffModeFocus::from_number(i as u32 + 1), Some(*panel));
+            assert_eq!(panel.next(), panels[(i + 1) % panels.len()]);
+            assert_eq!(panel.prev(), panels[(i + panels.len() - 1) % panels.len()]);
+            assert_eq!(panel.next().prev(), *panel);
+        }
+        assert_eq!(DiffModeFocus::from_number(6), None);
+    }
+
+    #[test]
+    fn compare_layout_modes_ratios_and_responsive_threshold_match_main_view() {
+        use crate::gui::ScreenMode;
+        use ratatui::layout::Rect;
+        let mut state = DiffModeState::new();
+        state.set_focus(DiffModeFocus::Commits);
+        for (width, height, portrait) in [
+            (150, 40, false),
+            (84, 26, true),
+            (85, 26, false),
+            (84, 25, false),
+        ] {
+            let area = Rect::new(5, 7, width, height);
+            for mode in [ScreenMode::Normal, ScreenMode::Half] {
+                let layout = CompareLayout::new(area, 0.4, mode, &state);
+                assert_eq!(layout.portrait, portrait);
+                assert_eq!(layout.status, Rect::new(5, 7 + height - 1, width, 1));
+                let ratio = if mode == ScreenMode::Half { 0.5 } else { 0.4 };
+                if portrait {
+                    assert_eq!(layout.diff.x, area.x);
+                    assert_eq!(layout.diff.width, width);
+                    assert_eq!(
+                        layout.diff.y - area.y,
+                        (f64::from(height - 1) * ratio).round() as u16
+                    );
+                    assert_eq!(layout.sidebar[2].height, 1);
+                    assert!(layout.sidebar[3].height > 1);
+                    state.set_focus(DiffModeFocus::DiffExploration);
+                    assert_eq!(
+                        CompareLayout::new(area, 0.4, mode, &state).sidebar,
+                        layout.sidebar
+                    );
+                    state.set_focus(DiffModeFocus::Commits);
+                } else {
+                    assert_eq!(
+                        layout.diff.x - area.x,
+                        (f64::from(width) * ratio).round() as u16
+                    );
+                    assert_eq!(layout.diff.y, area.y);
+                }
+            }
+            for focus in [
+                DiffModeFocus::SelectorA,
+                DiffModeFocus::SelectorB,
+                DiffModeFocus::CommitFiles,
+                DiffModeFocus::Commits,
+                DiffModeFocus::DiffExploration,
+            ] {
+                state.set_focus(focus);
+                let layout = CompareLayout::new(area, 0.4, ScreenMode::Full, &state);
+                assert!(!layout.portrait);
+                if let Some(index) = focus.sidebar_index() {
+                    assert!(layout.diff.is_empty());
+                    assert_eq!(layout.sidebar[index].width, width);
+                    for i in 0..4 {
+                        assert_eq!(layout.sidebar[i].is_empty(), i != index);
+                    }
+                } else {
+                    assert!(layout.sidebar.iter().all(|r| r.is_empty()));
+                    assert_eq!(layout.diff, Rect::new(5, 7, width, height - 1));
+                }
+            }
+            state.set_focus(DiffModeFocus::Commits);
+        }
+    }
+
+    #[test]
+    fn compare_divider_hits_only_split_borders_and_reopens_collapsed_panes() {
+        use crate::gui::ScreenMode;
+        use ratatui::layout::Rect;
+        let state = DiffModeState::new();
+        for (width, height) in [(150, 40), (80, 40)] {
+            let area = Rect::new(0, 0, width, height);
+            let content = Rect::new(0, 0, width, height - 1);
+            for ratio in [0.0, 0.4, 1.0] {
+                let layout = CompareLayout::new(area, ratio, ScreenMode::Normal, &state);
+                let split = if layout.portrait {
+                    layout.diff.y
+                } else {
+                    layout.diff.x
+                };
+                let end = if layout.portrait {
+                    content.height
+                } else {
+                    content.width
+                };
+                let border = split.min(end - 1);
+                let (col, row) = if layout.portrait {
+                    (5, border)
+                } else {
+                    (border, 5)
+                };
+                assert!(layout.divider_hit(content, col, row));
+                assert!(!layout.divider_hit(content, col, height - 1));
+                if ratio == 0.4 {
+                    let (col, row) = if layout.portrait {
+                        (5, split - 2)
+                    } else {
+                        (split - 2, 5)
+                    };
+                    assert!(!layout.divider_hit(content, col, row));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compare_commit_preview_and_files_have_independent_diff_keys() {
+        let mut state = DiffModeState::new();
+        state.ref_a = "main".into();
+        state.ref_b = "feature".into();
+        state.commits = vec![commit("a", "first"), commit("b", "second")];
+        let comparison_key = state.diff_key();
+        state.set_focus(DiffModeFocus::Commits);
+        assert_eq!(state.diff_key(), "DiffMode:commit:a");
+        state.commits_selected = 1;
+        state.set_focus(DiffModeFocus::DiffExploration);
+        assert_eq!(state.diff_key(), "DiffMode:commit:b");
+        state.set_focus(DiffModeFocus::CommitFiles);
+        assert_eq!(state.diff_key(), comparison_key);
+        state.files_commit = Some("b".into());
+        state.set_focus(DiffModeFocus::CommitFiles);
+        let commit_file_key = state.diff_key();
+        assert_ne!(commit_file_key, comparison_key);
+        state.set_focus(DiffModeFocus::DiffExploration);
+        assert_eq!(state.diff_key(), commit_file_key);
+    }
+
+    #[test]
+    fn compare_commit_search_targets_commits_and_clears_on_focus_change() {
+        let mut state = DiffModeState::new();
+        state.commits = vec![commit("a", "first"), commit("b", "second")];
+        state.set_focus(DiffModeFocus::Commits);
+        state.file_search_query = "second".into();
+        state.update_file_search_matches();
+        assert_eq!(state.file_search_matches, vec![1]);
+        assert_eq!(state.commits_selected, 1);
+        assert_eq!(state.diff_files_selected, 0);
+        state.set_focus(DiffModeFocus::CommitFiles);
+        assert!(state.file_search_query.is_empty());
+        assert!(state.file_search_matches.is_empty());
+    }
+
+    #[test]
+    fn compare_ref_changes_clear_commit_selection_files_and_search() {
+        let mut state = DiffModeState::new();
+        state.commits = vec![commit("a", "first")];
+        state.files_commit = Some("a".into());
+        state.commits_scroll = 5;
+        state.file_search_query = "stale".into();
+        state.start_editing(DiffModeSelector::A);
+        state.textarea.as_mut().unwrap().insert_str("HEAD");
+        state.confirm_selection();
+        assert!(state.commits.is_empty());
+        assert!(state.files_commit.is_none());
+        assert_eq!(state.commits_scroll, 0);
+        assert!(state.file_search_query.is_empty());
+        assert_eq!(state.diff_source, CompareDiffSource::Comparison);
+    }
+
+    #[test]
+    fn compare_counts_reverse_when_swapping_refs() {
+        let mut state = DiffModeState::new();
+        state.ref_a = "main".into();
+        state.ref_b = "feature".into();
+        state.ahead_behind = Some((1, 3));
+        state.swap_refs();
+        assert_eq!(state.ref_a, "feature");
+        assert_eq!(state.ref_b, "main");
+        assert_eq!(state.ahead_behind, Some((3, 1)));
+    }
+
+    #[test]
+    fn compare_counts_clear_when_selecting_refs_or_reentering() {
+        let mut state = DiffModeState::new();
+        state.ahead_behind = Some((2, 1));
+        state.start_editing(DiffModeSelector::A);
+        state.textarea.as_mut().unwrap().insert_str("HEAD");
+        state.confirm_selection();
+        assert_eq!(state.ref_a, "HEAD");
+        assert_eq!(state.ahead_behind, None);
+        state.ahead_behind = Some((2, 1));
+        state.exit();
+        assert_eq!(state.ahead_behind, None);
+        state.ahead_behind = Some((2, 1));
+        state.enter(false);
+        assert_eq!(state.ahead_behind, None);
+    }
 }
 
 impl DiffModeFocus {
@@ -15,8 +479,29 @@ impl DiffModeFocus {
             1 => Some(Self::SelectorA),
             2 => Some(Self::SelectorB),
             3 => Some(Self::CommitFiles),
-            4 => Some(Self::DiffExploration),
+            4 => Some(Self::Commits),
+            5 => Some(Self::DiffExploration),
             _ => None,
+        }
+    }
+
+    pub fn sidebar_index(self) -> Option<usize> {
+        match self {
+            Self::SelectorA => Some(0),
+            Self::SelectorB => Some(1),
+            Self::CommitFiles => Some(2),
+            Self::Commits => Some(3),
+            Self::DiffExploration => None,
+        }
+    }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            Self::SelectorA => Self::DiffExploration,
+            Self::SelectorB => Self::SelectorA,
+            Self::CommitFiles => Self::SelectorB,
+            Self::Commits => Self::CommitFiles,
+            Self::DiffExploration => Self::Commits,
         }
     }
 
@@ -24,7 +509,8 @@ impl DiffModeFocus {
         match self {
             Self::SelectorA => Self::SelectorB,
             Self::SelectorB => Self::CommitFiles,
-            Self::CommitFiles => Self::DiffExploration,
+            Self::CommitFiles => Self::Commits,
+            Self::Commits => Self::DiffExploration,
             Self::DiffExploration => Self::SelectorA,
         }
     }
@@ -64,6 +550,16 @@ pub struct DiffModeState {
     pub ref_b: String,
     pub ref_a_display: String,
     pub ref_b_display: String,
+    /// Commits unique to A and B. None when refs aren't both commit-ish.
+    pub ahead_behind: Option<(usize, usize)>,
+    pub commits: Vec<Commit>,
+    pub commits_selected: usize,
+    pub commits_scroll: usize,
+    pub commits_viewport_manually_scrolled: bool,
+    pub commits_revision: u64,
+    pub diff_source: CompareDiffSource,
+    /// When inspecting a commit's files, the file list is relative to its first parent.
+    pub files_commit: Option<String>,
 
     // Combobox editing state
     pub editing: Option<DiffModeSelector>,
@@ -74,6 +570,8 @@ pub struct DiffModeState {
 
     // Focus
     pub focus: DiffModeFocus,
+    /// Retain the expanded portrait list while inspecting its diff.
+    pub sidebar_focus: DiffModeFocus,
 
     // Commit files for A..B diff
     pub diff_files: Vec<CommitFile>,
@@ -103,12 +601,21 @@ impl DiffModeState {
             ref_b: String::new(),
             ref_a_display: String::new(),
             ref_b_display: String::new(),
+            ahead_behind: None,
+            commits: Vec::new(),
+            commits_selected: 0,
+            commits_scroll: 0,
+            commits_viewport_manually_scrolled: false,
+            commits_revision: 0,
+            diff_source: CompareDiffSource::Comparison,
+            files_commit: None,
             editing: None,
             textarea: None,
             search_results: Vec::new(),
             search_selected: 0,
             dropdown_scroll: 0,
             focus: DiffModeFocus::SelectorA,
+            sidebar_focus: DiffModeFocus::SelectorA,
             diff_files: Vec::new(),
             diff_files_selected: 0,
             diff_files_scroll: 0,
@@ -125,17 +632,19 @@ impl DiffModeState {
     }
 
     pub fn enter(&mut self, show_tree: bool) {
+        self.clear_commits();
         self.active = true;
         self.ref_a.clear();
         self.ref_b.clear();
         self.ref_a_display.clear();
         self.ref_b_display.clear();
+        self.ahead_behind = None;
         self.editing = None;
         self.textarea = None;
         self.search_results.clear();
         self.search_selected = 0;
         self.dropdown_scroll = 0;
-        self.focus = DiffModeFocus::SelectorA;
+        self.set_focus(DiffModeFocus::SelectorA);
         self.diff_files.clear();
         self.diff_files_selected = 0;
         self.diff_files_scroll = 0;
@@ -151,7 +660,9 @@ impl DiffModeState {
     }
 
     pub fn exit(&mut self) {
+        self.clear_commits();
         self.active = false;
+        self.ahead_behind = None;
         self.editing = None;
         self.textarea = None;
         self.search_results.clear();
@@ -161,8 +672,10 @@ impl DiffModeState {
     }
 
     pub fn swap_refs(&mut self) {
+        self.clear_commits();
         std::mem::swap(&mut self.ref_a, &mut self.ref_b);
         std::mem::swap(&mut self.ref_a_display, &mut self.ref_b_display);
+        self.ahead_behind = self.ahead_behind.map(|(ahead, behind)| (behind, ahead));
         self.diff_files.clear();
         self.diff_files_selected = 0;
         self.diff_files_scroll = 0;
@@ -236,6 +749,8 @@ impl DiffModeState {
             }
         }
 
+        self.clear_commits();
+        self.ahead_behind = None;
         self.editing = None;
         self.textarea = None;
         self.search_results.clear();
@@ -378,7 +893,16 @@ impl DiffModeState {
 
         let query = self.file_search_query.to_lowercase();
 
-        if self.show_tree {
+        if self.focus == DiffModeFocus::Commits {
+            for (i, commit) in self.commits.iter().enumerate() {
+                if [&commit.hash, &commit.name, &commit.author_name]
+                    .iter()
+                    .any(|text| text.to_lowercase().contains(&query))
+                {
+                    self.file_search_matches.push(i);
+                }
+            }
+        } else if self.show_tree {
             for (i, node) in self.tree_nodes.iter().enumerate() {
                 if node.path.to_lowercase().contains(&query)
                     || node.name.to_lowercase().contains(&query)
@@ -397,7 +921,7 @@ impl DiffModeState {
         // Auto-jump to first match
         if !self.file_search_matches.is_empty() {
             self.file_search_match_idx = 0;
-            self.diff_files_selected = self.file_search_matches[0];
+            self.select_list_match(self.file_search_matches[0]);
         }
     }
 
@@ -408,7 +932,7 @@ impl DiffModeState {
         }
         self.file_search_match_idx =
             (self.file_search_match_idx + 1) % self.file_search_matches.len();
-        self.diff_files_selected = self.file_search_matches[self.file_search_match_idx];
+        self.select_list_match(self.file_search_matches[self.file_search_match_idx]);
     }
 
     /// Go to previous file search match.
@@ -421,6 +945,6 @@ impl DiffModeState {
         } else {
             self.file_search_match_idx -= 1;
         }
-        self.diff_files_selected = self.file_search_matches[self.file_search_match_idx];
+        self.select_list_match(self.file_search_matches[self.file_search_match_idx]);
     }
 }

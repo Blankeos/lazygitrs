@@ -65,13 +65,21 @@ pub fn open_diff_grep_picker(gui: &mut Gui) -> Result<()> {
             };
             return Ok(());
         }
-        let ref_a = gui.diff_mode.ref_a.clone();
-        let ref_b = gui.diff_mode.ref_b.clone();
-        diff_text = gui
-            .git
-            .diff_refs_paths(&ref_a, &ref_b, &[])
-            .unwrap_or_default();
-        scope_title = format!("Grep {ref_a}..{ref_b}");
+        if gui.diff_mode.diff_source == crate::gui::modes::diff_mode::CompareDiffSource::Commit {
+            super::diff_mode::open_selected_commit_files(gui)?;
+        }
+        if let Some(hash) = &gui.diff_mode.files_commit {
+            diff_text = gui.git.diff_commit(hash).unwrap_or_default();
+            scope_title = format!("Grep {}", &hash[..8.min(hash.len())]);
+        } else {
+            let ref_a = gui.diff_mode.ref_a.clone();
+            let ref_b = gui.diff_mode.ref_b.clone();
+            diff_text = gui
+                .git
+                .diff_refs_paths(&ref_a, &ref_b, &[])
+                .unwrap_or_default();
+            scope_title = format!("Grep {ref_a}..{ref_b}");
+        }
         scope = DiffGrepScope::Compare;
     } else {
         match gui.context_mgr.active() {
@@ -175,6 +183,8 @@ fn confirm_diff_grep(gui: &mut Gui, scope: DiffGrepScope, value: &str) -> Result
                     .position(|f| f.current_path() == path || f.name == path)
             };
             let Some(idx) = idx else { return Ok(()) };
+            gui.diff_mode
+                .set_focus(crate::gui::modes::diff_mode::DiffModeFocus::CommitFiles);
             if gui.show_file_tree {
                 expand_ancestors(&mut gui.collapsed_dirs, &path);
                 gui.update_file_tree_state();
