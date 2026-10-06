@@ -40,29 +40,6 @@ pub fn destination<T: NavigableTreeNode>(
     }
 }
 
-pub fn hints(kb: &KeybindingConfig, include_fold: bool) -> Vec<(String, &'static str)> {
-    let u = &kb.universal;
-    let mut hints = Vec::new();
-    if include_fold && !u.fold_directory.is_empty() {
-        hints.push((u.fold_directory.clone(), "fold"));
-    }
-    for (keys, label) in [
-        ([&u.tree_parent, &u.tree_child], "nav"),
-        ([&u.tree_prev_sibling, &u.tree_next_sibling], "siblings"),
-    ] {
-        let keys = keys
-            .into_iter()
-            .filter(|k| !k.is_empty())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("/");
-        if !keys.is_empty() {
-            hints.push((keys, label));
-        }
-    }
-    hints
-}
-
 pub fn command_section(
     kb: &KeybindingConfig,
     include_fold: bool,
@@ -97,30 +74,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tree_hints_reflect_custom_and_disabled_bindings() {
+    fn tree_help_reflects_custom_and_disabled_bindings() {
         let mut kb = KeybindingConfig::default();
         kb.universal.fold_directory = "<c-f>".into();
         kb.universal.tree_parent = "p".into();
         kb.universal.tree_child = "c".into();
         kb.universal.tree_prev_sibling.clear();
         kb.universal.tree_next_sibling = "n".into();
-        assert_eq!(
-            hints(&kb, true),
-            vec![
-                ("<c-f>".into(), "fold"),
-                ("p/c".into(), "nav"),
-                ("n".into(), "siblings")
-            ]
-        );
-        assert_eq!(
-            hints(&kb, false),
-            vec![("p/c".into(), "nav"), ("n".into(), "siblings")]
-        );
+        for include_fold in [false, true] {
+            let section = command_section(&kb, include_fold);
+            assert_eq!(section.title, "File Tree");
+            let keys: Vec<&str> = section.entries.iter().map(|e| e.key.as_str()).collect();
+            assert_eq!(
+                keys,
+                if include_fold {
+                    vec!["<c-f>", "p", "c", "n"]
+                } else {
+                    vec!["p", "c", "n"]
+                }
+            );
+        }
         kb.universal.fold_directory.clear();
         kb.universal.tree_parent.clear();
         kb.universal.tree_child.clear();
         kb.universal.tree_next_sibling.clear();
-        assert!(hints(&kb, true).is_empty());
+        assert!(command_section(&kb, true).entries.is_empty());
     }
 
     #[test]

@@ -196,7 +196,7 @@ impl Default for UniversalKeybinding {
             toggle_working_tree_and_head: "<c-g>".into(),
             fold_directory: "-".into(),
             tree_parent: ",".into(),
-            tree_child: ".".into(),
+            tree_child: "'".into(),
             tree_prev_sibling: "<".into(),
             tree_next_sibling: ">".into(),
         }
@@ -476,7 +476,7 @@ mod tests {
         let default_config = KeybindingConfig::default();
         assert_eq!(default_config.universal.fold_directory, "-");
         assert_eq!(default_config.universal.tree_parent, ",");
-        assert_eq!(default_config.universal.tree_child, ".");
+        assert_eq!(default_config.universal.tree_child, "'");
         assert_eq!(default_config.universal.tree_prev_sibling, "<");
         assert_eq!(default_config.universal.tree_next_sibling, ">");
 

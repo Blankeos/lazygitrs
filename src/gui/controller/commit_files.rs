@@ -48,21 +48,21 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
     }
 
     // Folding is explicit; Enter focuses file or combined directory diffs.
-    if super::tree::matches_key(key, &keybindings.universal.fold_directory) {
-        if gui.show_commit_file_tree {
-            if let Some(node) = gui
-                .commit_file_tree_nodes
-                .get(gui.context_mgr.selected_active())
-            {
-                if node.is_dir {
-                    let path = node.path.clone();
-                    if !gui.commit_files_collapsed_dirs.remove(&path) {
-                        gui.commit_files_collapsed_dirs.insert(path);
-                    }
-                    update_commit_file_tree_state(gui);
-                    gui.context_mgr.viewport_manually_scrolled = false;
-                    gui.needs_diff_refresh = true;
+    if gui.show_commit_file_tree
+        && super::tree::matches_key(key, &keybindings.universal.fold_directory)
+    {
+        if let Some(node) = gui
+            .commit_file_tree_nodes
+            .get(gui.context_mgr.selected_active())
+        {
+            if node.is_dir {
+                let path = node.path.clone();
+                if !gui.commit_files_collapsed_dirs.remove(&path) {
+                    gui.commit_files_collapsed_dirs.insert(path);
                 }
+                update_commit_file_tree_state(gui);
+                gui.context_mgr.viewport_manually_scrolled = false;
+                gui.needs_diff_refresh = true;
             }
         }
         return Ok(());

@@ -109,7 +109,6 @@ mod tests {
                         &state,
                         &DiffViewState::default(),
                         &Theme::default(),
-                        &crate::config::KeybindingConfig::default(),
                     )
                 })
                 .unwrap();
@@ -131,52 +130,34 @@ mod tests {
     }
 
     #[test]
-    fn tree_compare_status_uses_configured_keys_and_hides_disabled_ones() {
-        let mut state = DiffModeState::new();
-        state.show_tree = true;
-        let mut kb = crate::config::KeybindingConfig::default();
-        kb.universal.fold_directory = "f".into();
-        kb.universal.tree_parent = "p".into();
-        kb.universal.tree_child = "c".into();
-        kb.universal.tree_prev_sibling.clear();
-        kb.universal.tree_next_sibling = "n".into();
-        for focus in [
-            DiffModeFocus::CommitFiles,
-            DiffModeFocus::DiffExploration,
-            DiffModeFocus::Commits,
-        ] {
-            state.set_focus(focus);
-            let mut terminal = Terminal::new(TestBackend::new(180, 1)).unwrap();
-            terminal
-                .draw(|frame| {
-                    render_status_bar(
-                        frame,
-                        frame.area(),
-                        &state,
-                        &DiffViewState::default(),
-                        &Theme::default(),
-                        &kb,
-                    )
-                })
-                .unwrap();
-            let text = buffer_text(&terminal);
-            assert_eq!(
-                text.contains("f fold"),
-                focus == DiffModeFocus::CommitFiles,
-                "{text}"
-            );
-            assert_eq!(
-                text.contains("p/c nav"),
-                focus != DiffModeFocus::Commits,
-                "{text}"
-            );
-            assert_eq!(
-                text.contains("n siblings"),
-                focus != DiffModeFocus::Commits,
-                "{text}"
-            );
-            assert!(!text.contains(",/."), "{text}");
-            assert!(!text.contains("- fold"), "{text}");
+    fn tree_compare_navigation_is_absent_from_footer() {
+        for tree in [false, true] {
+            for focus in [
+                DiffModeFocus::CommitFiles,
+                DiffModeFocus::DiffExploration,
+                DiffModeFocus::Commits,
+            ] {
+                let mut state = DiffModeState::new();
+                state.show_tree = tree;
+                state.set_focus(focus);
+                let mut terminal = Terminal::new(TestBackend::new(180, 1)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        render_status_bar(
+                            frame,
+                            frame.area(),
+                            &state,
+                            &DiffViewState::default(),
+                            &Theme::default(),
+                        )
+                    })
+                    .unwrap();
+                let text = buffer_text(&terminal);
+                assert!(!text.contains("fold"), "{text}");
+                assert!(!text.contains("nav"), "{text}");
+                assert!(!text.contains("siblings"), "{text}");
+                assert!(text.contains("? help"), "{text}");
+            }
         }
     }
 
@@ -233,7 +214,6 @@ mod tests {
                                 &mut CommitListCache::default(),
                                 1.0 / 3.0,
                                 mode,
-                                &crate::config::KeybindingConfig::default(),
                             )
                         })
                         .unwrap();
@@ -274,7 +254,6 @@ pub fn render(
     commit_cache: &mut CommitListCache,
     side_ratio: f64,
     screen_mode: crate::gui::ScreenMode,
-    keybindings: &crate::config::KeybindingConfig,
 ) {
     let layout = CompareLayout::new(frame.area(), side_ratio, screen_mode, state);
     let sidebar = layout.sidebar;
@@ -307,7 +286,7 @@ pub fn render(
     }
 
     // Status bar
-    render_status_bar(frame, layout.status, state, diff_view, theme, keybindings);
+    render_status_bar(frame, layout.status, state, diff_view, theme);
 
     // Render combobox dropdown overlay on top of the sidebar
     if state.editing.is_some() && sidebar.iter().any(|r| !r.is_empty()) {
@@ -691,10 +670,7 @@ fn render_status_bar(
     state: &DiffModeState,
     diff_view: &DiffViewState,
     theme: &Theme,
-    keybindings: &crate::config::KeybindingConfig,
 ) {
-    let tree_hints =
-        crate::gui::controller::tree::hints(keybindings, state.focus == DiffModeFocus::CommitFiles);
     // If search is active or has results, show search bar instead of hints
     if state.file_search_active {
         if let Some(ref ta) = state.file_search_textarea {
@@ -754,7 +730,7 @@ fn render_status_bar(
         return;
     }
 
-    let mut hints = if state.editing.is_some() {
+    let hints = if state.editing.is_some() {
         vec![("Enter", "select"), ("Esc", "cancel"), ("↑↓", "navigate")]
     } else {
         let view_layout_hint = match diff_view.view_layout {
@@ -775,17 +751,10 @@ fn render_status_bar(
             ("<c-s>", "swap"),
             ("`", "tree"),
         ]);
-        if state.show_tree && state.focus == DiffModeFocus::CommitFiles {
-            hints.extend(tree_hints.iter().map(|(key, label)| (key.as_str(), *label)));
-        }
         hints.push(("\\", view_layout_hint));
         hints.push(("?", "help"));
         hints
     };
-
-    if state.show_tree && state.focus == DiffModeFocus::DiffExploration {
-        hints.extend(tree_hints.iter().map(|(key, label)| (key.as_str(), *label)));
-    }
 
     let key_style = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
     let desc_style = Style::default().fg(theme.text_dimmed);

@@ -47,7 +47,7 @@ toggle the tree view. With a tree active:
 - `-` folds/unfolds the selected directory (including the root).
 - `Enter` focuses the selected file or combined directory diff without changing
   your normal/half/full layout; `Esc` returns to the file list.
-- `,` / `.` select the parent / first visible child.
+- `,` / `'` (apostrophe) select the parent / first visible child.
 - `<` / `>` select the previous / next sibling, skipping nested descendants.
   Hierarchy navigation also works while the diff is focused.
 
@@ -58,14 +58,16 @@ keybinding:
   universal:
     foldDirectory: "-"
     treeParent: ","
-    treeChild: "."
+    treeChild: "'"
     treePrevSibling: "<"
     treeNextSibling: ">"
 ```
 
 Set a binding to `""` to disable it. Collapsed directories must be unfolded
-before their children can be selected. In a commit-file tree, `.` navigates
-rather than toggling commit details when assigned to a tree-navigation action.
+before their children can be selected. Tree-navigation actions appear in `?`
+only while a tree is active, not in the footer. `.` remains the commit-details
+toggle with the default bindings; explicitly remapping a tree action to `.`
+will override it while the tree is active.
 
 ### Upgrade
 

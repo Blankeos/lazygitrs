@@ -1517,7 +1517,6 @@ impl Gui {
                         &mut self.commit_list_cache,
                         self.layout.side_panel_ratio,
                         self.screen_mode,
-                        &self.config.user_config.keybinding,
                     );
                     // Render popup overlay on top of diff mode (for ? help, errors, etc.)
                     if self.popup != PopupState::None {
@@ -9453,7 +9452,7 @@ mod terminal_mouse_tests {
             gui.diff_mode.diff_files_selected = 0;
             gui.diff_mode.viewport_manually_scrolled = true;
             gui.needs_diff_refresh = false;
-            gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+            gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
                 .unwrap();
             assert_eq!(gui.diff_mode.diff_files_selected, 1);
             assert!(!gui.diff_mode.viewport_manually_scrolled);
@@ -9490,7 +9489,7 @@ mod terminal_mouse_tests {
             .keybinding
             .universal
             .tree_child = "<c-t>".into();
-        gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+        gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(gui.diff_mode.diff_files_selected, 0);
         gui.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))
@@ -9504,7 +9503,7 @@ mod terminal_mouse_tests {
         let mut gui = tree_test_gui(&repo);
         gui.context_mgr.set_active(ContextId::CommitFiles);
         let details = gui.show_commit_details;
-        gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+        gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(gui.context_mgr.selected_active(), 1);
         assert_eq!(gui.show_commit_details, details);
@@ -9525,6 +9524,139 @@ mod terminal_mouse_tests {
         gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
             .unwrap();
         assert_ne!(gui.show_commit_details, details);
+    }
+
+    #[test]
+    fn tree_default_child_key_preserves_commit_details_toggle() {
+        let repo = TempRepo::new("tree-default-details");
+        let mut gui = tree_test_gui(&repo);
+        for ctx in [ContextId::CommitFiles, ContextId::BranchCommitFiles] {
+            for tree in [false, true] {
+                gui.context_mgr.set_active(ctx);
+                gui.context_mgr.set_selection(0);
+                gui.show_commit_file_tree = tree;
+                let details = gui.show_commit_details;
+                gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+                    .unwrap();
+                assert_ne!(gui.show_commit_details, details, "{ctx:?} {tree}");
+                assert_eq!(gui.context_mgr.selected_active(), 0);
+                gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
+                    .unwrap();
+                assert_eq!(gui.context_mgr.selected_active(), usize::from(tree));
+                assert_ne!(gui.show_commit_details, details);
+            }
+        }
+    }
+
+    #[test]
+    fn tree_help_is_only_available_in_active_tree_contexts() {
+        use crate::gui::modes::diff_mode::DiffModeFocus;
+        let repo = TempRepo::new("tree-contextual-help");
+        let mut gui = tree_test_gui(&repo);
+        for ctx in [
+            ContextId::Files,
+            ContextId::CommitFiles,
+            ContextId::BranchCommitFiles,
+            ContextId::StashFiles,
+            ContextId::Commits,
+        ] {
+            for tree in [false, true] {
+                for diff in [false, true] {
+                    gui.popup = PopupState::None;
+                    gui.context_mgr.set_active(ctx);
+                    gui.show_file_tree = tree;
+                    gui.show_commit_file_tree = tree;
+                    gui.diff_focused = diff;
+                    gui.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT))
+                        .unwrap();
+                    let PopupState::CommandPalette { sections, .. } = &gui.popup else {
+                        panic!("expected help palette");
+                    };
+                    let tree_section = sections.iter().find(|s| s.title == "File Tree");
+                    assert_eq!(
+                        tree_section.is_some(),
+                        tree && ctx != ContextId::Commits,
+                        "{ctx:?} tree={tree} diff={diff}"
+                    );
+                    if let Some(section) = tree_section {
+                        assert!(
+                            section
+                                .entries
+                                .iter()
+                                .any(|e| e.key == "'"
+                                    && e.description == "Select first visible child")
+                        );
+                        assert_eq!(section.entries.iter().any(|e| e.key == "-"), !diff);
+                    }
+                }
+            }
+        }
+        gui.diff_mode.enter(true);
+        for tree in [false, true] {
+            for focus in [
+                DiffModeFocus::CommitFiles,
+                DiffModeFocus::DiffExploration,
+                DiffModeFocus::Commits,
+                DiffModeFocus::SelectorA,
+                DiffModeFocus::SelectorB,
+            ] {
+                gui.popup = PopupState::None;
+                gui.diff_mode.show_tree = tree;
+                gui.diff_mode.set_focus(focus);
+                gui.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT))
+                    .unwrap();
+                let PopupState::CommandPalette { sections, .. } = &gui.popup else {
+                    panic!("expected compare help palette");
+                };
+                let tree_section = sections.iter().find(|s| s.title == "File Tree");
+                assert_eq!(
+                    tree_section.is_some(),
+                    tree && matches!(
+                        focus,
+                        DiffModeFocus::CommitFiles | DiffModeFocus::DiffExploration
+                    )
+                );
+                if let Some(section) = tree_section {
+                    assert!(section.entries.iter().any(|e| e.key == "'"));
+                    assert_eq!(
+                        section.entries.iter().any(|e| e.key == "-"),
+                        focus == DiffModeFocus::CommitFiles
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tree_fold_binding_does_not_override_flat_list_actions() {
+        use crate::gui::modes::diff_mode::DiffModeFocus;
+        let repo = TempRepo::new("tree-flat-fold");
+        let mut gui = tree_test_gui(&repo);
+        // A remapped fold key must not swallow a flat list's tree-toggle action.
+        Arc::get_mut(&mut gui.config)
+            .unwrap()
+            .user_config
+            .keybinding
+            .universal
+            .fold_directory = "`".into();
+        for ctx in [
+            ContextId::Files,
+            ContextId::CommitFiles,
+            ContextId::BranchCommitFiles,
+            ContextId::StashFiles,
+        ] {
+            gui.context_mgr.set_active(ctx);
+            gui.show_file_tree = false;
+            gui.show_commit_file_tree = false;
+            gui.handle_key(KeyEvent::new(KeyCode::Char('`'), KeyModifiers::NONE))
+                .unwrap();
+            assert!(gui.active_file_tree(), "{ctx:?}");
+        }
+        gui.diff_mode.enter(false);
+        gui.diff_mode.set_focus(DiffModeFocus::CommitFiles);
+        gui.handle_key(KeyEvent::new(KeyCode::Char('`'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(gui.diff_mode.show_tree);
     }
 
     fn tree_test_gui(repo: &TempRepo) -> Gui {
@@ -9612,7 +9744,7 @@ mod terminal_mouse_tests {
                 gui.diff_focused = diff;
                 gui.context_mgr.viewport_manually_scrolled = true;
                 gui.needs_diff_refresh = false;
-                gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+                gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
                     .unwrap();
                 assert_eq!(gui.context_mgr.selected_active(), 1);
                 assert!(!gui.context_mgr.viewport_manually_scrolled);

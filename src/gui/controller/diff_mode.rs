@@ -414,22 +414,22 @@ fn handle_commit_files_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         return Ok(());
     }
 
-    if super::tree::matches_key(key, &keybindings.universal.fold_directory) {
-        if gui.diff_mode.show_tree {
-            if let Some(node) = gui
-                .diff_mode
-                .tree_nodes
-                .get(gui.diff_mode.diff_files_selected)
-            {
-                if node.is_dir {
-                    let path = node.path.clone();
-                    if !gui.diff_mode.collapsed_dirs.remove(&path) {
-                        gui.diff_mode.collapsed_dirs.insert(path);
-                    }
-                    update_diff_mode_tree(gui);
-                    gui.diff_mode.viewport_manually_scrolled = false;
-                    gui.needs_diff_refresh = true;
+    if gui.diff_mode.show_tree
+        && super::tree::matches_key(key, &keybindings.universal.fold_directory)
+    {
+        if let Some(node) = gui
+            .diff_mode
+            .tree_nodes
+            .get(gui.diff_mode.diff_files_selected)
+        {
+            if node.is_dir {
+                let path = node.path.clone();
+                if !gui.diff_mode.collapsed_dirs.remove(&path) {
+                    gui.diff_mode.collapsed_dirs.insert(path);
                 }
+                update_diff_mode_tree(gui);
+                gui.diff_mode.viewport_manually_scrolled = false;
+                gui.needs_diff_refresh = true;
             }
         }
         return Ok(());
