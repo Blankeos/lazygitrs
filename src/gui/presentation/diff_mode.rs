@@ -109,6 +109,7 @@ mod tests {
                         &state,
                         &DiffViewState::default(),
                         &Theme::default(),
+                        &crate::config::KeybindingConfig::default(),
                     )
                 })
                 .unwrap();
@@ -126,6 +127,53 @@ mod tests {
                 focus == DiffModeFocus::Commits && more,
                 "{text}"
             );
+        }
+    }
+
+    #[test]
+    fn compare_footer_shows_only_enabled_folding_in_active_tree_lists() {
+        for tree in [false, true] {
+            for focus in [
+                DiffModeFocus::CommitFiles,
+                DiffModeFocus::DiffExploration,
+                DiffModeFocus::Commits,
+                DiffModeFocus::SelectorA,
+                DiffModeFocus::SelectorB,
+            ] {
+                for (binding, hint) in [("-", "-"), ("<c-f>", "ctrl+f"), ("", "")] {
+                    let mut kb = crate::config::KeybindingConfig::default();
+                    kb.universal.fold_directory = binding.into();
+                    let mut state = DiffModeState::new();
+                    state.show_tree = tree;
+                    state.set_focus(focus);
+                    let mut terminal = Terminal::new(TestBackend::new(240, 1)).unwrap();
+                    terminal
+                        .draw(|frame| {
+                            render_status_bar(
+                                frame,
+                                frame.area(),
+                                &state,
+                                &DiffViewState::default(),
+                                &Theme::default(),
+                                &kb,
+                            )
+                        })
+                        .unwrap();
+                    let text = buffer_text(&terminal);
+                    assert_eq!(
+                        text.contains("fold/unfold"),
+                        tree && focus == DiffModeFocus::CommitFiles && !binding.is_empty(),
+                        "{text}"
+                    );
+                    if tree && focus == DiffModeFocus::CommitFiles && !binding.is_empty() {
+                        assert!(text.contains(&format!("{hint} fold/unfold")), "{text}");
+                    }
+                    assert!(!text.contains("nav"), "{text}");
+                    assert!(!text.contains("siblings"), "{text}");
+                    assert!(!text.contains("details"), "{text}");
+                    assert!(text.contains("? help"), "{text}");
+                }
+            }
         }
     }
 
@@ -182,6 +230,7 @@ mod tests {
                                 &mut CommitListCache::default(),
                                 1.0 / 3.0,
                                 mode,
+                                &crate::config::KeybindingConfig::default(),
                             )
                         })
                         .unwrap();
@@ -222,6 +271,7 @@ pub fn render(
     commit_cache: &mut CommitListCache,
     side_ratio: f64,
     screen_mode: crate::gui::ScreenMode,
+    keybindings: &crate::config::KeybindingConfig,
 ) {
     let layout = CompareLayout::new(frame.area(), side_ratio, screen_mode, state);
     let sidebar = layout.sidebar;
@@ -254,7 +304,7 @@ pub fn render(
     }
 
     // Status bar
-    render_status_bar(frame, layout.status, state, diff_view, theme);
+    render_status_bar(frame, layout.status, state, diff_view, theme, keybindings);
 
     // Render combobox dropdown overlay on top of the sidebar
     if state.editing.is_some() && sidebar.iter().any(|r| !r.is_empty()) {
@@ -638,6 +688,7 @@ fn render_status_bar(
     state: &DiffModeState,
     diff_view: &DiffViewState,
     theme: &Theme,
+    keybindings: &crate::config::KeybindingConfig,
 ) {
     // If search is active or has results, show search bar instead of hints
     if state.file_search_active {
@@ -698,6 +749,7 @@ fn render_status_bar(
         return;
     }
 
+    let fold_key = crate::gui::views::format_key_hint(&keybindings.universal.fold_directory);
     let hints = if state.editing.is_some() {
         vec![("Enter", "select"), ("Esc", "cancel"), ("↑↓", "navigate")]
     } else {
@@ -718,9 +770,12 @@ fn render_status_bar(
             ("1-5", "panel"),
             ("<c-s>", "swap"),
             ("`", "tree"),
-            ("\\", view_layout_hint),
-            ("?", "help"),
         ]);
+        hints.push(("\\", view_layout_hint));
+        if state.show_tree && state.focus == DiffModeFocus::CommitFiles && !fold_key.is_empty() {
+            hints.push((fold_key.as_str(), "fold/unfold"));
+        }
+        hints.push(("?", "help"));
         hints
     };
 

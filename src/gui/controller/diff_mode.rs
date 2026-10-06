@@ -374,6 +374,26 @@ fn handle_file_search_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
+fn handle_tree_navigation(gui: &mut Gui, key: KeyEvent) -> bool {
+    if !gui.diff_mode.show_tree {
+        return false;
+    }
+    if let Some(destination) = super::tree::destination(
+        key,
+        &gui.config.user_config.keybinding,
+        &gui.diff_mode.tree_nodes,
+        gui.diff_mode.diff_files_selected,
+    ) {
+        if let Some(idx) = destination {
+            gui.diff_mode.diff_files_selected = idx;
+            gui.diff_mode.viewport_manually_scrolled = false;
+            gui.needs_diff_refresh = true;
+        }
+        return true;
+    }
+    false
+}
+
 fn handle_commit_files_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
     if key.code == KeyCode::Esc && gui.diff_mode.files_commit.is_some() {
         restore_comparison_files(gui)?;
@@ -391,6 +411,30 @@ fn handle_commit_files_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         gui.persist_file_tree_visibility();
         update_diff_mode_tree(gui);
         gui.diff_mode.diff_files_selected = 0;
+        return Ok(());
+    }
+
+    if gui.diff_mode.show_tree
+        && super::tree::matches_key(key, &keybindings.universal.fold_directory)
+    {
+        if let Some(node) = gui
+            .diff_mode
+            .tree_nodes
+            .get(gui.diff_mode.diff_files_selected)
+        {
+            if node.is_dir {
+                let path = node.path.clone();
+                if !gui.diff_mode.collapsed_dirs.remove(&path) {
+                    gui.diff_mode.collapsed_dirs.insert(path);
+                }
+                update_diff_mode_tree(gui);
+                gui.diff_mode.viewport_manually_scrolled = false;
+                gui.needs_diff_refresh = true;
+            }
+        }
+        return Ok(());
+    }
+    if handle_tree_navigation(gui, key) {
         return Ok(());
     }
 
@@ -415,25 +459,6 @@ fn handle_commit_files_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
             }
         }
         KeyCode::Enter => {
-            if gui.diff_mode.show_tree {
-                // Toggle dir collapse or focus diff
-                if let Some(node) = gui
-                    .diff_mode
-                    .tree_nodes
-                    .get(gui.diff_mode.diff_files_selected)
-                {
-                    if node.is_dir {
-                        let path = node.path.clone();
-                        if gui.diff_mode.collapsed_dirs.contains(&path) {
-                            gui.diff_mode.collapsed_dirs.remove(&path);
-                        } else {
-                            gui.diff_mode.collapsed_dirs.insert(path);
-                        }
-                        update_diff_mode_tree(gui);
-                        return Ok(());
-                    }
-                }
-            }
             gui.diff_mode.set_focus(DiffModeFocus::DiffExploration);
             gui.needs_diff_refresh = true;
         }
@@ -704,6 +729,10 @@ fn handle_diff_exploration_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
             gui.diff_view.prev_search_match();
             return Ok(());
         }
+    }
+
+    if handle_tree_navigation(gui, key) {
+        return Ok(());
     }
 
     match key.code {
@@ -1121,8 +1150,23 @@ fn show_diff_mode_command_palette(gui: &mut Gui) {
         ],
     };
 
+    let mut sections = vec![diff_mode_section, combobox_section];
+    if gui.diff_mode.show_tree
+        && matches!(
+            gui.diff_mode.focus,
+            DiffModeFocus::CommitFiles | DiffModeFocus::DiffExploration
+        )
+    {
+        sections.insert(
+            1,
+            super::tree::command_section(
+                &gui.config.user_config.keybinding,
+                gui.diff_mode.focus == DiffModeFocus::CommitFiles,
+            ),
+        );
+    }
     gui.popup = PopupState::CommandPalette {
-        sections: vec![diff_mode_section, combobox_section],
+        sections,
         selected: 0,
         search_textarea: crate::gui::popup::make_command_palette_search_textarea(),
         scroll_offset: 0,

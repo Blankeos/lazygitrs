@@ -1517,6 +1517,7 @@ impl Gui {
                         &mut self.commit_list_cache,
                         self.layout.side_panel_ratio,
                         self.screen_mode,
+                        &self.config.user_config.keybinding,
                     );
                     // Render popup overlay on top of diff mode (for ? help, errors, etc.)
                     if self.popup != PopupState::None {
@@ -3673,6 +3674,11 @@ impl Gui {
             return Ok(());
         }
 
+        if self.try_handle_tree_navigation(key) {
+            return Ok(());
+        }
+        let keybindings = &self.config.user_config.keybinding;
+
         // Arrow keys / h/l to switch windows
         if matches_key(key, &keybindings.universal.prev_block)
             || matches_key(key, &keybindings.universal.prev_block_alt)
@@ -3886,10 +3892,10 @@ impl Gui {
             return Ok(());
         }
 
-        // `.` toggles the commit-details box when in any commit-related
+        // `'` toggles the commit-details box when in any commit-related
         // context.  Kept outside per-context controllers so the binding is
         // consistent across Commits / BranchCommits / Reflog / CommitFiles.
-        if key.code == KeyCode::Char('.') && self.context_has_commit_details() {
+        if key.code == KeyCode::Char('\'') && self.context_has_commit_details() {
             self.show_commit_details = !self.show_commit_details;
             self.persist_commit_details_visibility();
             return Ok(());
@@ -3902,6 +3908,41 @@ impl Gui {
         controller::custom_commands::try_handle_key(self, key)?;
 
         Ok(())
+    }
+
+    fn active_file_tree(&self) -> bool {
+        match self.context_mgr.active() {
+            ContextId::Files => self.show_file_tree,
+            ContextId::CommitFiles | ContextId::BranchCommitFiles | ContextId::StashFiles => {
+                self.show_commit_file_tree
+            }
+            _ => false,
+        }
+    }
+
+    fn try_handle_tree_navigation(&mut self, key: KeyEvent) -> bool {
+        let active = self.context_mgr.active();
+        let selected = self.context_mgr.selected_active();
+        let kb = &self.config.user_config.keybinding;
+        let destination = match active {
+            ContextId::Files if self.show_file_tree => {
+                controller::tree::destination(key, kb, &self.file_tree_nodes, selected)
+            }
+            ContextId::CommitFiles | ContextId::BranchCommitFiles | ContextId::StashFiles
+                if self.show_commit_file_tree =>
+            {
+                controller::tree::destination(key, kb, &self.commit_file_tree_nodes, selected)
+            }
+            _ => None,
+        };
+        if let Some(destination) = destination {
+            if let Some(idx) = destination {
+                self.context_mgr.set_selection(idx);
+                self.needs_diff_refresh = true;
+            }
+            return true;
+        }
+        false
     }
 
     fn handle_context_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -4134,6 +4175,11 @@ impl Gui {
         if matches_key(key, &keybindings.universal.toggle_working_tree_and_head) {
             return self.toggle_working_tree_and_head();
         }
+
+        if self.try_handle_tree_navigation(key) {
+            return Ok(());
+        }
+        let keybindings = &self.config.user_config.keybinding;
 
         // Toggle command log (;)
         if key.code == KeyCode::Char(';') {
@@ -5825,7 +5871,10 @@ impl Gui {
             ContextId::Files => CommandSection {
                 title: "Files".into(),
                 entries: vec![
-                    CommandEntry::keybinding("<enter>".into(), "Toggle dir / Focus diff".into()),
+                    CommandEntry::keybinding(
+                        "<enter>".into(),
+                        "Focus file / directory diff".into(),
+                    ),
                     CommandEntry::keybinding("<space>".into(), "Stage / Unstage".into()),
                     CommandEntry::keybinding(
                         kb.universal.toggle_diff_view_layout.clone(),
@@ -5946,7 +5995,7 @@ impl Gui {
                             kb.universal.toggle_diff_view_layout.clone(),
                             "Toggle unified / side-by-side view".into(),
                         ),
-                        CommandEntry::keybinding(".".into(), "Toggle commit details panel".into()),
+                        CommandEntry::keybinding("'".into(), "Toggle commit details panel".into()),
                     ];
                     // Grep only applies to the files list, not the commits list.
                     if active == ContextId::BranchCommitFiles {
@@ -6030,7 +6079,7 @@ impl Gui {
                         kb.commits.open_log_menu.clone(),
                         "Filter commits".into(),
                     ),
-                    CommandEntry::keybinding(".".into(), "Toggle commit details panel".into()),
+                    CommandEntry::keybinding("'".into(), "Toggle commit details panel".into()),
                 ];
                 if !self.cherry_pick_clipboard.is_empty() {
                     entries.insert(
@@ -6058,7 +6107,10 @@ impl Gui {
             ContextId::CommitFiles => CommandSection {
                 title: "Commit Files".into(),
                 entries: vec![
-                    CommandEntry::keybinding("<enter>".into(), "Toggle dir / Focus diff".into()),
+                    CommandEntry::keybinding(
+                        "<enter>".into(),
+                        "Focus file / directory diff".into(),
+                    ),
                     CommandEntry::keybinding("<esc>".into(), "Back to commits".into()),
                     CommandEntry::keybinding("<c-f>".into(), "Grep diff contents".into()),
                     CommandEntry::keybinding(kb.universal.edit.clone(), "Edit file".into()),
@@ -6072,7 +6124,7 @@ impl Gui {
                         "Toggle tree view".into(),
                     ),
                     CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
-                    CommandEntry::keybinding(".".into(), "Toggle commit details panel".into()),
+                    CommandEntry::keybinding("'".into(), "Toggle commit details panel".into()),
                 ],
             },
             ContextId::Reflog => CommandSection {
@@ -6096,7 +6148,7 @@ impl Gui {
                         "Copy (cherry-pick)".into(),
                     ),
                     CommandEntry::keybinding("y".into(), "Copy to clipboard menu".into()),
-                    CommandEntry::keybinding(".".into(), "Toggle commit details panel".into()),
+                    CommandEntry::keybinding("'".into(), "Toggle commit details panel".into()),
                 ],
             },
             ContextId::Stash => CommandSection {
@@ -6116,7 +6168,10 @@ impl Gui {
             ContextId::StashFiles => CommandSection {
                 title: "Stash Files".into(),
                 entries: vec![
-                    CommandEntry::keybinding("<enter>".into(), "Toggle dir / Focus diff".into()),
+                    CommandEntry::keybinding(
+                        "<enter>".into(),
+                        "Focus file / directory diff".into(),
+                    ),
                     CommandEntry::keybinding("<esc>".into(), "Back to stash".into()),
                     CommandEntry::keybinding("<c-f>".into(), "Grep diff contents".into()),
                     CommandEntry::keybinding(
@@ -6184,7 +6239,10 @@ impl Gui {
             },
         };
 
-        let sections = vec![context_section, universal];
+        let mut sections = vec![context_section, universal];
+        if self.active_file_tree() {
+            sections.insert(1, controller::tree::command_section(kb, true));
+        }
 
         self.popup = PopupState::CommandPalette {
             sections,
@@ -6284,8 +6342,15 @@ impl Gui {
             entries,
         };
 
+        let mut sections = vec![diff_section];
+        if self.active_file_tree() {
+            sections.push(controller::tree::command_section(
+                &self.config.user_config.keybinding,
+                false,
+            ));
+        }
         self.popup = PopupState::CommandPalette {
-            sections: vec![diff_section],
+            sections,
             selected: 0,
             search_textarea: popup::make_command_palette_search_textarea(),
             scroll_offset: 0,
@@ -8001,7 +8066,7 @@ impl Gui {
     }
 
     /// True when the active context is one where commit-details makes sense
-    /// (drives both the `.` toggle and layout-time `show_details`).
+    /// (drives both the `'` toggle and layout-time `show_details`).
     fn context_has_commit_details(&self) -> bool {
         matches!(
             self.context_mgr.active(),
@@ -9372,6 +9437,495 @@ mod terminal_mouse_tests {
     impl Drop for TempRepo {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn tree_compare_navigation_folding_and_focus_preserve_current_layout() {
+        use crate::gui::modes::diff_mode::DiffModeFocus;
+        let repo = TempRepo::new("tree-compare");
+        let mut gui = tree_test_gui(&repo);
+        gui.diff_mode.enter(true);
+        gui.diff_mode.diff_files = gui.model.lock().unwrap().commit_files.clone();
+        gui.diff_mode.tree_nodes = gui.commit_file_tree_nodes.clone();
+        for focus in [DiffModeFocus::CommitFiles, DiffModeFocus::DiffExploration] {
+            gui.diff_mode.set_focus(focus);
+            gui.diff_mode.diff_files_selected = 0;
+            gui.diff_mode.viewport_manually_scrolled = true;
+            gui.needs_diff_refresh = false;
+            gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(gui.diff_mode.diff_files_selected, 1);
+            assert!(!gui.diff_mode.viewport_manually_scrolled);
+            assert!(gui.needs_diff_refresh);
+            gui.handle_key(KeyEvent::new(KeyCode::Char('>'), KeyModifiers::SHIFT))
+                .unwrap();
+            assert_eq!(gui.diff_mode.diff_files_selected, 4);
+            gui.handle_key(KeyEvent::new(KeyCode::Char('<'), KeyModifiers::SHIFT))
+                .unwrap();
+            assert_eq!(gui.diff_mode.diff_files_selected, 1);
+        }
+        for mode in [ScreenMode::Normal, ScreenMode::Half, ScreenMode::Full] {
+            gui.screen_mode = mode;
+            gui.diff_mode.set_focus(DiffModeFocus::CommitFiles);
+            gui.diff_mode.diff_files_selected = 0;
+            gui.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(gui.diff_mode.focus, DiffModeFocus::DiffExploration);
+            assert_eq!(gui.screen_mode, mode);
+            gui.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(gui.diff_mode.focus, DiffModeFocus::CommitFiles);
+            assert_eq!(gui.screen_mode, mode);
+        }
+        gui.handle_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.diff_mode.tree_nodes.len(), 1);
+        gui.handle_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.diff_mode.tree_nodes.len(), 5);
+        Arc::get_mut(&mut gui.config)
+            .unwrap()
+            .user_config
+            .keybinding
+            .universal
+            .tree_child = "<c-t>".into();
+        gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.diff_mode.diff_files_selected, 0);
+        gui.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(gui.diff_mode.diff_files_selected, 1);
+    }
+
+    #[test]
+    fn tree_commit_details_conflict_is_limited_to_active_tree_bindings() {
+        let repo = TempRepo::new("tree-details");
+        let mut gui = tree_test_gui(&repo);
+        gui.context_mgr.set_active(ContextId::CommitFiles);
+        let details = gui.show_commit_details;
+        gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.context_mgr.selected_active(), 1);
+        assert_eq!(gui.show_commit_details, details);
+        // Other tree actions remapped to apostrophe also take precedence, even at a boundary.
+        let kb = &mut Arc::get_mut(&mut gui.config)
+            .unwrap()
+            .user_config
+            .keybinding;
+        kb.universal.tree_child.clear();
+        kb.universal.tree_parent = "'".into();
+        gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.context_mgr.selected_active(), 0);
+        gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.show_commit_details, details);
+        gui.show_commit_file_tree = false;
+        gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
+            .unwrap();
+        assert_ne!(gui.show_commit_details, details);
+    }
+
+    #[test]
+    fn tree_default_child_key_preserves_commit_details_toggle() {
+        let repo = TempRepo::new("tree-default-details");
+        let mut gui = tree_test_gui(&repo);
+        for ctx in [ContextId::CommitFiles, ContextId::BranchCommitFiles] {
+            for tree in [false, true] {
+                gui.context_mgr.set_active(ctx);
+                gui.context_mgr.set_selection(0);
+                gui.show_commit_file_tree = tree;
+                let details = gui.show_commit_details;
+                gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
+                    .unwrap();
+                assert_ne!(gui.show_commit_details, details, "{ctx:?} {tree}");
+                assert_eq!(gui.context_mgr.selected_active(), 0);
+                gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+                    .unwrap();
+                assert_eq!(gui.context_mgr.selected_active(), usize::from(tree));
+                assert_ne!(gui.show_commit_details, details);
+            }
+        }
+    }
+
+    #[test]
+    fn apostrophe_toggles_details_and_is_documented_in_commit_context_help() {
+        let repo = TempRepo::new("apostrophe-details-help");
+        let mut gui = tree_test_gui(&repo);
+        for ctx in [
+            ContextId::Commits,
+            ContextId::BranchCommits,
+            ContextId::Reflog,
+            ContextId::CommitFiles,
+            ContextId::BranchCommitFiles,
+            ContextId::StashFiles,
+        ] {
+            gui.popup = PopupState::None;
+            gui.context_mgr.set_active(ctx);
+            let details = gui.show_commit_details;
+            gui.handle_key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE))
+                .unwrap();
+            assert_ne!(gui.show_commit_details, details, "{ctx:?}");
+            gui.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT))
+                .unwrap();
+            let PopupState::CommandPalette { sections, .. } = &gui.popup else {
+                panic!("expected help palette");
+            };
+            let details_entries: Vec<_> = sections
+                .iter()
+                .flat_map(|s| &s.entries)
+                .filter(|e| e.description == "Toggle commit details panel")
+                .collect();
+            // Stash-file help did not previously include a details entry.
+            if ctx != ContextId::StashFiles {
+                assert_eq!(details_entries.len(), 1, "{ctx:?}");
+                assert_eq!(details_entries[0].key, "'", "{ctx:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn tree_help_is_only_available_in_active_tree_contexts() {
+        use crate::gui::modes::diff_mode::DiffModeFocus;
+        let repo = TempRepo::new("tree-contextual-help");
+        let mut gui = tree_test_gui(&repo);
+        for ctx in [
+            ContextId::Files,
+            ContextId::CommitFiles,
+            ContextId::BranchCommitFiles,
+            ContextId::StashFiles,
+            ContextId::Commits,
+        ] {
+            for tree in [false, true] {
+                for diff in [false, true] {
+                    gui.popup = PopupState::None;
+                    gui.context_mgr.set_active(ctx);
+                    gui.show_file_tree = tree;
+                    gui.show_commit_file_tree = tree;
+                    gui.diff_focused = diff;
+                    gui.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT))
+                        .unwrap();
+                    let PopupState::CommandPalette { sections, .. } = &gui.popup else {
+                        panic!("expected help palette");
+                    };
+                    let tree_section = sections.iter().find(|s| s.title == "File Tree");
+                    assert_eq!(
+                        tree_section.is_some(),
+                        tree && ctx != ContextId::Commits,
+                        "{ctx:?} tree={tree} diff={diff}"
+                    );
+                    if let Some(section) = tree_section {
+                        assert!(
+                            section
+                                .entries
+                                .iter()
+                                .any(|e| e.key == "."
+                                    && e.description == "Select first visible child")
+                        );
+                        assert_eq!(section.entries.iter().any(|e| e.key == "-"), !diff);
+                    }
+                }
+            }
+        }
+        gui.diff_mode.enter(true);
+        for tree in [false, true] {
+            for focus in [
+                DiffModeFocus::CommitFiles,
+                DiffModeFocus::DiffExploration,
+                DiffModeFocus::Commits,
+                DiffModeFocus::SelectorA,
+                DiffModeFocus::SelectorB,
+            ] {
+                gui.popup = PopupState::None;
+                gui.diff_mode.show_tree = tree;
+                gui.diff_mode.set_focus(focus);
+                gui.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT))
+                    .unwrap();
+                let PopupState::CommandPalette { sections, .. } = &gui.popup else {
+                    panic!("expected compare help palette");
+                };
+                let tree_section = sections.iter().find(|s| s.title == "File Tree");
+                assert_eq!(
+                    tree_section.is_some(),
+                    tree && matches!(
+                        focus,
+                        DiffModeFocus::CommitFiles | DiffModeFocus::DiffExploration
+                    )
+                );
+                if let Some(section) = tree_section {
+                    assert!(section.entries.iter().any(|e| e.key == "."));
+                    assert_eq!(
+                        section.entries.iter().any(|e| e.key == "-"),
+                        focus == DiffModeFocus::CommitFiles
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tree_fold_binding_does_not_override_flat_list_actions() {
+        use crate::gui::modes::diff_mode::DiffModeFocus;
+        let repo = TempRepo::new("tree-flat-fold");
+        let mut gui = tree_test_gui(&repo);
+        // A remapped fold key must not swallow a flat list's tree-toggle action.
+        Arc::get_mut(&mut gui.config)
+            .unwrap()
+            .user_config
+            .keybinding
+            .universal
+            .fold_directory = "`".into();
+        for ctx in [
+            ContextId::Files,
+            ContextId::CommitFiles,
+            ContextId::BranchCommitFiles,
+            ContextId::StashFiles,
+        ] {
+            gui.context_mgr.set_active(ctx);
+            gui.show_file_tree = false;
+            gui.show_commit_file_tree = false;
+            gui.handle_key(KeyEvent::new(KeyCode::Char('`'), KeyModifiers::NONE))
+                .unwrap();
+            assert!(gui.active_file_tree(), "{ctx:?}");
+        }
+        gui.diff_mode.enter(false);
+        gui.diff_mode.set_focus(DiffModeFocus::CommitFiles);
+        gui.handle_key(KeyEvent::new(KeyCode::Char('`'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(gui.diff_mode.show_tree);
+    }
+
+    fn tree_test_gui(repo: &TempRepo) -> Gui {
+        std::fs::create_dir_all(repo.path.join("src/deep")).unwrap();
+        repo.commit("src/deep/a.txt", "base\n");
+        repo.commit("src/deep/b.txt", "base\n");
+        repo.commit("top.txt", "base\n");
+        for path in ["src/deep/a.txt", "src/deep/b.txt", "top.txt"] {
+            std::fs::write(repo.path.join(path), "changed\n").unwrap();
+        }
+        let mut config = crate::config::AppConfig::default();
+        config.state_path = repo.path.join("state.yml");
+        let mut gui = Gui::new(
+            config,
+            crate::git::GitCommands::new(repo.path()).unwrap(),
+            None,
+            false,
+        )
+        .unwrap();
+        let files = gui.git.load_files().unwrap();
+        gui.model.lock().unwrap().files = files;
+        gui.show_file_tree = true;
+        gui.show_commit_file_tree = true;
+        gui.update_file_tree_state();
+        gui.model.lock().unwrap().commit_files = ["src/deep/a.txt", "src/deep/b.txt", "top.txt"]
+            .into_iter()
+            .map(|name| crate::model::CommitFile {
+                name: name.into(),
+                status: crate::model::FileChangeStatus::Modified,
+                hunk_count: 0,
+                additions: 0,
+                deletions: 0,
+            })
+            .collect();
+        controller::commit_files::update_commit_file_tree_state(&mut gui);
+        gui.diff_view.load("test.txt", "old\n", "new\n");
+        gui
+    }
+
+    #[test]
+    fn tree_enter_and_escape_preserve_all_screen_modes() {
+        let repo = TempRepo::new("tree-layout");
+        let mut gui = tree_test_gui(&repo);
+        for ctx in [
+            ContextId::Files,
+            ContextId::CommitFiles,
+            ContextId::BranchCommitFiles,
+            ContextId::StashFiles,
+        ] {
+            for mode in [ScreenMode::Normal, ScreenMode::Half, ScreenMode::Full] {
+                for tree in [false, true] {
+                    gui.context_mgr.set_active(ctx);
+                    gui.context_mgr.set_selection(0);
+                    gui.show_file_tree = tree;
+                    gui.show_commit_file_tree = tree;
+                    gui.screen_mode = mode;
+                    gui.diff_focused = false;
+                    gui.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                        .unwrap();
+                    assert!(gui.diff_focused, "{ctx:?} {tree}");
+                    assert_eq!(gui.screen_mode, mode);
+                    gui.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                        .unwrap();
+                    assert!(!gui.diff_focused);
+                    assert_eq!(gui.screen_mode, mode);
+                    assert_eq!(gui.context_mgr.active(), ctx);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tree_navigation_resumes_viewport_following_in_sidebar_and_diff() {
+        let repo = TempRepo::new("tree-navigation");
+        let mut gui = tree_test_gui(&repo);
+        for ctx in [
+            ContextId::Files,
+            ContextId::CommitFiles,
+            ContextId::BranchCommitFiles,
+            ContextId::StashFiles,
+        ] {
+            for diff in [false, true] {
+                gui.context_mgr.set_active(ctx);
+                gui.context_mgr.set_selection(0);
+                gui.diff_focused = diff;
+                gui.context_mgr.viewport_manually_scrolled = true;
+                gui.needs_diff_refresh = false;
+                gui.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE))
+                    .unwrap();
+                assert_eq!(gui.context_mgr.selected_active(), 1);
+                assert!(!gui.context_mgr.viewport_manually_scrolled);
+                assert!(gui.needs_diff_refresh);
+                gui.context_mgr.set_scroll_offset(ctx, 100);
+                gui.context_mgr.ensure_scroll_visible(ctx, 2);
+                assert!(gui.context_mgr.scroll_offset(ctx) <= 1);
+                gui.handle_key(KeyEvent::new(KeyCode::Char('>'), KeyModifiers::SHIFT))
+                    .unwrap();
+                assert_eq!(gui.context_mgr.selected_active(), 4);
+                gui.handle_key(KeyEvent::new(KeyCode::Char('<'), KeyModifiers::SHIFT))
+                    .unwrap();
+                assert_eq!(gui.context_mgr.selected_active(), 1);
+                gui.handle_key(KeyEvent::new(KeyCode::Char(','), KeyModifiers::NONE))
+                    .unwrap();
+                assert_eq!(gui.context_mgr.selected_active(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn tree_custom_and_disabled_keys_work_without_swallowing_flat_diff_keys() {
+        let repo = TempRepo::new("tree-custom-bindings");
+        let mut gui = tree_test_gui(&repo);
+        for diff in [false, true] {
+            gui.diff_focused = diff;
+            gui.context_mgr.set_selection(0);
+            Arc::get_mut(&mut gui.config)
+                .unwrap()
+                .user_config
+                .keybinding
+                .universal
+                .tree_child = "<c-t>".into();
+            let details = gui.show_commit_details;
+            gui.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))
+                .unwrap();
+            assert_eq!(gui.context_mgr.selected_active(), 1);
+            assert_eq!(gui.show_commit_details, details);
+            gui.context_mgr.set_selection(0);
+            Arc::get_mut(&mut gui.config)
+                .unwrap()
+                .user_config
+                .keybinding
+                .universal
+                .tree_child
+                .clear();
+            gui.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))
+                .unwrap();
+            assert_eq!(gui.context_mgr.selected_active(), 0);
+        }
+        // A remap to a diff shortcut must not claim that key outside tree contexts.
+        Arc::get_mut(&mut gui.config)
+            .unwrap()
+            .user_config
+            .keybinding
+            .universal
+            .tree_child = "j".into();
+        gui.show_file_tree = false;
+        gui.diff_focused = true;
+        gui.diff_view.load("long", "", &"line\n".repeat(100));
+        gui.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(gui.diff_view.scroll_offset, 1);
+    }
+
+    #[test]
+    fn tree_fold_is_explicit_and_enter_does_not_collapse_directories() {
+        let repo = TempRepo::new("tree-fold");
+        let mut gui = tree_test_gui(&repo);
+        for ctx in [ContextId::Files, ContextId::CommitFiles] {
+            gui.context_mgr.set_active(ctx);
+            gui.context_mgr.set_selection(0);
+            gui.diff_focused = false;
+            gui.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .unwrap();
+            assert!(gui.diff_focused);
+            gui.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                .unwrap();
+            gui.handle_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(
+                if ctx == ContextId::Files {
+                    gui.file_tree_nodes.len()
+                } else {
+                    gui.commit_file_tree_nodes.len()
+                },
+                1
+            );
+            gui.handle_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(
+                if ctx == ContextId::Files {
+                    gui.file_tree_nodes.len()
+                } else {
+                    gui.commit_file_tree_nodes.len()
+                },
+                5
+            );
+            Arc::get_mut(&mut gui.config)
+                .unwrap()
+                .user_config
+                .keybinding
+                .universal
+                .fold_directory = "_".into();
+            let kb = gui.config.user_config.keybinding.clone();
+            gui.handle_context_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE))
+                .unwrap();
+            assert_eq!(
+                if ctx == ContextId::Files {
+                    gui.file_tree_nodes.len()
+                } else {
+                    gui.commit_file_tree_nodes.len()
+                },
+                5
+            );
+            if ctx == ContextId::Files {
+                controller::files::handle_key(
+                    &mut gui,
+                    KeyEvent::new(KeyCode::Char('_'), KeyModifiers::SHIFT),
+                    &kb,
+                )
+                .unwrap();
+            } else {
+                controller::commit_files::handle_key(
+                    &mut gui,
+                    KeyEvent::new(KeyCode::Char('_'), KeyModifiers::SHIFT),
+                    &kb,
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                if ctx == ContextId::Files {
+                    gui.file_tree_nodes.len()
+                } else {
+                    gui.commit_file_tree_nodes.len()
+                },
+                1
+            );
+            Arc::get_mut(&mut gui.config)
+                .unwrap()
+                .user_config
+                .keybinding
+                .universal
+                .fold_directory = "-".into();
         }
     }
 
