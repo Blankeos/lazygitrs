@@ -467,6 +467,34 @@ pub fn parse_key(s: &str) -> Option<KeyEvent> {
     None
 }
 
+/// Check if a `KeyEvent` matches the configured keybinding string.
+/// Character keys are matched case-insensitively while preserving modifier equality.
+/// Shifted punctuation arriving with SHIFT modifier is normalized when the expected binding has no modifiers.
+pub fn matches_key(mut key: KeyEvent, binding: &str) -> bool {
+    if let Some(expected) = parse_key(binding) {
+        if expected.modifiers.is_empty()
+            && matches!(expected.code, KeyCode::Char(c) if c.is_ascii_punctuation())
+        {
+            key.modifiers.remove(KeyModifiers::SHIFT);
+        }
+        let code_match = match (key.code, expected.code) {
+            (KeyCode::Char(c1), KeyCode::Char(c2)) => {
+                c1.to_ascii_lowercase() == c2.to_ascii_lowercase()
+            }
+            (code1, code2) => code1 == code2,
+        };
+        code_match && key.modifiers == expected.modifiers
+    } else {
+        false
+    }
+}
+
+impl KeybindingConfig {
+    pub fn matches_key(&self, key: KeyEvent, binding: &str) -> bool {
+        matches_key(key, binding)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,5 +569,24 @@ universal:
         assert_eq!(parsed.universal.tree_child, "c");
         assert_eq!(parsed.universal.tree_prev_sibling, "h");
         assert_eq!(parsed.universal.tree_next_sibling, "l");
+    }
+
+    #[test]
+    fn test_matches_key_case_insensitive() {
+        let key_upper = KeyEvent::new(KeyCode::Char('L'), KeyModifiers::CONTROL);
+        let key_lower = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL);
+        assert!(matches_key(key_upper, "<c-l>"));
+        assert!(matches_key(key_lower, "<c-l>"));
+        assert!(matches_key(key_upper, "<c-L>"));
+        assert!(matches_key(key_lower, "<c-L>"));
+
+        let key_shift_d = KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT);
+        let key_lower_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(matches_key(key_shift_d, "D"));
+        assert!(matches_key(key_lower_d, "d"));
+        assert!(!matches_key(key_lower_d, "D"));
+
+        // Different modifiers must NOT match
+        assert!(!matches_key(key_lower, "l"));
     }
 }

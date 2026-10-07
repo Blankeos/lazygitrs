@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::config::KeybindingConfig;
-use crate::config::keybindings::parse_key;
+use crate::config::matches_key;
 use crate::gui::Gui;
 use crate::gui::popup::{
     CommitInputFocus, CommitInputKind, MenuItem, PopupState, make_commit_body_textarea,
@@ -15,12 +15,12 @@ pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) 
     if super::diff_grep::is_diff_grep_key(key) {
         return super::diff_grep::open_diff_grep_picker(gui);
     }
-    if super::commits::matches_key(key, &keybindings.commits.open_log_menu) {
+    if matches_key(key, &keybindings.commits.open_log_menu) {
         return super::commits::show_files_filtering_menu(gui);
     }
 
     // Folding is explicit; Enter focuses file or combined directory diffs.
-    if gui.show_file_tree && super::tree::matches_key(key, &keybindings.universal.fold_directory) {
+    if gui.show_file_tree && matches_key(key, &keybindings.universal.fold_directory) {
         if let Some(node) = gui.file_tree_nodes.get(gui.context_mgr.selected_active()) {
             if node.is_dir {
                 let path = node.path.clone();
@@ -946,12 +946,4 @@ fn commit_with_editor(gui: &mut Gui) -> Result<()> {
         confirm_focused: false,
     };
     Ok(())
-}
-
-fn matches_key(key: KeyEvent, binding: &str) -> bool {
-    if let Some(expected) = parse_key(binding) {
-        key.code == expected.code && key.modifiers == expected.modifiers
-    } else {
-        false
-    }
 }
