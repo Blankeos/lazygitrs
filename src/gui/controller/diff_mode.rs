@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::config::keybindings::parse_key;
+use crate::config::matches_key;
 use crate::gui::modes::diff_mode::{CompareDiffSource, DiffModeFocus, DiffModeSelector};
 use crate::gui::popup::{CommandEntry, CommandSection, MenuItem, PopupState};
 use crate::gui::{DiffPayload, Gui, textarea_input};
@@ -419,9 +419,7 @@ fn handle_commit_files_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
         return Ok(());
     }
 
-    if gui.diff_mode.show_tree
-        && super::tree::matches_key(key, &keybindings.universal.fold_directory)
-    {
+    if gui.diff_mode.show_tree && matches_key(key, &keybindings.universal.fold_directory) {
         if let Some(node) = gui
             .diff_mode
             .tree_nodes
@@ -1197,17 +1195,10 @@ fn show_diff_mode_command_palette(gui: &mut Gui) {
     };
 }
 
-fn matches_key(key: KeyEvent, binding: &str) -> bool {
-    if let Some(expected) = parse_key(binding) {
-        key.code == expected.code && key.modifiers == expected.modifiers
-    } else {
-        false
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::keybindings::parse_key;
     use crate::config::{AppConfig, AppState, UserConfig};
     use crate::git::GitCommands;
     use std::path::PathBuf;

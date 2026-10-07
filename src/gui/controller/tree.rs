@@ -1,24 +1,8 @@
 //! Shared tree shortcuts for sidebar and diff-focused navigation.
 use crate::config::KeybindingConfig;
-use crate::config::keybindings::parse_key;
+pub use crate::config::matches_key;
 use crate::model::file_tree::{self, NavigableTreeNode};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-/// Outer Option means the key is claimed; inner Option means a destination exists.
-/// Boundary keys are consumed too, so they cannot fall through to unrelated actions.
-pub fn matches_key(mut key: KeyEvent, binding: &str) -> bool {
-    let Some(expected) = parse_key(binding) else {
-        return false;
-    };
-    // Shifted punctuation may arrive with SHIFT on real terminals.
-    // Do not strip CTRL/ALT or SHIFT for letters / explicit modifier bindings.
-    if expected.modifiers.is_empty()
-        && matches!(expected.code, KeyCode::Char(c) if c.is_ascii_punctuation())
-    {
-        key.modifiers.remove(KeyModifiers::SHIFT);
-    }
-    key.code == expected.code && key.modifiers == expected.modifiers
-}
 
 pub fn destination<T: NavigableTreeNode>(
     key: KeyEvent,
