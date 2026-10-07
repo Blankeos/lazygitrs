@@ -17,10 +17,11 @@ impl App {
     pub fn new(
         repo_path: PathBuf,
         debug: bool,
+        config_override: Option<String>,
         filter_path: Option<PathBuf>,
         start_in_commits: bool,
     ) -> Result<Self> {
-        let config = AppConfig::load(debug)?;
+        let config = AppConfig::load(debug, config_override)?;
 
         // Validate git repo
         if !GitCommands::is_valid_repo(&repo_path) {

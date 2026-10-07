@@ -46,12 +46,12 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    pub fn load(debug: bool) -> Result<Self> {
+    pub fn load(debug: bool, config_override: Option<String>) -> Result<Self> {
         let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let candidates = config_dir_candidates();
-        let config_dir = candidates
+        let mut config_dir = candidates
             .iter()
-            .find(|dir| dir.join("config.yml").exists())
+            .find(|dir| dir.join("config.yml").exists() || dir.join("config.yaml").exists())
             .cloned()
             .unwrap_or_else(|| candidates[0].clone());
 
@@ -71,7 +71,19 @@ impl AppConfig {
             let _ = std::fs::copy(&legacy_state_path, &state_path);
         }
 
-        let user_config = UserConfig::load(&config_dir)?;
+        let user_config = UserConfig::load(&config_dir, config_override.as_ref())?;
+        if let Some(ref over) = config_override {
+            let over_path = user_config::expand_tilde(over);
+            if let Some(parent) = over_path.parent() {
+                if over_path.is_absolute()
+                    || over.ends_with(".yml")
+                    || over.ends_with(".yaml")
+                    || over_path.exists()
+                {
+                    config_dir = parent.to_path_buf();
+                }
+            }
+        }
         let app_state = AppState::load(&state_path)?;
 
         Ok(Self {
