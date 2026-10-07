@@ -1846,6 +1846,66 @@ mod tests {
     }
 
     #[test]
+    fn shell_footers_use_bold_keys_and_muted_action_labels() {
+        let theme = Theme::default();
+        for (popup, hint, action) in [
+            (
+                PopupState::ShellCommand {
+                    textarea: crate::gui::popup::make_textarea(""),
+                },
+                " enter confirm  esc cancel",
+                "confirm",
+            ),
+            (
+                PopupState::CommandOutput {
+                    title: "Command output".into(),
+                    message: "result".into(),
+                    kind: MessageKind::Info,
+                    scroll: 0,
+                },
+                " enter close  esc close  j/k scroll  y copy  pgup/pgdn page  g/G top/bottom",
+                "close",
+            ),
+        ] {
+            let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_popup(
+                        frame,
+                        &popup,
+                        Rect::new(0, 0, 120, 24),
+                        0,
+                        &theme,
+                        false,
+                        false,
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let (row, text) = (0..24)
+                .find_map(|y| {
+                    let text: String = (0..120).map(|x| buffer[(x, y)].symbol()).collect();
+                    text.contains(hint).then_some((y, text))
+                })
+                .expect("styled footer should be visible in the rendered popup");
+            for key in ["enter", "esc"] {
+                let x = text[..text.find(key).unwrap()].chars().count() as u16;
+                for col in x..x + key.len() as u16 {
+                    let cell = &buffer[(col, row)];
+                    assert_eq!(cell.fg, theme.text);
+                    assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
+                }
+            }
+            let x = text[..text.find(action).unwrap()].chars().count() as u16;
+            for col in x..x + action.len() as u16 {
+                let cell = &buffer[(col, row)];
+                assert_eq!(cell.fg, theme.text_dimmed);
+                assert!(!cell.modifier.contains(ratatui::style::Modifier::BOLD));
+            }
+        }
+    }
+
+    #[test]
     fn literal_shell_prompt_renders_in_small_terminals() {
         let mut textarea = crate::gui::popup::make_textarea("");
         textarea.insert_str("printf '%s' 'multiple   spaces'\n# next line");
@@ -3592,9 +3652,26 @@ pub fn render_popup(
                     inner.height.saturating_sub(1),
                 ),
             );
+            let key_style = Style::default()
+                .fg(theme.text)
+                .add_modifier(ratatui::style::Modifier::BOLD);
+            let desc_style = Style::default().fg(theme.text_dimmed);
+            let hint_line = Line::from(vec![
+                Span::styled(" enter ", key_style),
+                Span::styled("close  ", desc_style),
+                Span::styled("esc ", key_style),
+                Span::styled("close  ", desc_style),
+                Span::styled("j/k ", key_style),
+                Span::styled("scroll  ", desc_style),
+                Span::styled("y ", key_style),
+                Span::styled("copy  ", desc_style),
+                Span::styled("pgup/pgdn ", key_style),
+                Span::styled("page  ", desc_style),
+                Span::styled("g/G ", key_style),
+                Span::styled("top/bottom", desc_style),
+            ]);
             frame.render_widget(
-                Paragraph::new("j/k scroll · PgUp/PgDn · g/G · y copy · esc/enter close")
-                    .style(Style::default().fg(theme.text_dimmed)),
+                Paragraph::new(hint_line),
                 Rect::new(
                     inner.x,
                     inner.y + inner.height.saturating_sub(1),

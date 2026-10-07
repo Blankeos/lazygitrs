@@ -811,6 +811,15 @@ fn handle_diff_exploration_key(gui: &mut Gui, key: KeyEvent) -> Result<()> {
 
 /// Reload the file list for the current A..B diff.
 pub fn reload_diff_files(gui: &mut Gui) -> Result<()> {
+    reload_diff_files_with_commit_limit(gui, crate::git::DEFAULT_COMMIT_LIMIT)
+}
+
+/// Completion refreshes retain the pages the user has already loaded. Ref
+/// changes still use the normal first-page limit via `reload_diff_files`.
+pub(in crate::gui) fn reload_diff_files_with_commit_limit(
+    gui: &mut Gui,
+    commit_limit: usize,
+) -> Result<()> {
     let ref_a = gui.diff_mode.ref_a.clone();
     let ref_b = gui.diff_mode.ref_b.clone();
     gui.diff_mode.ahead_behind = None;
@@ -828,7 +837,7 @@ pub fn reload_diff_files(gui: &mut Gui) -> Result<()> {
             if gui.diff_mode.ahead_behind.is_some() {
                 gui.diff_mode.commits = gui
                     .git
-                    .load_compare_commits(&ref_a, &ref_b, crate::git::DEFAULT_COMMIT_LIMIT, 0)
+                    .load_compare_commits(&ref_a, &ref_b, commit_limit.max(1), 0)
                     .unwrap_or_default();
                 gui.diff_mode.commits_revision = gui.diff_mode.commits_revision.wrapping_add(1);
             }
@@ -837,11 +846,7 @@ pub fn reload_diff_files(gui: &mut Gui) -> Result<()> {
         Err(e) => {
             gui.diff_mode.diff_files.clear();
             gui.diff_mode.tree_nodes.clear();
-            gui.popup = PopupState::Message {
-                title: "Diff error".to_string(),
-                message: format!("{}", e),
-                kind: crate::gui::popup::MessageKind::Error,
-            };
+            gui.show_error("Diff error", e);
         }
     }
     gui.diff_mode.set_focus(gui.diff_mode.focus);

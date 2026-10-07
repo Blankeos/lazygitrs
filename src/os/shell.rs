@@ -39,7 +39,7 @@ impl ShellJob {
     ///
     /// With config loading disabled, use `sh -c`, regardless of `shell`, to
     /// preserve custom-command semantics. Otherwise bash/zsh load their rc
-    /// files; other shells receive native `-c` arguments, not a POSIX wrapper.
+    /// files; fish uses a native wrapper, and other shells receive native `-c`.
     /// Remaining processes in the job's group are terminated on shell exit.
     /// Currently requires Unix process-group support.
     pub fn spawn(
@@ -127,8 +127,8 @@ impl Drop for ShellJob {
     }
 }
 
-// The user command and the absolute repo path are positional arguments, never
-// interpolated into these scripts. Save them before sourcing: rc files may
+// The user command and absolute repo path are arguments/environment values,
+// never interpolated into these scripts. Save them before sourcing: rc files may
 // change positional parameters or cwd. `eval` parses the command AFTER aliases
 // and functions have been defined. Stay non-interactive to avoid job-control
 // process groups and attempts to acquire the TUI's terminal.
@@ -143,17 +143,32 @@ if [ -r "$HOME/.bashrc" ]; then
 fi
 builtin shopt -s expand_aliases
 builtin cd -- "$_lazygitrs_repo" || exit
+builtin set --
 builtin eval -- "$_lazygitrs_command"
 "#;
 
 const ZSH_WRAPPER: &str = r#"
-builtin readonly _lazygitrs_repo="$1" _lazygitrs_command="$2"
+builtin readonly _lazygitrs_repo="$_LAZYGITRS_JOB_REPO" _lazygitrs_command="$_LAZYGITRS_JOB_COMMAND"
+builtin unset _LAZYGITRS_JOB_REPO _LAZYGITRS_JOB_COMMAND
 if [ -r "${ZDOTDIR:-$HOME}/.zshrc" ]; then
     builtin source "${ZDOTDIR:-$HOME}/.zshrc"
 fi
 builtin setopt aliases
 builtin cd -- "$_lazygitrs_repo" || exit
+builtin set --
 builtin eval -- "$_lazygitrs_command"
+"#;
+
+// fish reads its config before -c. Environment transport survives startup
+// changes to $argv; clear $argv before eval so the command sees no job metadata
+// or startup arguments. Quoted expansions preserve spaces, quotes and newlines.
+const FISH_WRAPPER: &str = r#"
+builtin set --local _lazygitrs_repo "$_LAZYGITRS_JOB_REPO"
+builtin set --local _lazygitrs_command "$_LAZYGITRS_JOB_COMMAND"
+builtin set --erase --global _LAZYGITRS_JOB_REPO _LAZYGITRS_JOB_COMMAND
+builtin cd "$_lazygitrs_repo"; or exit
+builtin set --global argv
+builtin eval "$_lazygitrs_command"
 "#;
 
 fn shell_command(
@@ -182,9 +197,16 @@ fn shell_command(
         }
         Some("zsh") if load_shell_config => {
             // Native non-interactive startup loads .zshenv (including ZDOTDIR).
-            cmd.args(["-c", ZSH_WRAPPER, "lazygitrs"])
-                .arg(&repo)
-                .arg(command);
+            // Transport via env instead of $1/$2: .zshenv can run `set --`
+            // before our wrapper starts. Do not disable it with -f.
+            cmd.env("_LAZYGITRS_JOB_REPO", &repo)
+                .env("_LAZYGITRS_JOB_COMMAND", command)
+                .args(["-c", ZSH_WRAPPER, "lazygitrs"]);
+        }
+        Some("fish") if load_shell_config => {
+            cmd.env("_LAZYGITRS_JOB_REPO", &repo)
+                .env("_LAZYGITRS_JOB_COMMAND", command)
+                .args(["-c", FISH_WRAPPER]);
         }
         _ => {
             cmd.arg("-c").arg(command);
@@ -490,7 +512,7 @@ mod tests {
     fn non_posix_shells_receive_only_native_arguments() {
         let repo = std::env::current_dir().unwrap();
         let input = "printf '%s' 'quotes; $variables; $(substitution)'";
-        for shell in ["/usr/bin/fish", "/usr/bin/nu", "/bin/dash"] {
+        for shell in ["/usr/bin/nu", "/bin/dash"] {
             let cmd = shell_command(&repo, input, OsStr::new(shell), true).unwrap();
             assert_eq!(cmd.get_program(), shell);
             assert_eq!(cmd.get_args().collect::<Vec<_>>(), ["-c", input]);
@@ -509,13 +531,40 @@ mod tests {
     fn wrappers_keep_paths_and_commands_in_separate_arguments() {
         let repo = std::env::current_dir().unwrap().canonicalize().unwrap();
         let input = "printf '%s' '\"; touch should-not-exist; #'";
-        for shell in ["/bin/bash", "/bin/zsh"] {
+        for shell in ["/bin/bash"] {
             let cmd = shell_command(&repo, input, OsStr::new(shell), true).unwrap();
             let args = cmd.get_args().map(OsStr::to_os_string).collect::<Vec<_>>();
             assert_eq!(args[args.len() - 2], repo.as_os_str());
             assert_eq!(args[args.len() - 1], OsString::from(input));
             assert!(!args[args.len() - 4].to_string_lossy().contains(input));
         }
+    }
+
+    #[test]
+    fn startup_safe_wrappers_transport_literal_values_in_environment() {
+        let repo = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let input = "printf '%s' '\"; literal $value; #'";
+        for (shell, wrapper) in [("/bin/zsh", ZSH_WRAPPER), ("/usr/bin/fish", FISH_WRAPPER)] {
+            let cmd = shell_command(&repo, input, OsStr::new(shell), true).unwrap();
+            let args = cmd.get_args().collect::<Vec<_>>();
+            assert_eq!(args[0], "-c");
+            assert_eq!(args[1], wrapper);
+            assert!(!wrapper.contains(input));
+            let env = cmd.get_envs().collect::<Vec<_>>();
+            assert!(env.contains(&(OsStr::new("_LAZYGITRS_JOB_REPO"), Some(repo.as_os_str()))));
+            assert!(env.contains(&(
+                OsStr::new("_LAZYGITRS_JOB_COMMAND"),
+                Some(OsStr::new(input))
+            )));
+        }
+    }
+
+    #[test]
+    fn wrappers_clear_positional_arguments_before_eval() {
+        for wrapper in [BASH_WRAPPER, ZSH_WRAPPER] {
+            assert!(wrapper.contains("builtin set --\nbuiltin eval"));
+        }
+        assert!(FISH_WRAPPER.contains("builtin set --global argv\nbuiltin eval"));
     }
 
     #[cfg(unix)]
@@ -884,7 +933,7 @@ mod tests {
             let dir = TestDir::new();
             let home = TestDir::new();
             fs::write(home.0.join(rc), "alias shell_alias='printf alias'; shell_function() { printf function; }; cd /; set -- changed\n").unwrap();
-            let mut cmd = shell_command(&dir.0, "shell_alias; shell_function; printf '\\n'; pwd -P; printf '%s' '\"; literal $value; #'", OsStr::new(shell), true).unwrap();
+            let mut cmd = shell_command(&dir.0, "shell_alias; shell_function; printf '\\n'; pwd -P; printf '%s' '\"; literal $value; #'; printf '\\nargs:%s' \"$#\"; printf '<%s>' \"$@\"", OsStr::new(shell), true).unwrap();
             cmd.env("HOME", &home.0).env_remove("ZDOTDIR");
             if zdotdir {
                 cmd.env("HOME", &dir.0).env("ZDOTDIR", &home.0);
@@ -894,7 +943,10 @@ mod tests {
             assert!(outcome.success, "{outcome:?}");
             assert_eq!(
                 outcome.stdout,
-                format!("aliasfunction\n{}\n\"; literal $value; #", dir.0.display())
+                format!(
+                    "aliasfunction\n{}\n\"; literal $value; #\nargs:0<>",
+                    dir.0.display()
+                )
             );
             assert!(outcome.stderr.is_empty(), "{outcome:?}");
         }
@@ -909,6 +961,67 @@ mod tests {
         fn zsh_loads_aliases_functions_and_restores_cwd() {
             startup_test("/bin/zsh", ".zshrc", false);
             startup_test("/bin/zsh", ".zshrc", true);
+        }
+
+        #[test]
+        fn bash_and_zsh_commands_have_no_wrapper_arguments_without_rc() {
+            for shell in ["/bin/bash", "/bin/zsh"] {
+                if !installed(shell) {
+                    continue;
+                }
+                let dir = TestDir::new();
+                let home = TestDir::new();
+                let mut cmd = shell_command(
+                    &dir.0,
+                    "printf 'args:%s' \"$#\"; printf '<%s>' \"$@\"",
+                    OsStr::new(shell),
+                    true,
+                )
+                .unwrap();
+                cmd.env("HOME", &home.0).env_remove("ZDOTDIR");
+                let outcome =
+                    result(&mut ShellJob::spawn_command(cmd, DEFAULT_TIMEOUT).unwrap()).unwrap();
+                assert!(outcome.success, "{outcome:?}");
+                assert_eq!(outcome.stdout, "args:0<>");
+                assert!(outcome.stderr.is_empty(), "{outcome:?}");
+            }
+        }
+
+        #[test]
+        fn zshenv_can_replace_arguments_and_redirect_zdotdir() {
+            if !installed("/bin/zsh") {
+                return;
+            }
+            let dir = TestDir::new();
+            let home = TestDir::new();
+            let config = home.0.join("redirected config");
+            fs::create_dir(&config).unwrap();
+            fs::write(
+                home.0.join(".zshenv"),
+                "set -- startup changed; cd /; export ZDOTDIR=\"$HOME/redirected config\"\n",
+            )
+            .unwrap();
+            fs::write(
+                config.join(".zshrc"),
+                "alias shell_alias='printf alias'; set -- rc changed; cd /\n",
+            )
+            .unwrap();
+            let mut cmd = shell_command(
+                &dir.0,
+                "shell_alias; printf '\\n'; pwd -P; printf 'args:%s' \"$#\"",
+                OsStr::new("/bin/zsh"),
+                true,
+            )
+            .unwrap();
+            cmd.env("HOME", &home.0).env_remove("ZDOTDIR");
+            let outcome =
+                result(&mut ShellJob::spawn_command(cmd, DEFAULT_TIMEOUT).unwrap()).unwrap();
+            assert!(outcome.success, "{outcome:?}");
+            assert_eq!(
+                outcome.stdout,
+                format!("alias\n{}\nargs:0", dir.0.display())
+            );
+            assert!(outcome.stderr.is_empty(), "{outcome:?}");
         }
 
         #[test]
@@ -936,15 +1049,23 @@ mod tests {
 
         #[test]
         fn fish_runs_native_syntax_when_installed() {
-            if !installed("fish") {
+            let Some(shell) = ["fish", "/opt/homebrew/bin/fish", "/usr/local/bin/fish"]
+                .into_iter()
+                .find(|shell| installed(shell))
+            else {
+                eprintln!(
+                    "Skipping fish execution test: fish is not installed (including Homebrew paths)"
+                );
                 return;
-            }
+            };
             let dir = TestDir::new();
             let home = TestDir::new();
+            fs::create_dir(home.0.join("fish")).unwrap();
+            fs::write(home.0.join("fish/config.fish"), "function shell_function; printf function; end\ncd /\nset --global argv startup changed\n").unwrap();
             let mut cmd = shell_command(
                 &dir.0,
-                "set value fish; printf '%s' $value",
-                OsStr::new("fish"),
+                "set value fish; printf '%s' $value; shell_function; printf '\\n'; pwd -P; printf 'args:%s\\n' (count $argv); printf '%s' '\"; literal $value; #'; printf '%s' \"single'quote\"",
+                OsStr::new(shell),
                 true,
             )
             .unwrap();
@@ -952,7 +1073,14 @@ mod tests {
             let outcome =
                 result(&mut ShellJob::spawn_command(cmd, DEFAULT_TIMEOUT).unwrap()).unwrap();
             assert!(outcome.success, "{outcome:?}");
-            assert_eq!(outcome.stdout, "fish");
+            assert_eq!(
+                outcome.stdout,
+                format!(
+                    "fishfunction\n{}\nargs:0\n\"; literal $value; #single'quote",
+                    dir.0.display()
+                )
+            );
+            assert!(outcome.stderr.is_empty(), "{outcome:?}");
         }
     }
 }

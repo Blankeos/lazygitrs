@@ -83,12 +83,18 @@ keybinding:
 ```
 
 The prompt uses `$SHELL`, falling back to `sh` when it is unset or empty. Bash
-loads `~/.bash_aliases` and `~/.bashrc` and enables alias expansion; zsh loads `${ZDOTDIR:-$HOME}/.zshrc`.
+loads `~/.bash_aliases` and `~/.bashrc` and enables alias expansion; zsh keeps
+native `.zshenv` startup (including changes to `ZDOTDIR`) and then loads
+`${ZDOTDIR:-$HOME}/.zshrc`. Fish keeps its native startup configuration.
 Aliases and functions defined there can be used, but a noninteractive guard in
 your rc file may skip their definitions. Definitions that exist only in your
-current interactive shell are not inherited. Fish and other shells receive the
-command using their native `-c` invocation, so use that shell's syntax rather
-than POSIX syntax.
+current interactive shell are not inherited. Bash, zsh, and Fish restore the
+repository root after startup and clear positional arguments (`$argv` in Fish)
+before evaluating your command, even if startup changed them. Paths and commands
+are passed as literal arguments or environment values, not interpolated into
+wrapper code. Fish uses a Fish-native wrapper; other shells receive a direct
+native `-c` invocation (their startup may change the working directory). Use
+your shell's syntax rather than POSIX syntax.
 
 Commands run asynchronously and **noninteractively** with no input/TTY: editors,
 password prompts, and other interactive programs are not supported here. Press

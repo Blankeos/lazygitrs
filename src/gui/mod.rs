@@ -588,6 +588,9 @@ pub struct Gui {
     pub layout: LayoutState,
     pub popup: PopupState,
     shell_command_job: Option<controller::custom_commands::RunningCommand>,
+    /// Refresh notifications delayed by a shell modal, in arrival order.
+    deferred_notifications: VecDeque<PopupState>,
+    deferred_notification_visible: bool,
     pub diff_view: DiffViewState,
     /// Cached graph layouts used to render only the visible commit rows.
     commit_list_cache: presentation::commits::CommitListCache,
@@ -955,11 +958,45 @@ fn image_diff_payload(
 
 impl Gui {
     fn show_error(&mut self, title: &str, err: anyhow::Error) {
-        self.popup = PopupState::Message {
+        self.show_notification(PopupState::Message {
             title: title.to_string(),
             message: format!("{:#}", err),
             kind: MessageKind::Error,
-        };
+        });
+    }
+
+    fn show_notification(&mut self, notification: PopupState) {
+        if self.shell_command_ui_active() || self.deferred_notification_ui_active() {
+            // Auto-refresh can report the same failure repeatedly during a
+            // five-minute command. Keep one adjacent copy, not an error flood.
+            let duplicate = matches!(
+                (self.deferred_notifications.back(), &notification),
+                (Some(PopupState::Message { title: a, message: b, kind: c }),
+                 PopupState::Message { title: x, message: y, kind: z })
+                    if a == x && b == y && c == z
+            );
+            if !duplicate {
+                self.deferred_notifications.push_back(notification);
+            }
+        } else {
+            self.popup = notification;
+        }
+    }
+
+    fn deferred_notification_ui_active(&self) -> bool {
+        self.deferred_notification_visible || !self.deferred_notifications.is_empty()
+    }
+
+    fn receive_deferred_notifications(&mut self) {
+        // Never replace another editor, result, or notification. Dispatch one
+        // per dismissal and keep AI/remote results queued until it is seen.
+        if self.popup == PopupState::None && !self.shell_command_ui_active() {
+            self.deferred_notification_visible = false;
+            if let Some(notification) = self.deferred_notifications.pop_front() {
+                self.popup = notification;
+                self.deferred_notification_visible = true;
+            }
+        }
     }
 
     pub fn new(
@@ -1075,6 +1112,8 @@ impl Gui {
             layout: LayoutState::default(),
             popup: PopupState::None,
             shell_command_job: None,
+            deferred_notifications: VecDeque::new(),
+            deferred_notification_visible: false,
             diff_view: {
                 let mut dv = DiffViewState::new();
                 dv.wrap = diff_line_wrap;
@@ -1429,6 +1468,7 @@ impl Gui {
             self.maybe_request_commit_details();
 
             // Check for AI commit message generation results
+            self.receive_deferred_notifications();
             self.receive_ai_commit_results();
 
             // Check for completed incremental commit page loads
@@ -2250,7 +2290,7 @@ impl Gui {
         // Shell input/results own the modal until dismissed. Leave AI results
         // queued instead of replacing a typed command or restoring an editor
         // that shell completion would immediately discard.
-        if self.shell_command_ui_active() {
+        if self.shell_command_ui_active() || self.deferred_notification_ui_active() {
             return;
         }
         while let Ok(result) = self.ai_commit_rx.try_recv() {
@@ -2360,6 +2400,10 @@ impl Gui {
     }
 
     fn receive_filter_paths(&mut self) {
+        // A completed picker must not replace a shell input/output popup.
+        if self.shell_command_ui_active() || self.deferred_notification_ui_active() {
+            return;
+        }
         let result = {
             let Some(rx) = self.filter_paths_rx.as_ref() else {
                 return;
@@ -2435,12 +2479,15 @@ impl Gui {
                 }
                 Err(e) => {
                     self.commit_history_complete = true;
-                    if self.popup == PopupState::None {
-                        self.popup = PopupState::Message {
+                    if self.popup == PopupState::None
+                        || self.shell_command_ui_active()
+                        || self.deferred_notification_ui_active()
+                    {
+                        self.show_notification(PopupState::Message {
                             title: "Commits".to_string(),
                             message: format!("Could not load commits: {}", e),
                             kind: MessageKind::Error,
-                        };
+                        });
                     }
                 }
             }
@@ -2582,7 +2629,7 @@ impl Gui {
     fn receive_remote_op_results(&mut self) {
         // In particular, a remote failure must not replace the shell's modal
         // and then be lost when the shell completes.
-        if self.shell_command_ui_active() {
+        if self.shell_command_ui_active() || self.deferred_notification_ui_active() {
             return;
         }
         if let Ok(result) = self.remote_op_rx.try_recv() {
@@ -3615,11 +3662,19 @@ impl Gui {
             }
             return Ok(());
         }
-        if self.handle_ai_commit_cancel_key(key) {
+        if has_command_modifier(key.modifiers) && matches!(key.code, KeyCode::Char(_)) {
             return Ok(());
         }
-
-        if has_command_modifier(key.modifiers) && matches!(key.code, KeyCode::Char(_)) {
+        // Shell input/output own Escape as well as text. An armed AI cancel
+        // gesture must not intercept dismissal of an unrelated modal.
+        if matches!(
+            self.popup,
+            PopupState::ShellCommand { .. } | PopupState::CommandOutput { .. }
+        ) || self.deferred_notification_visible
+        {
+            return self.handle_popup_key(key);
+        }
+        if self.handle_ai_commit_cancel_key(key) {
             return Ok(());
         }
 
@@ -4652,6 +4707,7 @@ impl Gui {
             PopupState::Message { .. } => {
                 // Any key dismisses the message
                 self.popup = PopupState::None;
+                self.deferred_notification_visible = false;
             }
             PopupState::Menu {
                 items,
@@ -8784,16 +8840,16 @@ impl Gui {
                 let branch = self.rebase_mode.branch_name.clone();
                 let count = self.rebase_mode.total_count;
                 self.rebase_mode.exit();
-                self.popup = crate::gui::popup::PopupState::Message {
-                    title: "Rebase complete".to_string(),
+                self.show_notification(PopupState::Message {
+                    title: "Rebase ended".to_string(),
                     message: format!(
-                        "Successfully rebased '{}' ({} commit{}).",
+                        "Rebase of '{}' is no longer in progress ({} commit{}). It may have completed or been aborted.",
                         branch,
                         count,
                         if count == 1 { "" } else { "s" },
                     ),
-                    kind: crate::gui::popup::MessageKind::Info,
-                };
+                    kind: MessageKind::Info,
+                });
             }
         }
         // Clear the dismissal flag once no rebase is in progress, so the next
@@ -9625,6 +9681,217 @@ mod terminal_mouse_tests {
         gui.handle_key(parse_key("<enter>").unwrap()).unwrap();
         assert!(gui.popup == PopupState::None);
         assert!(gui.shell_command_job.is_none());
+    }
+
+    #[test]
+    fn shell_modal_defers_refresh_errors_and_rebase_notifications_in_order() {
+        for phase in 0..3 {
+            let repo = TempRepo::new("shell-refresh-notification-ownership");
+            let mut gui = tree_test_gui(&repo);
+            match phase {
+                0 => {
+                    gui.handle_key(parse_key(":").unwrap()).unwrap();
+                    gui.handle_paste("printf typed-command".into());
+                }
+                1 => start_test_custom_command(&mut gui, "printf shell-result", true),
+                _ => {
+                    gui.popup = PopupState::CommandOutput {
+                        title: "Command output".into(),
+                        message: "shell-result".into(),
+                        kind: MessageKind::Info,
+                        scroll: 0,
+                    };
+                }
+            }
+            let (tx, rx) = mpsc::channel();
+            gui.files_refresh_rx = Some(rx);
+            gui.files_refresh_in_progress = true;
+            tx.send(Err(anyhow::anyhow!("refresh fixture failure")))
+                .unwrap();
+            gui.receive_files_refresh();
+            assert!(!gui.files_refresh_in_progress);
+            assert!(gui.files_refresh_rx.is_none());
+            // Repeated auto-refresh failures are coalesced while the shell is open.
+            gui.show_error("Refresh failed", anyhow::anyhow!("refresh fixture failure"));
+            assert_eq!(gui.deferred_notifications.len(), 1);
+            gui.rebase_mode.active = true;
+            gui.rebase_mode.phase = RebasePhase::InProgress;
+            gui.rebase_mode.branch_name = "main".into();
+            gui.rebase_mode.total_count = 3;
+            gui.model.lock().unwrap().is_rebasing = false;
+            gui.after_model_refresh().unwrap();
+            assert!(
+                !gui.rebase_mode.active,
+                "model/view refresh must still apply"
+            );
+            assert_eq!(gui.deferred_notifications.len(), 2);
+            gui.remote_op_label = Some("Fetch".into());
+            gui.remote_op_tx
+                .send(Err(anyhow::anyhow!("queued fetch failure")))
+                .unwrap();
+            gui.receive_deferred_notifications();
+            gui.receive_remote_op_results();
+            match phase {
+                0 => assert!(matches!(&gui.popup, PopupState::ShellCommand { textarea }
+                    if textarea.lines().join("\n") == "printf typed-command")),
+                1 => {
+                    assert!(matches!(gui.popup, PopupState::Loading { .. }));
+                    wait_for_shell_command(&mut gui);
+                    gui.receive_deferred_notifications();
+                    assert!(
+                        matches!(&gui.popup, PopupState::CommandOutput { message, .. }
+                        if message.contains("shell-result"))
+                    );
+                }
+                _ => assert!(
+                    matches!(&gui.popup, PopupState::CommandOutput { message, .. }
+                    if message == "shell-result")
+                ),
+            }
+            gui.handle_key(parse_key("<esc>").unwrap()).unwrap();
+            gui.receive_deferred_notifications();
+            assert!(
+                matches!(&gui.popup, PopupState::Message { title, message, .. }
+                if title == "Refresh failed" && message == "refresh fixture failure")
+            );
+            gui.receive_remote_op_results();
+            assert!(gui.remote_op_label.is_some());
+            gui.handle_key(parse_key("<enter>").unwrap()).unwrap();
+            gui.receive_deferred_notifications();
+            assert!(
+                matches!(&gui.popup, PopupState::Message { title, message, .. }
+                if title == "Rebase ended" && message.contains("completed or been aborted"))
+            );
+            gui.receive_remote_op_results();
+            assert!(gui.remote_op_label.is_some());
+            gui.handle_key(parse_key("<enter>").unwrap()).unwrap();
+            gui.receive_deferred_notifications();
+            gui.receive_remote_op_results();
+            assert!(matches!(&gui.popup, PopupState::Message { message, .. }
+                if message == "queued fetch failure"));
+            assert!(gui.deferred_notifications.is_empty());
+        }
+    }
+
+    #[test]
+    fn shell_modal_defers_filter_picker_and_notifications_defer_ai_results() {
+        let repo = TempRepo::new("shell-filter-and-notification-ai");
+        let mut gui = tree_test_gui(&repo);
+        gui.handle_key(parse_key(":").unwrap()).unwrap();
+        let (tx, rx) = mpsc::channel();
+        gui.filter_paths_rx = Some(rx);
+        tx.send(Ok(vec!["src".into()])).unwrap();
+        gui.receive_filter_paths();
+        assert!(matches!(gui.popup, PopupState::ShellCommand { .. }));
+        assert!(gui.filter_paths_rx.is_some());
+        gui.show_error("Refresh failed", anyhow::anyhow!("fixture failure"));
+        gui.ai_commit_job = Some(AiCommitJob {
+            generation: 1,
+            cancel: Arc::new(AtomicBool::new(false)),
+            cancel_armed_at: Some(Instant::now()),
+        });
+        gui.ai_commit_tx
+            .send(AiCommitResult {
+                generation: 1,
+                result: Err(anyhow::anyhow!("AI fixture failure")),
+            })
+            .unwrap();
+        gui.handle_key(parse_key("<esc>").unwrap()).unwrap();
+        gui.receive_deferred_notifications();
+        gui.receive_ai_commit_results();
+        gui.receive_filter_paths();
+        assert!(matches!(&gui.popup, PopupState::Message { title, .. }
+            if title == "Refresh failed"));
+        assert!(gui.ai_commit_job.is_some());
+        assert!(gui.filter_paths_rx.is_some());
+        gui.commit_page_loading = true;
+        gui.commit_page_tx
+            .send(CommitPageResult {
+                generation: gui.commit_page_generation,
+                replace: false,
+                result: Err(anyhow::anyhow!("page fixture failure")),
+            })
+            .unwrap();
+        gui.receive_commit_page_results();
+        assert!(!gui.commit_page_loading);
+        assert_eq!(gui.deferred_notifications.len(), 1);
+        // Notification Escape is modal too, not the second half of AI cancel.
+        gui.handle_key(parse_key("<esc>").unwrap()).unwrap();
+        assert!(gui.ai_commit_job.is_some());
+        gui.receive_deferred_notifications();
+        gui.receive_ai_commit_results();
+        assert!(matches!(&gui.popup, PopupState::Message { title, .. }
+            if title == "Commits"));
+        assert!(gui.ai_commit_job.is_some());
+        gui.handle_key(parse_key("<enter>").unwrap()).unwrap();
+        gui.receive_deferred_notifications();
+        gui.receive_ai_commit_results();
+        assert!(matches!(&gui.popup, PopupState::Message { title, .. }
+            if title == "AI generation failed"));
+        assert!(gui.ai_commit_job.is_none());
+        gui.handle_key(parse_key("<enter>").unwrap()).unwrap();
+        gui.receive_filter_paths();
+        assert!(matches!(&gui.popup, PopupState::ListPicker { core, .. }
+            if core.items.iter().any(|item| item.value == "src")));
+    }
+
+    #[test]
+    fn shell_completion_keeps_output_and_defers_invalid_comparison_error() {
+        let repo = TempRepo::new("shell-comparison-refresh-error");
+        let mut gui = tree_test_gui(&repo);
+        start_test_custom_command(&mut gui, "printf shell-result", true);
+        gui.diff_mode.enter(true);
+        gui.diff_mode.ref_a = "nonexistent-ref".into();
+        gui.diff_mode.ref_b = "HEAD".into();
+        wait_for_shell_command(&mut gui);
+        assert!(
+            matches!(&gui.popup, PopupState::CommandOutput { message, .. }
+            if message == "shell-result")
+        );
+        assert_eq!(gui.deferred_notifications.len(), 1);
+        gui.handle_key(parse_key("<enter>").unwrap()).unwrap();
+        gui.receive_deferred_notifications();
+        assert!(matches!(&gui.popup, PopupState::Message { title, kind, .. }
+            if title == "Diff error" && *kind == MessageKind::Error));
+    }
+
+    #[test]
+    fn shell_popup_escape_does_not_arm_or_cancel_ai_generation() {
+        let repo = TempRepo::new("shell-ai-escape-priority");
+        let mut gui = tree_test_gui(&repo);
+        for output in [false, true] {
+            for armed in [false, true] {
+                let cancel = Arc::new(AtomicBool::new(false));
+                gui.ai_commit_job = Some(AiCommitJob {
+                    generation: 1,
+                    cancel: Arc::clone(&cancel),
+                    cancel_armed_at: armed.then(Instant::now),
+                });
+                let original_armed = gui.ai_commit_job.as_ref().unwrap().cancel_armed_at;
+                gui.pending_commit_popup = Some(PopupState::None);
+                if output {
+                    gui.popup = PopupState::CommandOutput {
+                        title: "Command output".into(),
+                        message: "done".into(),
+                        kind: MessageKind::Info,
+                        scroll: 0,
+                    };
+                } else {
+                    gui.handle_key(parse_key(":").unwrap()).unwrap();
+                }
+                gui.handle_key(parse_key("<esc>").unwrap()).unwrap();
+                assert!(gui.popup == PopupState::None);
+                assert!(!cancel.load(Ordering::Relaxed));
+                assert_eq!(
+                    gui.ai_commit_job.as_ref().unwrap().cancel_armed_at,
+                    original_armed
+                );
+                assert!(gui.pending_commit_popup.is_some());
+                assert!(gui.saved_commit_popup.is_none());
+                gui.pending_commit_popup = None;
+                gui.ai_commit_job = None;
+            }
+        }
     }
 
     #[test]
