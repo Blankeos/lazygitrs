@@ -193,9 +193,10 @@ impl CmdBuilder {
                 .spawn()
                 .with_context(|| format!("Failed to spawn: {} {:?}", self.program, self.args))?;
 
-            if let Some(ref mut stdin) = child.stdin {
+            if let Some(mut stdin) = child.stdin.take() {
                 use std::io::Write;
-                stdin.write_all(stdin_data.as_bytes())?;
+                let _ = stdin.write_all(stdin_data.as_bytes());
+                drop(stdin);
             }
 
             child
