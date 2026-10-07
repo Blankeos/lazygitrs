@@ -21,6 +21,7 @@ use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{Command, cursor, execute};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 
 use crate::config::keybindings::parse_key;
 use crate::config::{AppConfig, AppState};
@@ -586,6 +587,10 @@ pub struct Gui {
     pub context_mgr: ContextManager,
     pub layout: LayoutState,
     pub popup: PopupState,
+    shell_command_job: Option<controller::custom_commands::RunningCommand>,
+    /// Refresh notifications delayed by a shell modal, in arrival order.
+    deferred_notifications: VecDeque<PopupState>,
+    deferred_notification_visible: bool,
     pub diff_view: DiffViewState,
     /// Cached graph layouts used to render only the visible commit rows.
     commit_list_cache: presentation::commits::CommitListCache,
@@ -953,11 +958,45 @@ fn image_diff_payload(
 
 impl Gui {
     fn show_error(&mut self, title: &str, err: anyhow::Error) {
-        self.popup = PopupState::Message {
+        self.show_notification(PopupState::Message {
             title: title.to_string(),
             message: format!("{:#}", err),
             kind: MessageKind::Error,
-        };
+        });
+    }
+
+    fn show_notification(&mut self, notification: PopupState) {
+        if self.shell_command_ui_active() || self.deferred_notification_ui_active() {
+            // Auto-refresh can report the same failure repeatedly during a
+            // five-minute command. Keep one adjacent copy, not an error flood.
+            let duplicate = matches!(
+                (self.deferred_notifications.back(), &notification),
+                (Some(PopupState::Message { title: a, message: b, kind: c }),
+                 PopupState::Message { title: x, message: y, kind: z })
+                    if a == x && b == y && c == z
+            );
+            if !duplicate {
+                self.deferred_notifications.push_back(notification);
+            }
+        } else {
+            self.popup = notification;
+        }
+    }
+
+    fn deferred_notification_ui_active(&self) -> bool {
+        self.deferred_notification_visible || !self.deferred_notifications.is_empty()
+    }
+
+    fn receive_deferred_notifications(&mut self) {
+        // Never replace another editor, result, or notification. Dispatch one
+        // per dismissal and keep AI/remote results queued until it is seen.
+        if self.popup == PopupState::None && !self.shell_command_ui_active() {
+            self.deferred_notification_visible = false;
+            if let Some(notification) = self.deferred_notifications.pop_front() {
+                self.popup = notification;
+                self.deferred_notification_visible = true;
+            }
+        }
     }
 
     pub fn new(
@@ -1072,6 +1111,9 @@ impl Gui {
             context_mgr,
             layout: LayoutState::default(),
             popup: PopupState::None,
+            shell_command_job: None,
+            deferred_notifications: VecDeque::new(),
+            deferred_notification_visible: false,
             diff_view: {
                 let mut dv = DiffViewState::new();
                 dv.wrap = diff_line_wrap;
@@ -1193,6 +1235,7 @@ impl Gui {
         let mut keyboard_enhanced = keyboard_enhanced;
         let result = self.main_loop(&mut terminal, &input, &mut keyboard_enhanced);
 
+        self.shell_command_job.take(); // Drop cancels and reaps before leaving the TUI.
         self.diff_preview_cache.clear();
         self.diff_view.reset_keep_prefs();
         self.displayed_diff_key.clear();
@@ -1425,6 +1468,7 @@ impl Gui {
             self.maybe_request_commit_details();
 
             // Check for AI commit message generation results
+            self.receive_deferred_notifications();
             self.receive_ai_commit_results();
 
             // Check for completed incremental commit page loads
@@ -1440,6 +1484,7 @@ impl Gui {
             self.maybe_start_auto_fetch();
 
             // Check for completed background menu item operations
+            controller::custom_commands::receive_command_result(self);
             self.receive_menu_async_results();
 
             // Advance spinner animation
@@ -1712,8 +1757,17 @@ impl Gui {
         Ok(())
     }
 
+    fn shell_command_ui_active(&self) -> bool {
+        self.shell_command_job.is_some()
+            || matches!(
+                self.popup,
+                PopupState::ShellCommand { .. } | PopupState::CommandOutput { .. }
+            )
+    }
+
     fn input_wait_timeout(&self) -> Duration {
-        if self.ai_commit_generation_active()
+        if self.shell_command_job.is_some()
+            || self.ai_commit_generation_active()
             || self.remote_op_label.is_some()
             || self.needs_refresh
             || self.diff_loading
@@ -2233,6 +2287,12 @@ impl Gui {
 
     /// Check for completed AI commit message generation results.
     fn receive_ai_commit_results(&mut self) {
+        // Shell input/results own the modal until dismissed. Leave AI results
+        // queued instead of replacing a typed command or restoring an editor
+        // that shell completion would immediately discard.
+        if self.shell_command_ui_active() || self.deferred_notification_ui_active() {
+            return;
+        }
         while let Ok(result) = self.ai_commit_rx.try_recv() {
             let active_generation = self.ai_commit_job.as_ref().map(|job| job.generation);
             if active_generation != Some(result.generation) {
@@ -2340,6 +2400,10 @@ impl Gui {
     }
 
     fn receive_filter_paths(&mut self) {
+        // A completed picker must not replace a shell input/output popup.
+        if self.shell_command_ui_active() || self.deferred_notification_ui_active() {
+            return;
+        }
         let result = {
             let Some(rx) = self.filter_paths_rx.as_ref() else {
                 return;
@@ -2415,12 +2479,15 @@ impl Gui {
                 }
                 Err(e) => {
                     self.commit_history_complete = true;
-                    if self.popup == PopupState::None {
-                        self.popup = PopupState::Message {
+                    if self.popup == PopupState::None
+                        || self.shell_command_ui_active()
+                        || self.deferred_notification_ui_active()
+                    {
+                        self.show_notification(PopupState::Message {
                             title: "Commits".to_string(),
                             message: format!("Could not load commits: {}", e),
                             kind: MessageKind::Error,
-                        };
+                        });
                     }
                 }
             }
@@ -2560,6 +2627,11 @@ impl Gui {
 
     /// Check for completed background remote operations (push, pull, fetch).
     fn receive_remote_op_results(&mut self) {
+        // In particular, a remote failure must not replace the shell's modal
+        // and then be lost when the shell completes.
+        if self.shell_command_ui_active() || self.deferred_notification_ui_active() {
+            return;
+        }
         if let Ok(result) = self.remote_op_rx.try_recv() {
             self.remote_op_label = None;
             match result {
@@ -2590,6 +2662,13 @@ impl Gui {
                     }
                 }
                 Err(e) => {
+                    // AI generation may have restored the editor just before
+                    // a queued remote error arrives. Keep that draft when the
+                    // error needs to take over the popup.
+                    if matches!(self.popup, PopupState::CommitInput { .. }) {
+                        self.saved_commit_popup =
+                            Some(std::mem::replace(&mut self.popup, PopupState::None));
+                    }
                     let err = format!("{}", e);
                     if let Some(name) = self
                         .pending_checkout_by_name
@@ -3575,11 +3654,27 @@ impl Gui {
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         self.pending_startup_head = false;
-        if self.handle_ai_commit_cancel_key(key) {
+        if self.shell_command_job.is_some() {
+            if key.code == KeyCode::Esc
+                || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+            {
+                controller::custom_commands::cancel_running_command(self);
+            }
             return Ok(());
         }
-
         if has_command_modifier(key.modifiers) && matches!(key.code, KeyCode::Char(_)) {
+            return Ok(());
+        }
+        // Shell input/output own Escape as well as text. An armed AI cancel
+        // gesture must not intercept dismissal of an unrelated modal.
+        if matches!(
+            self.popup,
+            PopupState::ShellCommand { .. } | PopupState::CommandOutput { .. }
+        ) || self.deferred_notification_visible
+        {
+            return self.handle_popup_key(key);
+        }
+        if self.handle_ai_commit_cancel_key(key) {
             return Ok(());
         }
 
@@ -3597,6 +3692,14 @@ impl Gui {
         // to character-only application shortcuts if the terminal forwards
         // their enhanced-keyboard events.
         if has_command_modifier(key.modifiers) {
+            return Ok(());
+        }
+
+        // Text entry owns its characters, even when the prompt binding is remapped.
+        if !self.diff_mode.active
+            && !(self.diff_focused && self.diff_view.search_active)
+            && controller::custom_commands::try_handle_prompt_key(self, key)?
+        {
             return Ok(());
         }
 
@@ -4388,6 +4491,13 @@ impl Gui {
     }
 
     fn handle_paste(&mut self, data: String) {
+        if self.shell_command_job.is_some() {
+            return;
+        }
+        if let PopupState::ShellCommand { textarea } = &mut self.popup {
+            textarea.insert_str(&data.replace("\r\n", "\n").replace('\r', "\n"));
+            return;
+        }
         if data.is_empty() {
             return;
         }
@@ -4553,9 +4663,51 @@ impl Gui {
                     self.popup = PopupState::None;
                 }
             }
+            PopupState::ShellCommand { textarea } => {
+                if key.code == KeyCode::Esc {
+                    self.popup = PopupState::None;
+                } else if key.code == KeyCode::Enter {
+                    let command = textarea.lines().join("\n");
+                    self.popup = PopupState::None;
+                    controller::custom_commands::confirm_shell_prompt(self, &command)?;
+                } else if let PopupState::ShellCommand { textarea } = &mut self.popup {
+                    textarea_input(textarea, key);
+                }
+            }
+            PopupState::CommandOutput { .. } => {
+                if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
+                    self.popup = PopupState::None;
+                } else if let PopupState::CommandOutput {
+                    message, scroll, ..
+                } = &mut self.popup
+                {
+                    let max = views::command_output_max_scroll(
+                        message,
+                        Rect::new(0, 0, self.layout.width, self.layout.height),
+                    );
+                    let page = (usize::from(self.layout.height) * 4 / 5)
+                        .saturating_sub(3)
+                        .max(1);
+                    match key.code {
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            *scroll = scroll.saturating_add(1).min(max)
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => *scroll = scroll.saturating_sub(1),
+                        KeyCode::PageDown => *scroll = scroll.saturating_add(page).min(max),
+                        KeyCode::PageUp => *scroll = scroll.saturating_sub(page),
+                        KeyCode::Home | KeyCode::Char('g') => *scroll = 0,
+                        KeyCode::End | KeyCode::Char('G') => *scroll = max,
+                        KeyCode::Char('y') => {
+                            let _ = Platform::copy_to_clipboard(message);
+                        }
+                        _ => {}
+                    }
+                }
+            }
             PopupState::Message { .. } => {
                 // Any key dismisses the message
                 self.popup = PopupState::None;
+                self.deferred_notification_visible = false;
             }
             PopupState::Menu {
                 items,
@@ -5812,7 +5964,7 @@ impl Gui {
         let active = self.context_mgr.active();
 
         // Universal keybindings
-        let universal = CommandSection {
+        let mut universal = CommandSection {
             title: "Universal".into(),
             entries: vec![
                 CommandEntry::keybinding(kb.universal.quit.clone(), "Quit".into()),
@@ -5885,6 +6037,13 @@ impl Gui {
                 ),
             ],
         };
+
+        if !kb.universal.custom_command_prompt.is_empty() {
+            universal.entries.push(CommandEntry::keybinding(
+                kb.universal.custom_command_prompt.clone(),
+                "Execute shell command".into(),
+            ));
+        }
 
         // Context-specific keybindings
         let context_section = match active {
@@ -6950,10 +7109,33 @@ impl Gui {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.shell_command_job.is_some() {
+            return;
+        }
         use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
         if !self.config.user_config.gui.mouse_events {
             return;
+        }
+
+        match &mut self.popup {
+            PopupState::ShellCommand { .. } => return,
+            PopupState::CommandOutput {
+                message, scroll, ..
+            } => {
+                let max = views::command_output_max_scroll(
+                    message,
+                    Rect::new(0, 0, self.layout.width, self.layout.height),
+                );
+                match mouse.kind {
+                    MouseEventKind::ScrollDown => *scroll = scroll.saturating_add(3).min(max),
+                    MouseEventKind::ScrollUp => *scroll = scroll.saturating_sub(3),
+                    _ => {}
+                }
+                // All events are modal, including clicks outside the popup.
+                return;
+            }
+            _ => {}
         }
 
         // Sidebar divider drag (Normal mode only). Must run before text-select /
@@ -8658,16 +8840,16 @@ impl Gui {
                 let branch = self.rebase_mode.branch_name.clone();
                 let count = self.rebase_mode.total_count;
                 self.rebase_mode.exit();
-                self.popup = crate::gui::popup::PopupState::Message {
-                    title: "Rebase complete".to_string(),
+                self.show_notification(PopupState::Message {
+                    title: "Rebase ended".to_string(),
                     message: format!(
-                        "Successfully rebased '{}' ({} commit{}).",
+                        "Rebase of '{}' is no longer in progress ({} commit{}). It may have completed or been aborted.",
                         branch,
                         count,
                         if count == 1 { "" } else { "s" },
                     ),
-                    kind: crate::gui::popup::MessageKind::Info,
-                };
+                    kind: MessageKind::Info,
+                });
             }
         }
         // Clear the dismissal flag once no rebase is in progress, so the next
@@ -9377,6 +9559,651 @@ mod terminal_mouse_tests {
             keys.insert(result.diff_key);
         }
         assert_eq!(keys.len(), 8);
+    }
+
+    fn wait_for_shell_command(gui: &mut Gui) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while gui.shell_command_job.is_some() {
+            controller::custom_commands::receive_command_result(gui);
+            assert!(Instant::now() < deadline, "shell job did not finish");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn start_test_custom_command(gui: &mut Gui, command: &str, show_output: bool) {
+        let config = Arc::get_mut(&mut gui.config).unwrap();
+        config.user_config.custom_commands = vec![crate::config::user_config::CustomCommand {
+            key: "<c-x>".into(),
+            command: command.into(),
+            show_output,
+            ..Default::default()
+        }];
+        gui.handle_key(parse_key("<c-x>").unwrap()).unwrap();
+    }
+
+    #[test]
+    fn shell_prompt_binding_works_in_lists_and_diff_focus_and_respects_remapping() {
+        let repo = TempRepo::new("shell-prompt-bindings");
+        let mut gui = tree_test_gui(&repo);
+        for context in [
+            ContextId::Files,
+            ContextId::Commits,
+            ContextId::CommitFiles,
+            ContextId::StashFiles,
+            ContextId::Branches,
+        ] {
+            gui.context_mgr.set_active(context);
+            for focused in [false, true] {
+                gui.diff_focused = focused;
+                for binding in [":", "q", "?", "<c-x>", "<tab>"] {
+                    Arc::get_mut(&mut gui.config)
+                        .unwrap()
+                        .user_config
+                        .keybinding
+                        .universal
+                        .custom_command_prompt = binding.into();
+                    gui.handle_key(parse_key(binding).unwrap()).unwrap();
+                    assert!(
+                        matches!(gui.popup, PopupState::ShellCommand { .. }),
+                        "{context:?}, {focused}, {binding}"
+                    );
+                    assert!(!gui.should_quit);
+                    gui.handle_key(parse_key("<esc>").unwrap()).unwrap();
+                }
+            }
+        }
+        Arc::get_mut(&mut gui.config)
+            .unwrap()
+            .user_config
+            .keybinding
+            .universal
+            .custom_command_prompt
+            .clear();
+        gui.diff_focused = false;
+        gui.context_mgr.set_active(ContextId::Files);
+        gui.handle_key(parse_key(":").unwrap()).unwrap();
+        assert!(gui.popup == PopupState::None);
+        gui.show_command_palette();
+        let PopupState::CommandPalette { sections, .. } = &gui.popup else {
+            panic!("palette");
+        };
+        assert!(
+            !sections
+                .iter()
+                .flat_map(|s| &s.entries)
+                .any(|e| e.description == "Execute shell command")
+        );
+    }
+
+    #[test]
+    fn shell_prompt_does_not_steal_search_or_popup_input() {
+        let repo = TempRepo::new("shell-text-priority");
+        let mut gui = tree_test_gui(&repo);
+        gui.search_active = true;
+        gui.search_textarea = Some(popup::make_textarea(""));
+        gui.handle_key(parse_key(":").unwrap()).unwrap();
+        assert!(gui.popup == PopupState::None);
+        assert_eq!(gui.search_query, ":");
+        gui.search_active = false;
+        gui.diff_focused = true;
+        gui.diff_view.search_active = true;
+        gui.handle_key(parse_key(":").unwrap()).unwrap();
+        assert!(gui.popup == PopupState::None);
+        gui.diff_view.search_active = false;
+        gui.popup = PopupState::Input {
+            title: "Other input".into(),
+            textarea: popup::make_textarea(""),
+            on_confirm: Box::new(|_, _| Ok(())),
+            is_commit: false,
+            confirm_focused: false,
+        };
+        gui.handle_key(parse_key(":").unwrap()).unwrap();
+        assert!(
+            matches!(&gui.popup, PopupState::Input { textarea, .. } if textarea.lines().join("") == ":")
+        );
+    }
+
+    #[test]
+    fn shell_prompt_keeps_literal_paste_through_resize_and_blank_submit_is_noop() {
+        let repo = TempRepo::new("shell-literal-input");
+        let mut gui = tree_test_gui(&repo);
+        gui.handle_key(parse_key(":").unwrap()).unwrap();
+        let command = "printf '%s' 'multiple   spaces; $quoted'\n# pasted newline";
+        gui.handle_paste(command.into());
+        gui.handle_resize(25, 8);
+        assert!(
+            matches!(&gui.popup, PopupState::ShellCommand { textarea } if textarea.lines().join("\n") == command)
+        );
+        gui.handle_key(parse_key("<esc>").unwrap()).unwrap();
+        assert!(gui.shell_command_job.is_none());
+        gui.handle_key(parse_key(":").unwrap()).unwrap();
+        gui.handle_paste("  ".into());
+        gui.handle_key(parse_key("<enter>").unwrap()).unwrap();
+        assert!(gui.popup == PopupState::None);
+        assert!(gui.shell_command_job.is_none());
+    }
+
+    #[test]
+    fn shell_modal_defers_refresh_errors_and_rebase_notifications_in_order() {
+        for phase in 0..3 {
+            let repo = TempRepo::new("shell-refresh-notification-ownership");
+            let mut gui = tree_test_gui(&repo);
+            match phase {
+                0 => {
+                    gui.handle_key(parse_key(":").unwrap()).unwrap();
+                    gui.handle_paste("printf typed-command".into());
+                }
+                1 => start_test_custom_command(&mut gui, "printf shell-result", true),
+                _ => {
+                    gui.popup = PopupState::CommandOutput {
+                        title: "Command output".into(),
+                        message: "shell-result".into(),
+                        kind: MessageKind::Info,
+                        scroll: 0,
+                    };
+                }
+            }
+            let (tx, rx) = mpsc::channel();
+            gui.files_refresh_rx = Some(rx);
+            gui.files_refresh_in_progress = true;
+            tx.send(Err(anyhow::anyhow!("refresh fixture failure")))
+                .unwrap();
+            gui.receive_files_refresh();
+            assert!(!gui.files_refresh_in_progress);
+            assert!(gui.files_refresh_rx.is_none());
+            // Repeated auto-refresh failures are coalesced while the shell is open.
+            gui.show_error("Refresh failed", anyhow::anyhow!("refresh fixture failure"));
+            assert_eq!(gui.deferred_notifications.len(), 1);
+            gui.rebase_mode.active = true;
+            gui.rebase_mode.phase = RebasePhase::InProgress;
+            gui.rebase_mode.branch_name = "main".into();
+            gui.rebase_mode.total_count = 3;
+            gui.model.lock().unwrap().is_rebasing = false;
+            gui.after_model_refresh().unwrap();
+            assert!(
+                !gui.rebase_mode.active,
+                "model/view refresh must still apply"
+            );
+            assert_eq!(gui.deferred_notifications.len(), 2);
+            gui.remote_op_label = Some("Fetch".into());
+            gui.remote_op_tx
+                .send(Err(anyhow::anyhow!("queued fetch failure")))
+                .unwrap();
+            gui.receive_deferred_notifications();
+            gui.receive_remote_op_results();
+            match phase {
+                0 => assert!(matches!(&gui.popup, PopupState::ShellCommand { textarea }
+                    if textarea.lines().join("\n") == "printf typed-command")),
+                1 => {
+                    assert!(matches!(gui.popup, PopupState::Loading { .. }));
+                    wait_for_shell_command(&mut gui);
+                    gui.receive_deferred_notifications();
+                    assert!(
+                        matches!(&gui.popup, PopupState::CommandOutput { message, .. }
+                        if message.contains("shell-result"))
+                    );
+                }
+                _ => assert!(
+                    matches!(&gui.popup, PopupState::CommandOutput { message, .. }
+                    if message == "shell-result")
+                ),
+            }
+            gui.handle_key(parse_key("<esc>").unwrap()).unwrap();
+            gui.receive_deferred_notifications();
+            assert!(
+                matches!(&gui.popup, PopupState::Message { title, message, .. }
+                if title == "Refresh failed" && message == "refresh fixture failure")
+            );
+            gui.receive_remote_op_results();
+            assert!(gui.remote_op_label.is_some());
+            gui.handle_key(parse_key("<enter>").unwrap()).unwrap();
+            gui.receive_deferred_notifications();
+            assert!(
+                matches!(&gui.popup, PopupState::Message { title, message, .. }
+                if title == "Rebase ended" && message.contains("completed or been aborted"))
+            );
+            gui.receive_remote_op_results();
+            assert!(gui.remote_op_label.is_some());
+            gui.handle_key(parse_key("<enter>").unwrap()).unwrap();
+            gui.receive_deferred_notifications();
+            gui.receive_remote_op_results();
+            assert!(matches!(&gui.popup, PopupState::Message { message, .. }
+                if message == "queued fetch failure"));
+            assert!(gui.deferred_notifications.is_empty());
+        }
+    }
+
+    #[test]
+    fn shell_modal_defers_filter_picker_and_notifications_defer_ai_results() {
+        let repo = TempRepo::new("shell-filter-and-notification-ai");
+        let mut gui = tree_test_gui(&repo);
+        gui.handle_key(parse_key(":").unwrap()).unwrap();
+        let (tx, rx) = mpsc::channel();
+        gui.filter_paths_rx = Some(rx);
+        tx.send(Ok(vec!["src".into()])).unwrap();
+        gui.receive_filter_paths();
+        assert!(matches!(gui.popup, PopupState::ShellCommand { .. }));
+        assert!(gui.filter_paths_rx.is_some());
+        gui.show_error("Refresh failed", anyhow::anyhow!("fixture failure"));
+        gui.ai_commit_job = Some(AiCommitJob {
+            generation: 1,
+            cancel: Arc::new(AtomicBool::new(false)),
+            cancel_armed_at: Some(Instant::now()),
+        });
+        gui.ai_commit_tx
+            .send(AiCommitResult {
+                generation: 1,
+                result: Err(anyhow::anyhow!("AI fixture failure")),
+            })
+            .unwrap();
+        gui.handle_key(parse_key("<esc>").unwrap()).unwrap();
+        gui.receive_deferred_notifications();
+        gui.receive_ai_commit_results();
+        gui.receive_filter_paths();
+        assert!(matches!(&gui.popup, PopupState::Message { title, .. }
+            if title == "Refresh failed"));
+        assert!(gui.ai_commit_job.is_some());
+        assert!(gui.filter_paths_rx.is_some());
+        gui.commit_page_loading = true;
+        gui.commit_page_tx
+            .send(CommitPageResult {
+                generation: gui.commit_page_generation,
+                replace: false,
+                result: Err(anyhow::anyhow!("page fixture failure")),
+            })
+            .unwrap();
+        gui.receive_commit_page_results();
+        assert!(!gui.commit_page_loading);
+        assert_eq!(gui.deferred_notifications.len(), 1);
+        // Notification Escape is modal too, not the second half of AI cancel.
+        gui.handle_key(parse_key("<esc>").unwrap()).unwrap();
+        assert!(gui.ai_commit_job.is_some());
+        gui.receive_deferred_notifications();
+        gui.receive_ai_commit_results();
+        assert!(matches!(&gui.popup, PopupState::Message { title, .. }
+            if title == "Commits"));
+        assert!(gui.ai_commit_job.is_some());
+        gui.handle_key(parse_key("<enter>").unwrap()).unwrap();
+        gui.receive_deferred_notifications();
+        gui.receive_ai_commit_results();
+        assert!(matches!(&gui.popup, PopupState::Message { title, .. }
+            if title == "AI generation failed"));
+        assert!(gui.ai_commit_job.is_none());
+        gui.handle_key(parse_key("<enter>").unwrap()).unwrap();
+        gui.receive_filter_paths();
+        assert!(matches!(&gui.popup, PopupState::ListPicker { core, .. }
+            if core.items.iter().any(|item| item.value == "src")));
+    }
+
+    #[test]
+    fn shell_completion_keeps_output_and_defers_invalid_comparison_error() {
+        let repo = TempRepo::new("shell-comparison-refresh-error");
+        let mut gui = tree_test_gui(&repo);
+        start_test_custom_command(&mut gui, "printf shell-result", true);
+        gui.diff_mode.enter(true);
+        gui.diff_mode.ref_a = "nonexistent-ref".into();
+        gui.diff_mode.ref_b = "HEAD".into();
+        wait_for_shell_command(&mut gui);
+        assert!(
+            matches!(&gui.popup, PopupState::CommandOutput { message, .. }
+            if message == "shell-result")
+        );
+        assert_eq!(gui.deferred_notifications.len(), 1);
+        gui.handle_key(parse_key("<enter>").unwrap()).unwrap();
+        gui.receive_deferred_notifications();
+        assert!(matches!(&gui.popup, PopupState::Message { title, kind, .. }
+            if title == "Diff error" && *kind == MessageKind::Error));
+    }
+
+    #[test]
+    fn shell_popup_escape_does_not_arm_or_cancel_ai_generation() {
+        let repo = TempRepo::new("shell-ai-escape-priority");
+        let mut gui = tree_test_gui(&repo);
+        for output in [false, true] {
+            for armed in [false, true] {
+                let cancel = Arc::new(AtomicBool::new(false));
+                gui.ai_commit_job = Some(AiCommitJob {
+                    generation: 1,
+                    cancel: Arc::clone(&cancel),
+                    cancel_armed_at: armed.then(Instant::now),
+                });
+                let original_armed = gui.ai_commit_job.as_ref().unwrap().cancel_armed_at;
+                gui.pending_commit_popup = Some(PopupState::None);
+                if output {
+                    gui.popup = PopupState::CommandOutput {
+                        title: "Command output".into(),
+                        message: "done".into(),
+                        kind: MessageKind::Info,
+                        scroll: 0,
+                    };
+                } else {
+                    gui.handle_key(parse_key(":").unwrap()).unwrap();
+                }
+                gui.handle_key(parse_key("<esc>").unwrap()).unwrap();
+                assert!(gui.popup == PopupState::None);
+                assert!(!cancel.load(Ordering::Relaxed));
+                assert_eq!(
+                    gui.ai_commit_job.as_ref().unwrap().cancel_armed_at,
+                    original_armed
+                );
+                assert!(gui.pending_commit_popup.is_some());
+                assert!(gui.saved_commit_popup.is_none());
+                gui.pending_commit_popup = None;
+                gui.ai_commit_job = None;
+            }
+        }
+    }
+
+    #[test]
+    fn shell_modal_defers_ctrl_g_result_without_losing_command_or_commit_draft() {
+        let repo = TempRepo::new("shell-ai-popup-ownership");
+        let mut gui = tree_test_gui(&repo);
+        repo.git(&["add", "."]);
+        gui.model.lock().unwrap().files = gui.git.load_files().unwrap();
+        gui.handle_key(parse_key("c").unwrap()).unwrap();
+        assert!(matches!(gui.popup, PopupState::CommitInput { .. }));
+        gui.pending_commit_popup = Some(std::mem::replace(&mut gui.popup, PopupState::None));
+        // Deterministic completion of a Ctrl-G job, without an external agent.
+        gui.ai_commit_job = Some(AiCommitJob {
+            generation: 1,
+            cancel: Arc::new(AtomicBool::new(false)),
+            cancel_armed_at: None,
+        });
+        gui.ai_commit_tx
+            .send(AiCommitResult {
+                generation: 1,
+                result: Ok(Some("feat: generated summary\n\nGenerated body".into())),
+            })
+            .unwrap();
+        gui.remote_op_tx
+            .send(Err(anyhow::anyhow!("concurrent fetch failed")))
+            .unwrap();
+        gui.handle_key(parse_key(":").unwrap()).unwrap();
+        gui.handle_paste("printf shell-result".into());
+        gui.receive_ai_commit_results();
+        gui.receive_remote_op_results();
+        gui.receive_remote_op_results();
+        assert!(matches!(&gui.popup, PopupState::ShellCommand { textarea }
+            if textarea.lines().join("\n") == "printf shell-result"));
+        assert!(gui.pending_commit_popup.is_some());
+        gui.handle_key(parse_key("<enter>").unwrap()).unwrap();
+        gui.receive_ai_commit_results();
+        gui.receive_remote_op_results();
+        assert!(matches!(gui.popup, PopupState::Loading { .. }));
+        wait_for_shell_command(&mut gui);
+        gui.receive_ai_commit_results();
+        assert!(
+            matches!(&gui.popup, PopupState::CommandOutput { message, .. }
+            if message.contains("shell-result"))
+        );
+        assert!(gui.pending_commit_popup.is_some());
+        gui.handle_key(parse_key("<enter>").unwrap()).unwrap();
+        gui.receive_ai_commit_results();
+        assert!(gui.pending_commit_popup.is_none());
+        assert!(gui.ai_commit_job.is_none());
+        assert!(matches!(&gui.popup, PopupState::CommitInput {
+            summary_textarea, body_state, ..
+        } if summary_textarea.lines().join("") == "feat: generated summary"
+            && body_state.raw() == "Generated body"));
+        // This is the main-loop receiver order after shell output closes.
+        gui.receive_remote_op_results();
+        assert!(matches!(&gui.popup, PopupState::Message { message, .. }
+            if message.contains("concurrent fetch failed")));
+        assert!(
+            matches!(&gui.saved_commit_popup, Some(PopupState::CommitInput {
+            summary_textarea, body_state, ..
+        }) if summary_textarea.lines().join("") == "feat: generated summary"
+            && body_state.raw() == "Generated body")
+        );
+        gui.handle_key(parse_key("<esc>").unwrap()).unwrap();
+        gui.handle_key(parse_key("c").unwrap()).unwrap();
+        assert!(
+            matches!(&gui.popup, PopupState::CommitInput { summary_textarea, .. }
+            if summary_textarea.lines().join("") == "feat: generated summary")
+        );
+    }
+
+    #[test]
+    fn shell_modal_defers_remote_error_until_output_is_dismissed() {
+        let repo = TempRepo::new("shell-remote-popup-ownership");
+        let mut gui = tree_test_gui(&repo);
+        gui.remote_op_label = Some("Fetch".into());
+        gui.remote_op_tx
+            .send(Err(anyhow::anyhow!("fetch failed")))
+            .unwrap();
+        start_test_custom_command(&mut gui, "printf shell-result", true);
+        gui.receive_remote_op_results();
+        assert!(matches!(gui.popup, PopupState::Loading { .. }));
+        wait_for_shell_command(&mut gui);
+        gui.receive_remote_op_results();
+        assert!(
+            matches!(&gui.popup, PopupState::CommandOutput { message, .. }
+            if message.contains("shell-result"))
+        );
+        gui.handle_key(parse_key("<enter>").unwrap()).unwrap();
+        gui.receive_remote_op_results();
+        assert!(matches!(&gui.popup, PopupState::Message { message, .. }
+            if message.contains("fetch failed")));
+        assert!(gui.remote_op_label.is_none());
+    }
+
+    #[test]
+    fn shell_popups_capture_mouse_without_changing_underlying_navigation() {
+        use crate::gui::modes::diff_mode::DiffModeFocus;
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let repo = TempRepo::new("shell-modal-mouse");
+        let mut gui = tree_test_gui(&repo);
+        Arc::get_mut(&mut gui.config)
+            .unwrap()
+            .user_config
+            .gui
+            .mouse_events = true;
+        gui.layout.update_size(100, 30);
+        for compare in [false, true] {
+            if compare {
+                gui.diff_mode.enter(true);
+                gui.diff_mode.set_focus(DiffModeFocus::Commits);
+            }
+            let focus = gui.diff_mode.focus;
+            let context = gui.context_mgr.active();
+            let selection = gui.context_mgr.selected_active();
+            let diff_scroll = gui.diff_view.scroll_offset;
+            for output in [false, true] {
+                let message = (0..100).map(|i| format!("line {i}\n")).collect::<String>();
+                gui.popup = if output {
+                    PopupState::CommandOutput {
+                        title: "output".into(),
+                        message: message.clone(),
+                        kind: MessageKind::Info,
+                        scroll: 0,
+                    }
+                } else {
+                    let mut textarea = popup::make_textarea("");
+                    textarea.insert_str("typed command");
+                    PopupState::ShellCommand { textarea }
+                };
+                for (column, row) in [(1, 1), (50, 12), (99, 29)] {
+                    for kind in [
+                        MouseEventKind::Down(MouseButton::Left),
+                        MouseEventKind::Drag(MouseButton::Left),
+                        MouseEventKind::Up(MouseButton::Left),
+                        MouseEventKind::ScrollDown,
+                    ] {
+                        gui.handle_mouse(MouseEvent {
+                            kind,
+                            column,
+                            row,
+                            modifiers: KeyModifiers::NONE,
+                        });
+                    }
+                }
+                if output {
+                    assert!(matches!(
+                        gui.popup,
+                        PopupState::CommandOutput { scroll: 9, .. }
+                    ));
+                    for _ in 0..100 {
+                        gui.handle_mouse(MouseEvent {
+                            kind: MouseEventKind::ScrollDown,
+                            column: 50,
+                            row: 12,
+                            modifiers: KeyModifiers::NONE,
+                        });
+                    }
+                    let max = views::command_output_max_scroll(&message, Rect::new(0, 0, 100, 30));
+                    assert!(
+                        matches!(gui.popup, PopupState::CommandOutput { scroll, .. } if scroll == max)
+                    );
+                    gui.handle_mouse(MouseEvent {
+                        kind: MouseEventKind::ScrollUp,
+                        column: 50,
+                        row: 12,
+                        modifiers: KeyModifiers::NONE,
+                    });
+                    assert!(
+                        matches!(gui.popup, PopupState::CommandOutput { scroll, .. } if scroll == max.saturating_sub(3))
+                    );
+                } else {
+                    assert!(matches!(&gui.popup, PopupState::ShellCommand { textarea }
+                        if textarea.lines().join("") == "typed command"));
+                }
+                assert_eq!(gui.context_mgr.active(), context);
+                assert_eq!(gui.context_mgr.selected_active(), selection);
+                assert_eq!(gui.diff_view.scroll_offset, diff_scroll);
+                assert_eq!(gui.diff_mode.focus, focus);
+                assert!(gui.diff_mode.editing.is_none());
+                assert!(!gui.sidebar_resizing);
+            }
+        }
+    }
+
+    #[test]
+    fn custom_command_is_nonblocking_cancelable_and_refreshes_after_cancellation() {
+        let repo = TempRepo::new("shell-cancellation");
+        let mut gui = tree_test_gui(&repo);
+        let started = Instant::now();
+        start_test_custom_command(&mut gui, "sleep 30", true);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(gui.shell_command_job.is_some());
+        assert_eq!(gui.input_wait_timeout(), Duration::from_millis(16));
+        gui.handle_key(parse_key("q").unwrap()).unwrap();
+        assert!(!gui.should_quit);
+        gui.handle_key(parse_key("<esc>").unwrap()).unwrap();
+        wait_for_shell_command(&mut gui);
+        assert!(gui.needs_refresh);
+        assert!(gui.needs_diff_refresh);
+        assert!(
+            matches!(&gui.popup, PopupState::CommandOutput { title, kind: MessageKind::Error, .. } if title == "Command cancelled")
+        );
+    }
+
+    #[test]
+    fn custom_command_logs_and_reports_failure_stdout_and_stderr_without_losing_filters() {
+        let repo = TempRepo::new("shell-output");
+        let mut gui = tree_test_gui(&repo);
+        gui.commit_path_filter = Some("src".into());
+        gui.commit_author_filter = vec!["Example".into()];
+        gui.screen_mode = ScreenMode::Half;
+        start_test_custom_command(
+            &mut gui,
+            "printf partial; printf warning >&2; exit 7",
+            false,
+        );
+        wait_for_shell_command(&mut gui);
+        assert!(
+            matches!(&gui.popup, PopupState::CommandOutput { title, message, kind: MessageKind::Error, .. }
+            if title.contains("exit 7") && message.contains("partial") && message.contains("warning"))
+        );
+        let log = gui.command_log.lock().unwrap();
+        assert!(log.iter().any(|line| line.contains("$ printf partial")));
+        assert!(
+            log.iter()
+                .any(|line| line.contains("Command failed (exit 7)"))
+        );
+        drop(log);
+        assert_eq!(gui.commit_path_filter.as_deref(), Some("src"));
+        assert_eq!(gui.commit_author_filter, vec!["Example"]);
+        assert_eq!(gui.screen_mode, ScreenMode::Half);
+        gui.handle_key(parse_key("<esc>").unwrap()).unwrap();
+        start_test_custom_command(&mut gui, "printf changed > created-by-command", false);
+        wait_for_shell_command(&mut gui);
+        assert!(gui.popup == PopupState::None);
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("created-by-command")).unwrap(),
+            "changed"
+        );
+        assert!(gui.needs_refresh);
+    }
+
+    #[test]
+    fn command_output_can_scroll_to_last_line_and_back() {
+        let repo = TempRepo::new("shell-scroll");
+        let mut gui = tree_test_gui(&repo);
+        gui.layout.update_size(80, 24);
+        let message = (0..100).map(|i| format!("line {i}\n")).collect::<String>();
+        gui.popup = PopupState::CommandOutput {
+            title: "output".into(),
+            message: message.clone(),
+            kind: MessageKind::Info,
+            scroll: 0,
+        };
+        gui.handle_key(parse_key("G").unwrap()).unwrap();
+        let max = views::command_output_max_scroll(&message, Rect::new(0, 0, 80, 24));
+        assert!(matches!(gui.popup, PopupState::CommandOutput { scroll, .. } if scroll == max));
+        gui.handle_key(parse_key("g").unwrap()).unwrap();
+        assert!(matches!(
+            gui.popup,
+            PopupState::CommandOutput { scroll: 0, .. }
+        ));
+        gui.handle_key(parse_key("j").unwrap()).unwrap();
+        assert!(matches!(
+            gui.popup,
+            PopupState::CommandOutput { scroll: 1, .. }
+        ));
+        gui.handle_key(parse_key("<enter>").unwrap()).unwrap();
+        assert!(gui.popup == PopupState::None);
+    }
+
+    #[test]
+    fn shell_completion_preserves_compare_commit_files_tree_search_and_focus() {
+        use crate::gui::modes::diff_mode::DiffModeFocus;
+
+        let repo = TempRepo::new("shell-compare-refresh");
+        let mut gui = tree_test_gui(&repo);
+        // Both configured commands and shell prompts use this result path.
+        start_test_custom_command(&mut gui, "printf refreshed", true);
+        gui.diff_mode.enter(true);
+        gui.diff_mode.ref_a = "HEAD~2".into();
+        gui.diff_mode.ref_b = "HEAD".into();
+        controller::diff_mode::reload_diff_files(&mut gui).unwrap();
+        gui.diff_mode.commits_selected = 1;
+        controller::diff_mode::open_selected_commit_files(&mut gui).unwrap();
+        let commit = gui.diff_mode.files_commit.clone();
+        gui.diff_mode.collapsed_dirs.insert("src".into());
+        controller::diff_mode::update_diff_mode_tree(&mut gui);
+        gui.diff_mode.file_search_query = "src".into();
+        gui.diff_mode.set_focus(DiffModeFocus::DiffExploration);
+        let source = gui.diff_mode.diff_source;
+        let files = gui.diff_mode.diff_files.clone();
+        wait_for_shell_command(&mut gui);
+        assert_eq!(gui.diff_mode.focus, DiffModeFocus::DiffExploration);
+        assert_eq!(gui.diff_mode.sidebar_focus, DiffModeFocus::CommitFiles);
+        assert_eq!(gui.diff_mode.diff_source, source);
+        assert_eq!(gui.diff_mode.files_commit, commit);
+        assert_eq!(gui.diff_mode.diff_files.len(), files.len());
+        for (actual, expected) in gui.diff_mode.diff_files.iter().zip(files) {
+            assert_eq!(actual.name, expected.name);
+        }
+        assert!(gui.diff_mode.collapsed_dirs.contains("src"));
+        assert_eq!(gui.diff_mode.file_search_query, "src");
+        assert!(matches!(
+            gui.popup,
+            PopupState::CommandOutput {
+                kind: MessageKind::Info,
+                ..
+            }
+        ));
     }
 
     struct TempRepo {

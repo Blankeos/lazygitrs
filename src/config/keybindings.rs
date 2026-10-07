@@ -78,6 +78,8 @@ pub struct UniversalKeybinding {
     pub start_search: String,
     #[serde(rename = "optionMenu")]
     pub option_menu: String,
+    #[serde(rename = "customCommandPrompt")]
+    pub custom_command_prompt: String,
     pub edit: String,
     #[serde(rename = "openFile")]
     pub open_file: String,
@@ -165,6 +167,7 @@ impl Default for UniversalKeybinding {
             prev_match: "N".into(),
             start_search: "/".into(),
             option_menu: "x".into(),
+            custom_command_prompt: ":".into(),
             edit: "e".into(),
             open_file: "o".into(),
             scroll_up_main: "<pgup>".into(),
@@ -467,6 +470,43 @@ pub fn parse_key(s: &str) -> Option<KeyEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_command_prompt_defaults_when_omitted() {
+        assert_eq!(
+            KeybindingConfig::default().universal.custom_command_prompt,
+            ":"
+        );
+        for yaml in ["{}", "universal: {}", "universal:\n  optionMenu: m"] {
+            let parsed: KeybindingConfig = serde_yaml::from_str(yaml).expect("valid yaml");
+            assert_eq!(parsed.universal.custom_command_prompt, ":");
+            assert_eq!(
+                parse_key(&parsed.universal.custom_command_prompt),
+                Some(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE))
+            );
+        }
+    }
+
+    #[test]
+    fn custom_command_prompt_can_be_remapped() {
+        let parsed: KeybindingConfig =
+            serde_yaml::from_str("universal:\n  customCommandPrompt: '<c-x>'").expect("valid yaml");
+        assert_eq!(parsed.universal.custom_command_prompt, "<c-x>");
+        assert_eq!(
+            parse_key(&parsed.universal.custom_command_prompt),
+            Some(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL))
+        );
+        assert_eq!(parsed.universal.start_search, "/");
+    }
+
+    #[test]
+    fn custom_command_prompt_can_be_disabled() {
+        let parsed: KeybindingConfig =
+            serde_yaml::from_str("universal:\n  customCommandPrompt: ''").expect("valid yaml");
+        assert!(parsed.universal.custom_command_prompt.is_empty());
+        assert_eq!(parse_key(&parsed.universal.custom_command_prompt), None);
+        assert_eq!(parsed.universal.start_search, "/");
+    }
 
     #[test]
     fn legacy_head_toggle_config_does_not_override_ai_generation() {

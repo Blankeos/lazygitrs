@@ -1509,6 +1509,67 @@ mod tests {
     }
 
     #[test]
+    fn footer_shows_configured_shell_prompt_in_list_and_diff_contexts() {
+        use super::{ContextId, ContextManager, DiffViewState, KeybindingConfig, Model};
+        let mut diff_view = DiffViewState::default();
+        diff_view.load("test", "old\n", "new\n");
+        for ctx in [
+            ContextId::Files,
+            ContextId::Commits,
+            ContextId::CommitFiles,
+            ContextId::BranchCommits,
+            ContextId::BranchCommitFiles,
+            ContextId::Reflog,
+            ContextId::StashFiles,
+        ] {
+            for focused in [false, true] {
+                for (binding, hint) in [(":", ":"), ("<c-x>", "ctrl+x"), ("", ""), ("  ", "")] {
+                    let mut kb = KeybindingConfig::default();
+                    kb.universal.custom_command_prompt = binding.into();
+                    let mut ctx_mgr = ContextManager::new();
+                    ctx_mgr.set_active(ctx);
+                    let mut terminal = Terminal::new(TestBackend::new(240, 1)).unwrap();
+                    terminal
+                        .draw(|frame| {
+                            super::render_status_bar(
+                                frame,
+                                frame.area(),
+                                &ctx_mgr,
+                                &diff_view,
+                                &Theme::default(),
+                                &Model::default(),
+                                focused,
+                                false,
+                                &kb,
+                                false,
+                                false,
+                            )
+                        })
+                        .unwrap();
+                    let text: String = terminal
+                        .backend()
+                        .buffer()
+                        .content
+                        .iter()
+                        .map(|cell| cell.symbol())
+                        .collect();
+                    assert_eq!(
+                        text.contains(" shell"),
+                        !hint.is_empty(),
+                        "{ctx:?} {focused} {binding}: {text}"
+                    );
+                    if !hint.is_empty() {
+                        assert!(text.contains(&format!("{hint} shell")), "{text}");
+                    }
+                    assert_eq!(text.contains(": shell"), binding == ":", "{text}");
+                    assert!(!text.contains("ctrl+g head"), "{text}");
+                    assert!(!text.contains("ctrl+g files"), "{text}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn commit_list_footers_omit_details_toggle() {
         for ctx in [
             super::ContextId::Commits,
@@ -1743,6 +1804,128 @@ mod tests {
                 );
             })
             .expect("long popup message should render without panicking");
+    }
+
+    #[test]
+    fn command_output_popup_scrolls_to_final_line_and_handles_tiny_terminals() {
+        let message = (0..100)
+            .map(|i| format!("output-line-{i:03}\n"))
+            .collect::<String>();
+        for (width, height) in [(80, 24), (20, 8), (4, 4), (3, 3), (1, 1)] {
+            let area = Rect::new(0, 0, width, height);
+            for last in [false, true] {
+                let popup = PopupState::CommandOutput {
+                    title: "exit 7".into(),
+                    message: message.clone(),
+                    kind: MessageKind::Error,
+                    scroll: if last {
+                        super::command_output_max_scroll(&message, area)
+                    } else {
+                        0
+                    },
+                };
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        render_popup(frame, &popup, area, 0, &Theme::default(), false, false)
+                    })
+                    .unwrap();
+                if width >= 20 {
+                    let buffer = terminal.backend().buffer();
+                    let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+                    assert!(text.contains("exit 7"), "{text}");
+                    let line = if last {
+                        "output-line-099"
+                    } else {
+                        "output-line-000"
+                    };
+                    assert!(text.contains(line), "{width}x{height}: {text}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shell_footers_use_bold_keys_and_muted_action_labels() {
+        let theme = Theme::default();
+        for (popup, hint, action) in [
+            (
+                PopupState::ShellCommand {
+                    textarea: crate::gui::popup::make_textarea(""),
+                },
+                " enter confirm  esc cancel",
+                "confirm",
+            ),
+            (
+                PopupState::CommandOutput {
+                    title: "Command output".into(),
+                    message: "result".into(),
+                    kind: MessageKind::Info,
+                    scroll: 0,
+                },
+                " enter close  esc close  j/k scroll  y copy  pgup/pgdn page  g/G top/bottom",
+                "close",
+            ),
+        ] {
+            let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_popup(
+                        frame,
+                        &popup,
+                        Rect::new(0, 0, 120, 24),
+                        0,
+                        &theme,
+                        false,
+                        false,
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let (row, text) = (0..24)
+                .find_map(|y| {
+                    let text: String = (0..120).map(|x| buffer[(x, y)].symbol()).collect();
+                    text.contains(hint).then_some((y, text))
+                })
+                .expect("styled footer should be visible in the rendered popup");
+            for key in ["enter", "esc"] {
+                let x = text[..text.find(key).unwrap()].chars().count() as u16;
+                for col in x..x + key.len() as u16 {
+                    let cell = &buffer[(col, row)];
+                    assert_eq!(cell.fg, theme.text);
+                    assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
+                }
+            }
+            let x = text[..text.find(action).unwrap()].chars().count() as u16;
+            for col in x..x + action.len() as u16 {
+                let cell = &buffer[(col, row)];
+                assert_eq!(cell.fg, theme.text_dimmed);
+                assert!(!cell.modifier.contains(ratatui::style::Modifier::BOLD));
+            }
+        }
+    }
+
+    #[test]
+    fn literal_shell_prompt_renders_in_small_terminals() {
+        let mut textarea = crate::gui::popup::make_textarea("");
+        textarea.insert_str("printf '%s' 'multiple   spaces'\n# next line");
+        let popup = PopupState::ShellCommand { textarea };
+        for (width, height) in [(80, 24), (20, 8), (4, 4), (1, 1)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_popup(
+                        frame,
+                        &popup,
+                        Rect::new(0, 0, width, height),
+                        0,
+                        &Theme::default(),
+                        false,
+                        false,
+                    )
+                })
+                .unwrap();
+        }
     }
 
     fn sample_menu() -> PopupState {
@@ -2813,6 +2996,7 @@ fn render_status_bar(
     let mut emphasized: Vec<&str> = Vec::new();
     let open_log_menu_key = format_key_hint(&keybindings.commits.open_log_menu);
     let fold_key = format_key_hint(&keybindings.universal.fold_directory);
+    let shell_key = format_key_hint(&keybindings.universal.custom_command_prompt);
 
     if active_file_tree && !diff_focused && !fold_key.is_empty() {
         hints.push((fold_key.as_str(), "fold/unfold"));
@@ -2962,6 +3146,9 @@ fn render_status_bar(
     }
 
     // Global hints (always last)
+    if !shell_key.is_empty() {
+        hints.push((shell_key.as_str(), "shell"));
+    }
     hints.extend([("q", "quit"), ("tab/1-5", "panels"), ("j/k", "nav")]);
 
     let key_style = Style::default()
@@ -3370,6 +3557,28 @@ pub fn render_loading_overlay(
     frame.render_widget(widget, popup_rect);
 }
 
+fn command_output_geometry(area: Rect) -> (Rect, usize) {
+    let width = (area.width.saturating_mul(9) / 10)
+        .min(120)
+        .max(4)
+        .min(area.width);
+    let height = (area.height.saturating_mul(4) / 5).max(4).min(area.height);
+    let rect = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    (rect, usize::from(height.saturating_sub(3)))
+}
+
+pub(super) fn command_output_max_scroll(message: &str, area: Rect) -> usize {
+    let (rect, rows) = command_output_geometry(area);
+    wrap_popup_lines(message, usize::from(rect.width.saturating_sub(2)))
+        .len()
+        .saturating_sub(rows)
+}
+
 pub fn render_popup(
     frame: &mut Frame,
     popup: &PopupState,
@@ -3388,6 +3597,89 @@ pub fn render_popup(
     let x = (area.width.saturating_sub(popup_width)) / 2;
 
     match popup {
+        PopupState::ShellCommand { textarea } => {
+            // Reuse input styling without introducing soft-wrap mutations.
+            let input = PopupState::Input {
+                title: "Execute Shell Command".into(),
+                textarea: textarea.clone(),
+                on_confirm: Box::new(|_, _| Ok(())),
+                is_commit: false,
+                confirm_focused: false,
+            };
+            render_popup(frame, &input, area, spinner_frame, theme, false, false);
+        }
+        PopupState::CommandOutput {
+            title,
+            message,
+            kind,
+            scroll,
+        } => {
+            let (rect, rows) = command_output_geometry(area);
+            let wrapped = wrap_popup_lines(message, usize::from(rect.width.saturating_sub(2)));
+            let max = wrapped.len().saturating_sub(rows);
+            let scroll = (*scroll).min(max);
+            frame.render_widget(Clear, rect);
+            let color = if *kind == crate::gui::popup::MessageKind::Error {
+                Color::Red
+            } else {
+                theme.accent_secondary
+            };
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(format!(
+                    " {title} [{}/{}] ",
+                    scroll + 1,
+                    wrapped.len().max(1)
+                ))
+                .border_style(Style::default().fg(color));
+            frame.render_widget(block, rect);
+            let inner = rect.inner(ratatui::layout::Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
+            let lines: Vec<Line> = wrapped
+                .iter()
+                .skip(scroll)
+                .take(rows)
+                .map(|line| Line::from(line.as_str()))
+                .collect();
+            frame.render_widget(
+                Paragraph::new(lines),
+                Rect::new(
+                    inner.x,
+                    inner.y,
+                    inner.width,
+                    inner.height.saturating_sub(1),
+                ),
+            );
+            let key_style = Style::default()
+                .fg(theme.text)
+                .add_modifier(ratatui::style::Modifier::BOLD);
+            let desc_style = Style::default().fg(theme.text_dimmed);
+            let hint_line = Line::from(vec![
+                Span::styled(" enter ", key_style),
+                Span::styled("close  ", desc_style),
+                Span::styled("esc ", key_style),
+                Span::styled("close  ", desc_style),
+                Span::styled("j/k ", key_style),
+                Span::styled("scroll  ", desc_style),
+                Span::styled("y ", key_style),
+                Span::styled("copy  ", desc_style),
+                Span::styled("pgup/pgdn ", key_style),
+                Span::styled("page  ", desc_style),
+                Span::styled("g/G ", key_style),
+                Span::styled("top/bottom", desc_style),
+            ]);
+            frame.render_widget(
+                Paragraph::new(hint_line),
+                Rect::new(
+                    inner.x,
+                    inner.y + inner.height.saturating_sub(1),
+                    inner.width,
+                    inner.height.min(1),
+                ),
+            );
+        }
         PopupState::Confirm { title, message, .. } => {
             let inner_width = popup_width.saturating_sub(4) as usize; // borders + padding
             let wrapped = wrap_popup_lines(message, inner_width);

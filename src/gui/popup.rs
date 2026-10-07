@@ -544,6 +544,16 @@ pub enum PopupState {
         message: String,
         kind: MessageKind,
     },
+    /// Literal shell input: never soft-wrap or join away user newlines.
+    ShellCommand {
+        textarea: TextArea<'static>,
+    },
+    CommandOutput {
+        title: String,
+        message: String,
+        kind: MessageKind,
+        scroll: usize,
+    },
     /// Shown while a background operation (like AI commit generation) is running.
     #[allow(dead_code)]
     Loading {

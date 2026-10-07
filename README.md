@@ -70,6 +70,51 @@ only while a tree is active. The footer shows just the fold/unfold shortcut
 border; explicitly remapping a tree action to `'` will override it while
 the tree is active.
 
+### Shell command prompt
+
+Press `:` in the normal view or compare mode to run a shell command from the
+repository root without leaving the TUI. Remap the prompt shortcut in your config,
+or set it to `""` to disable it:
+
+```yaml
+keybinding:
+  universal:
+    customCommandPrompt: ":" # e.g. "<c-x>" to remap; "" to disable
+```
+
+The prompt uses `$SHELL`, falling back to `sh` when it is unset or empty. Bash
+loads `~/.bash_aliases` and `~/.bashrc` and enables alias expansion; zsh keeps
+native `.zshenv` startup (including changes to `ZDOTDIR`) and then loads
+`${ZDOTDIR:-$HOME}/.zshrc`. Fish keeps its native startup configuration.
+Aliases and functions defined there can be used, but a noninteractive guard in
+your rc file may skip their definitions. Definitions that exist only in your
+current interactive shell are not inherited. Bash, zsh, and Fish restore the
+repository root after startup and clear positional arguments (`$argv` in Fish)
+before evaluating your command, even if startup changed them. Paths and commands
+are passed as literal arguments or environment values, not interpolated into
+wrapper code. Fish uses a Fish-native wrapper; other shells receive a direct
+native `-c` invocation (their startup may change the working directory). Use
+your shell's syntax rather than POSIX syntax.
+
+Commands run asynchronously and **noninteractively** with no input/TTY: editors,
+password prompts, and other interactive programs are not supported here. Press
+`Esc` while a command is running to cancel it; commands time out after five
+minutes. Output includes the exit status, stdout, and stderr, with a 1 MiB capture
+cap per stream (excess output is truncated). Background children are terminated
+when the job ends, including on completion, cancellation, or timeout; this is
+not a way to launch persistent background services. Processes that explicitly
+create their own process group or session can escape cleanup; this prompt is not a
+sandbox. The process runner currently requires Unix (macOS/Linux).
+
+Input preserves pasted newlines and quoted spacing; `Enter` executes the whole
+command and `Esc` dismisses without running it. Scroll command results with
+`j`/`k`, arrow keys, the mouse wheel, `PgUp`/`PgDn`, or `g`/`G`; `y` copies the result and
+`Esc`/`Enter` closes it. The command log retains a bounded output preview.
+
+Configured `customCommands` still use `sh -c` rather than the prompt's `$SHELL`
+and rc-file loading, but now run asynchronously with the same cancellation,
+timeout, and output limits.
+
 ### Upgrade
 
 Detects how you installed (brew / npm / bun / cargo / install.sh) and upgrades in place:
@@ -144,6 +189,7 @@ Persisted State lives at `~/.local/state/lazygitrs/state.yml` and `~/.local/stat
 **New config properties:**
 
 - `git.commit.generateCommand` — shell command for AI-generated commit messages. See [What's different](#whats-different) for examples.
+- `keybinding.universal.customCommandPrompt` — shell prompt shortcut (`":"` by default; `""` disables it). See [Shell command prompt](#shell-command-prompt).
 - `~/.config/lazygitrs/themes/*.json` — drop custom theme files here. See [Themes](#themes).
 
 ### Themes

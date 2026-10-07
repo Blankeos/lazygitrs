@@ -178,6 +178,57 @@ mod tests {
     }
 
     #[test]
+    fn compare_footer_shows_configured_shell_prompt_in_list_and_diff_contexts() {
+        for focus in [
+            DiffModeFocus::SelectorA,
+            DiffModeFocus::SelectorB,
+            DiffModeFocus::CommitFiles,
+            DiffModeFocus::Commits,
+            DiffModeFocus::DiffExploration,
+        ] {
+            for tree in [false, true] {
+                for (binding, hint) in [(":", ":"), ("<c-x>", "ctrl+x"), ("", ""), ("  ", "")] {
+                    let mut kb = crate::config::KeybindingConfig::default();
+                    kb.universal.custom_command_prompt = binding.into();
+                    let mut state = DiffModeState::new();
+                    state.show_tree = tree;
+                    state.set_focus(focus);
+                    let mut terminal = Terminal::new(TestBackend::new(240, 1)).unwrap();
+                    terminal
+                        .draw(|frame| {
+                            render_status_bar(
+                                frame,
+                                frame.area(),
+                                &state,
+                                &DiffViewState::default(),
+                                &Theme::default(),
+                                &kb,
+                            )
+                        })
+                        .unwrap();
+                    let text = buffer_text(&terminal);
+                    assert_eq!(
+                        text.contains(" shell"),
+                        !hint.is_empty(),
+                        "{focus:?} {tree} {binding}: {text}"
+                    );
+                    if !hint.is_empty() {
+                        assert!(text.contains(&format!("{hint} shell")), "{text}");
+                    }
+                    assert_eq!(text.contains(": shell"), binding == ":", "{text}");
+                    assert_eq!(
+                        text.contains("- fold/unfold"),
+                        tree && focus == DiffModeFocus::CommitFiles,
+                        "{text}"
+                    );
+                    assert!(!text.contains("details"), "{text}");
+                    assert!(text.contains("? help"), "{text}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn compare_empty_commit_states_are_distinct() {
         for (counts, expected) in [
             (Some((0, 0)), "Same commit"),
@@ -750,6 +801,8 @@ fn render_status_bar(
     }
 
     let fold_key = crate::gui::views::format_key_hint(&keybindings.universal.fold_directory);
+    let shell_key =
+        crate::gui::views::format_key_hint(&keybindings.universal.custom_command_prompt);
     let hints = if state.editing.is_some() {
         vec![("Enter", "select"), ("Esc", "cancel"), ("↑↓", "navigate")]
     } else {
@@ -774,6 +827,9 @@ fn render_status_bar(
         hints.push(("\\", view_layout_hint));
         if state.show_tree && state.focus == DiffModeFocus::CommitFiles && !fold_key.is_empty() {
             hints.push((fold_key.as_str(), "fold/unfold"));
+        }
+        if !shell_key.is_empty() {
+            hints.push((shell_key.as_str(), "shell"));
         }
         hints.push(("?", "help"));
         hints
