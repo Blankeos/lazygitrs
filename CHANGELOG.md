@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.39] - 2026-10-07
+
+### Bug Fixes
+
+- Remove HEAD toggle to restore Ctrl-G commit generation (#41) by @Blankeos in [#41](https://github.com/Blankeos/lazygitrs/pull/41)
+- Keep failed checkouts accurate and speed up branch switches (#40) by @Blankeos in [#40](https://github.com/Blankeos/lazygitrs/pull/40)
+- Prevent ANSI styling leaks from commit text by @Blankeos
+
+### Features
+
+- Add shell command prompt (default ':') to execute arbitrary commands safely (#35) by @felipecm-br in [#35](https://github.com/Blankeos/lazygitrs/pull/35)
+- File tree folding, hierarchy navigation, and combined directory diffs (#33) by @felipecm-br in [#33](https://github.com/Blankeos/lazygitrs/pull/33)
+- Add --commits cli flag and ctrl+g dual-diff toggle between files and head (#34) by @felipecm-br in [#34](https://github.com/Blankeos/lazygitrs/pull/34)
+- Add Esc filter reset, Ctrl+L shortcut, and branch checklist clear (#36) by @felipecm-br in [#36](https://github.com/Blankeos/lazygitrs/pull/36)
+- Add inline image diff previews (#39) by @Blankeos in [#39](https://github.com/Blankeos/lazygitrs/pull/39)
+- Polish compare mode layout and navigation by @Blankeos
+- Add commit history panel to compare mode by @Blankeos
+- Align worktree names and branches in list by @Blankeos
+- Add sticky file headers and preview placeholders to diff view by @Blankeos
+
 ## [0.0.38] - 2026-09-15
 
 ### Bug Fixes
@@ -278,8 +298,8 @@ All notable changes to this project will be documented in this file.
 - Add toggleable unified diff mode and improve PR URL fallback resolution by @Blankeos
 - Paginate commit history loading for large repos. by @Blankeos
 - Add cancellable AI commit generation and async remote ops by @Blankeos
-- Resize side/diff panel width (#18) by @fcmiranda in [#18](https://github.com/Blankeos/lazygitrs/pull/18)
-- Add cherry-pick functionality with keybindings and handling options by @fcmiranda
+- Resize side/diff panel width (#18) by @felipecm-br in [#18](https://github.com/Blankeos/lazygitrs/pull/18)
+- Add cherry-pick functionality with keybindings and handling options by @felipecm-br
 
 ### Refactor
 
@@ -307,7 +327,7 @@ All notable changes to this project will be documented in this file.
 - Added a local undo state stack. by @Blankeos
 - Bind <c-r> to revert selected hunk by @Blankeos
 - Hover tooltip on revert-hunk marker by @Blankeos
-- Revert individual hunks from the diff view by @fcmiranda
+- Revert individual hunks from the diff view by @felipecm-br
 - Better graph nodes. by @Blankeos
 - Display author name for rebase onto commit. by @Blankeos
 - Route s/f/d/e through Interactive Rebase planner by @Blankeos
@@ -331,7 +351,7 @@ All notable changes to this project will be documented in this file.
 - Enter InProgress view immediately on startup when rebase is detected. by @Blankeos
 - Batch entry hydration into single git log invocation. by @Blankeos
 - Improve scroll and viewport visibility handling. by @Blankeos
-- Add reverse toggle panel keybinding for Shift+Tab by @fcmiranda
+- Add reverse toggle panel keybinding for Shift+Tab by @felipecm-br
 
 ### Chores
 
@@ -347,14 +367,14 @@ All notable changes to this project will be documented in this file.
 - Allow creating empty commits when no files present. by @Blankeos
 - Highlight key bindings in confirmation dialog. by @Blankeos
 - Add interactive ✦ AI-generate button to commit message dialog. by @Blankeos
-- Ai commit shortcut (#11) by @fcmiranda in [#11](https://github.com/Blankeos/lazygitrs/pull/11)
-- Load from ~/.config/lazygitrs with lazygit fallback (#6) by @fcmiranda in [#6](https://github.com/Blankeos/lazygitrs/pull/6)
+- Ai commit shortcut (#11) by @felipecm-br in [#11](https://github.com/Blankeos/lazygitrs/pull/11)
+- Load from ~/.config/lazygitrs with lazygit fallback (#6) by @felipecm-br in [#6](https://github.com/Blankeos/lazygitrs/pull/6)
 - Add gutter color styling to diff display. resolves #10 by @Blankeos
 
 
 ### New Contributors
 
-- @fcmiranda made their first contribution in [#11](https://github.com/Blankeos/lazygitrs/pull/11)
+- @felipecm-br made their first contribution in [#11](https://github.com/Blankeos/lazygitrs/pull/11)
 ## [0.0.18] - 2026-04-28
 
 ### Bug Fixes
