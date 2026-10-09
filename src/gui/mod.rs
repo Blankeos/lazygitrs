@@ -610,6 +610,8 @@ pub struct Gui {
     pub screen_mode: ScreenMode,
     /// True while the user is dragging the sidebar divider with the mouse.
     sidebar_resizing: bool,
+    /// Whether the mouse is currently hovering over the sidebar divider.
+    pub grab_column_hovered: bool,
     /// Portrait-only: add this to the mouse row when mapping to side height so
     /// grabs on the expanded panel bottom (above trailing collapsed rows) and
     /// the main/diff top border share one continuous drag.
@@ -1133,6 +1135,7 @@ impl Gui {
             search_match_idx: 0,
             screen_mode: ScreenMode::Normal,
             sidebar_resizing: false,
+            grab_column_hovered: false,
             sidebar_resize_row_offset: 0,
             show_file_tree,
             file_tree_nodes: Vec::new(),
@@ -1683,6 +1686,7 @@ impl Gui {
                             .generate_command
                             .trim()
                             .is_empty(),
+                        self.grab_column_hovered || self.sidebar_resizing,
                     );
                     if self.popup == PopupState::None {
                         if self.ai_commit_generation_active() {
@@ -1766,7 +1770,8 @@ impl Gui {
     }
 
     fn input_wait_timeout(&self) -> Duration {
-        if self.shell_command_job.is_some()
+        if self.sidebar_resizing
+            || self.shell_command_job.is_some()
             || self.ai_commit_generation_active()
             || self.remote_op_label.is_some()
             || self.needs_refresh
@@ -7138,9 +7143,15 @@ impl Gui {
             _ => {}
         }
 
+        let over_divider = self.popup == PopupState::None
+            && self.screen_mode == ScreenMode::Normal
+            && (!self.diff_mode.active || self.diff_mode.editing.is_none())
+            && self.sidebar_divider_hit(mouse.column, mouse.row);
+
         // Sidebar divider drag (Normal mode only). Must run before text-select /
         // focus paths so the hit strip wins the gesture.
         if self.sidebar_resizing {
+            self.grab_column_hovered = true;
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left) => {
                     self.apply_sidebar_ratio_from_mouse(mouse.column, mouse.row);
@@ -7149,6 +7160,7 @@ impl Gui {
                 MouseEventKind::Up(MouseButton::Left) => {
                     self.sidebar_resizing = false;
                     self.sidebar_resize_row_offset = 0;
+                    self.grab_column_hovered = over_divider;
                     return;
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -7158,19 +7170,32 @@ impl Gui {
                 _ => {
                     self.sidebar_resizing = false;
                     self.sidebar_resize_row_offset = 0;
+                    self.grab_column_hovered = over_divider;
                 }
             }
-        } else if self.popup == PopupState::None
-            && self.screen_mode == ScreenMode::Normal
-            && (!self.diff_mode.active || self.diff_mode.editing.is_none())
-            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && self.sidebar_divider_hit(mouse.column, mouse.row)
-        {
+        } else if over_divider && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             self.sidebar_resizing = true;
+            self.grab_column_hovered = true;
             self.sidebar_resize_row_offset = self.portrait_sidebar_resize_offset(mouse.row);
             self.diff_view.selection = None;
             self.apply_sidebar_ratio_from_mouse(mouse.column, mouse.row);
             return;
+        } else {
+            match mouse.kind {
+                MouseEventKind::Moved | MouseEventKind::Drag(_) => {
+                    if self.grab_column_hovered != over_divider {
+                        self.grab_column_hovered = over_divider;
+                    }
+                    if over_divider {
+                        return;
+                    }
+                }
+                _ => {
+                    if !over_divider && self.grab_column_hovered {
+                        self.grab_column_hovered = false;
+                    }
+                }
+            }
         }
 
         // ✦ AI-generate button on commit-message popups: handle clicks.
@@ -8200,6 +8225,10 @@ impl Gui {
             col == content.x
         } else if fl.main_panel.width == 0 {
             col == content.x + content.width.saturating_sub(1)
+        } else if let Some(grab) = fl.grab_column {
+            let lo = grab.x.saturating_sub(1);
+            let hi = grab.x.saturating_add(1);
+            col >= lo && col <= hi
         } else {
             let divider_x = fl.main_panel.x;
             let lo = divider_x.saturating_sub(1);
@@ -10595,6 +10624,32 @@ mod terminal_mouse_tests {
     }
 
     #[test]
+    fn grab_column_layout_and_resizing_timeout() {
+        let area = Rect::new(0, 0, 100, 30);
+        let fl =
+            layout::compute_layout_with_details(area, 0.4, 5, 1, ScreenMode::Normal, false, false);
+        assert!(fl.grab_column.is_some());
+        let grab = fl.grab_column.unwrap();
+        assert_eq!(grab.width, 1);
+        assert_eq!(grab.x, 40);
+        assert_eq!(fl.main_panel.x, 41);
+
+        // Verify 16ms (60 FPS) timeout during active resizing
+        let repo = TempRepo::new("resizing-fps");
+        let mut gui = checkout_test_gui(&repo);
+        let mut config = crate::config::AppConfig::default();
+        config.user_config.git.auto_refresh = false;
+        gui.config = Arc::new(config);
+        gui.needs_refresh = false;
+
+        assert_eq!(gui.input_wait_timeout(), Duration::from_millis(200));
+        gui.sidebar_resizing = true;
+        assert_eq!(gui.input_wait_timeout(), Duration::from_millis(16));
+        gui.sidebar_resizing = false;
+        assert_eq!(gui.input_wait_timeout(), Duration::from_millis(200));
+    }
+
+    #[test]
     fn tree_compare_navigation_folding_and_focus_preserve_current_layout() {
         use crate::gui::modes::diff_mode::DiffModeFocus;
         let repo = TempRepo::new("tree-compare");
@@ -11353,6 +11408,7 @@ fn setup_terminal() -> Result<(Term, bool)> {
         EnableMouseCaptureWithoutHover,
         crossterm::event::EnableFocusChange,
         crossterm::event::EnableBracketedPaste,
+        crossterm::style::Print("\x1b[?1003h"),
         cursor::Hide
     )?;
     // Detect graphics before Crossterm creates its internal response reader.
@@ -11421,6 +11477,7 @@ fn restore_terminal(terminal: &mut Term, keyboard_enhanced: bool) -> Result<()> 
     if keyboard_enhanced {
         execute!(
             terminal.backend_mut(),
+            crossterm::style::Print("\x1b[?1003l"),
             crossterm::event::DisableMouseCapture,
             crossterm::event::DisableFocusChange,
             crossterm::event::PopKeyboardEnhancementFlags,
@@ -11431,6 +11488,7 @@ fn restore_terminal(terminal: &mut Term, keyboard_enhanced: bool) -> Result<()> 
     } else {
         execute!(
             terminal.backend_mut(),
+            crossterm::style::Print("\x1b[?1003l"),
             crossterm::event::DisableMouseCapture,
             crossterm::event::DisableFocusChange,
             crossterm::event::DisableBracketedPaste,
