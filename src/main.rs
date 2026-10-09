@@ -79,6 +79,7 @@ fn install_panic_hook() {
             crate::os::tty::restore_foreground_tty();
             let _ = crossterm::execute!(
                 out,
+                crossterm::style::Print("\x1b[?1003l"),
                 crossterm::event::DisableMouseCapture,
                 crossterm::event::DisableFocusChange,
                 crossterm::cursor::Show,
