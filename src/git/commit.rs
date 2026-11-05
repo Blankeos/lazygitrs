@@ -1,10 +1,9 @@
-use anyhow::Result;
-
-use super::GitCommands;
+use super::{GitCommands, HeadState};
 use crate::model::{
     Commit, CommitStatus,
     commit::{CommitStat, Divergence},
 };
+use anyhow::Result;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Default)]
@@ -32,7 +31,119 @@ fn commit_filter_path_suggestions<'a>(paths: impl Iterator<Item = &'a str>) -> V
 
 #[cfg(test)]
 mod commit_filter_suggestion_tests {
-    use super::commit_filter_path_suggestions;
+    use super::{GitCommands, commit_filter_path_suggestions, parse_commit_details_output};
+    use crate::git::HeadState;
+    use crate::model::commit::{Commit, CommitStatus, Divergence};
+
+    #[test]
+    fn empty_unpushed_list_marks_previous_unpushed_commit_as_pushed() {
+        let mut commits = vec![Commit {
+            hash: "abc123".to_string(),
+            name: "test commit".to_string(),
+            status: CommitStatus::Unpushed,
+            action: String::new(),
+            tags: Vec::new(),
+            refs: Vec::new(),
+            extra_info: String::new(),
+            author_name: String::new(),
+            author_email: String::new(),
+            unix_timestamp: 0,
+            parents: Vec::new(),
+            divergence: Divergence::None,
+        }];
+
+        GitCommands::apply_unpushed_status(&mut commits, &[]);
+
+        assert_eq!(commits[0].status, CommitStatus::Pushed);
+    }
+
+    #[test]
+    fn checkout_head_state_moves_head_decoration() {
+        let mut commits = vec![
+            Commit {
+                hash: "old".into(),
+                name: "old".into(),
+                status: CommitStatus::Pushed,
+                action: String::new(),
+                tags: Vec::new(),
+                refs: vec!["HEAD -> main".into(), "origin/main".into()],
+                extra_info: String::new(),
+                author_name: String::new(),
+                author_email: String::new(),
+                unix_timestamp: 0,
+                parents: Vec::new(),
+                divergence: Divergence::None,
+            },
+            Commit {
+                hash: "new".into(),
+                name: "new".into(),
+                status: CommitStatus::Pushed,
+                action: String::new(),
+                tags: Vec::new(),
+                refs: vec!["feature".into()],
+                extra_info: String::new(),
+                author_name: String::new(),
+                author_email: String::new(),
+                unix_timestamp: 0,
+                parents: Vec::new(),
+                divergence: Divergence::None,
+            },
+        ];
+
+        let head = HeadState {
+            hash: "new".into(),
+            branch_name: "feature".into(),
+        };
+
+        GitCommands::apply_checkout_head_state(&mut commits, &head);
+
+        assert_eq!(commits[0].refs, vec!["main", "origin/main"]);
+        assert_eq!(commits[1].refs, vec!["HEAD -> feature"]);
+    }
+
+    #[test]
+    fn checkout_head_state_handles_detached_head() {
+        let mut commits = vec![
+            Commit {
+                hash: "old".into(),
+                name: "old".into(),
+                status: CommitStatus::Pushed,
+                action: String::new(),
+                tags: Vec::new(),
+                refs: vec!["HEAD -> main".into()],
+                extra_info: String::new(),
+                author_name: String::new(),
+                author_email: String::new(),
+                unix_timestamp: 0,
+                parents: Vec::new(),
+                divergence: Divergence::None,
+            },
+            Commit {
+                hash: "new".into(),
+                name: "new".into(),
+                status: CommitStatus::Pushed,
+                action: String::new(),
+                tags: Vec::new(),
+                refs: Vec::new(),
+                extra_info: String::new(),
+                author_name: String::new(),
+                author_email: String::new(),
+                unix_timestamp: 0,
+                parents: Vec::new(),
+                divergence: Divergence::None,
+            },
+        ];
+
+        let head = HeadState {
+            hash: "new".into(),
+            branch_name: String::new(),
+        };
+
+        GitCommands::apply_checkout_head_state(&mut commits, &head);
+
+        assert_eq!(commits[0].refs, vec!["main"]);
+        assert_eq!(commits[1].refs, vec!["HEAD"]);
+    }
 
     #[test]
     fn path_suggestions_include_files_and_each_parent_directory() {
@@ -57,6 +168,34 @@ mod commit_filter_suggestion_tests {
                 "src/gui/mod.rs",
             ]
         );
+    }
+
+    #[test]
+    fn commit_details_output_preserves_message_and_parses_shortstat() {
+        let output = concat!(
+            "Fix scheduler regression\n",
+            "\n",
+            "Preserve the full commit body across multiple lines.\n",
+            "This line contains additional context.\n",
+            "\0",
+            "\n",
+            " 2 files changed, 7 insertions(+), 3 deletions(-)\n",
+        );
+
+        let (message, stat) = parse_commit_details_output(output);
+
+        assert_eq!(
+            message,
+            concat!(
+                "Fix scheduler regression\n",
+                "\n",
+                "Preserve the full commit body across multiple lines.\n",
+                "This line contains additional context."
+            )
+        );
+        assert_eq!(stat.files_changed, 2);
+        assert_eq!(stat.insertions, 7);
+        assert_eq!(stat.deletions, 3);
     }
 }
 
@@ -327,15 +466,47 @@ impl GitCommands {
     }
 
     pub fn apply_unpushed_status(commits: &mut [Commit], unpushed_hashes: &[String]) {
-        if unpushed_hashes.is_empty() {
-            return;
-        }
         for commit in commits {
             commit.status = if unpushed_hashes.contains(&commit.hash) {
                 CommitStatus::Unpushed
             } else {
                 CommitStatus::Pushed
             };
+        }
+    }
+
+    pub(crate) fn apply_checkout_head_state(commits: &mut [Commit], head: &HeadState) {
+        // Remove the old HEAD marker while preserving the underlying local branch
+        // decoration. Detached HEAD is represented by a bare "HEAD" ref.
+        for commit in commits.iter_mut() {
+            commit.refs.retain(|reference| reference != "HEAD");
+
+            for reference in &mut commit.refs {
+                if let Some(branch) = reference.strip_prefix("HEAD -> ") {
+                    *reference = branch.to_string();
+                }
+            }
+        }
+
+        let Some(commit) = commits.iter_mut().find(|commit| commit.hash == head.hash) else {
+            return;
+        };
+
+        if head.branch_name.is_empty() {
+            commit.refs.insert(0, "HEAD".to_string());
+            return;
+        }
+
+        let head_ref = format!("HEAD -> {}", head.branch_name);
+
+        if let Some(index) = commit
+            .refs
+            .iter()
+            .position(|reference| reference == &head.branch_name)
+        {
+            commit.refs[index] = head_ref;
+        } else {
+            commit.refs.insert(0, head_ref);
         }
     }
 
@@ -407,6 +578,15 @@ impl GitCommands {
         Ok(result.stdout.trim().to_string())
     }
 
+    pub fn commit_details(&self, hash: &str) -> Result<(String, CommitStat)> {
+        let result = self
+            .git()
+            .args(&["log", "-1", "--shortstat", "--format=%B%x00", hash])
+            .run_expecting_success()?;
+
+        Ok(parse_commit_details_output(&result.stdout))
+    }
+
     pub fn commit_message_body(&self, hash: &str) -> Result<String> {
         let result = self
             .git()
@@ -453,6 +633,12 @@ impl GitCommands {
         }
         Ok(parse_shortstat(&result.stdout))
     }
+}
+
+fn parse_commit_details_output(output: &str) -> (String, CommitStat) {
+    let (message, shortstat) = output.split_once('\0').unwrap_or((output, ""));
+
+    (message.trim().to_string(), parse_shortstat(shortstat))
 }
 
 fn parse_shortstat(output: &str) -> CommitStat {

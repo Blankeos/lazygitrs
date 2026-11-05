@@ -1,12 +1,11 @@
-use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent};
-
 use crate::config::KeybindingConfig;
-use crate::gui::Gui;
 use crate::gui::popup::{
     ListPickerCore, ListPickerItem, MenuItem, PopupState, make_command_palette_search_textarea,
     make_textarea,
 };
+use crate::gui::{Gui, RemoteOpKind};
+use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent};
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, _keybindings: &KeybindingConfig) -> Result<()> {
     // Enter: view tag commits
@@ -213,7 +212,7 @@ fn confirm_remote_tag_delete(
                 )
             };
 
-            gui.start_remote_op(op_title, &message, move |git| {
+            gui.start_remote_op(RemoteOpKind::Other, op_title, &message, move |git| {
                 git.delete_remote_tag(&remote, &name)?;
                 if delete_local_after_remote {
                     git.delete_tag(&name)?;
@@ -252,6 +251,7 @@ fn push_tag(gui: &mut Gui) -> Result<()> {
             on_confirm: Box::new(move |gui| {
                 let tag = name.clone();
                 gui.start_remote_op(
+                    RemoteOpKind::Other,
                     "Push",
                     &format!("Pushing tag {} to origin...", tag),
                     move |git| {

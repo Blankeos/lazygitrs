@@ -3,8 +3,8 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
-use crate::gui::Gui;
 use crate::gui::popup::{MenuItem, MessageKind, PopupState, make_textarea};
+use crate::gui::{Gui, RemoteOpKind};
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
     // Enter: drill into remote branches
@@ -189,7 +189,7 @@ fn fetch_remote(gui: &mut Gui) -> Result<()> {
         drop(model);
 
         let msg = format!("Fetching {}...", name);
-        gui.start_remote_op("Fetch", &msg, move |git| {
+        gui.start_remote_op(RemoteOpKind::Fetch, "Fetch", &msg, move |git| {
             git.fetch(&name)?;
             Ok(())
         });
@@ -356,9 +356,19 @@ fn fetch_and_checkout(
     remote_name: &str,
     branch_to_checkout: Option<String>,
 ) -> Result<()> {
+    let kind = if branch_to_checkout
+        .as_deref()
+        .is_some_and(|branch| !branch.is_empty())
+    {
+        RemoteOpKind::FetchAndCheckout
+    } else {
+        RemoteOpKind::Fetch
+    };
+
     let remote_name = remote_name.to_string();
     let msg = format!("Fetching {}...", remote_name);
-    gui.start_remote_op("Fetch", &msg, move |git| {
+
+    gui.start_remote_op(kind, "Fetch", &msg, move |git| {
         git.fetch(&remote_name)?;
         if let Some(branch) = branch_to_checkout.as_deref() {
             if !branch.is_empty() {
@@ -367,6 +377,7 @@ fn fetch_and_checkout(
         }
         Ok(())
     });
+
     Ok(())
 }
 
@@ -396,13 +407,13 @@ fn show_push_menu(gui: &mut Gui) -> Result<()> {
                 action: Some(Box::new(move |gui| {
                     let msg = format!("Pushing {} to origin...", b1);
                     if is_tracking {
-                        gui.start_remote_op("Push", &msg, |git| {
+                        gui.start_remote_op(RemoteOpKind::Push, "Push", &msg, |git| {
                             git.push(false)?;
                             Ok(())
                         });
                     } else {
                         let branch = b1.clone();
-                        gui.start_remote_op("Push", &msg, move |git| {
+                        gui.start_remote_op(RemoteOpKind::Push, "Push", &msg, move |git| {
                             git.push_with_upstream("origin", &branch)?;
                             Ok(())
                         });
@@ -415,10 +426,15 @@ fn show_push_menu(gui: &mut Gui) -> Result<()> {
                 description: "Force push with safety check".to_string(),
                 key: Some("f".to_string()),
                 action: Some(Box::new(move |gui| {
-                    gui.start_remote_op("Push", "Force pushing (with lease)...", |git| {
-                        git.push(true)?;
-                        Ok(())
-                    });
+                    gui.start_remote_op(
+                        RemoteOpKind::Push,
+                        "Push",
+                        "Force pushing (with lease)...",
+                        |git| {
+                            git.push(true)?;
+                            Ok(())
+                        },
+                    );
                     Ok(())
                 })),
             },
@@ -429,6 +445,7 @@ fn show_push_menu(gui: &mut Gui) -> Result<()> {
                 action: Some(Box::new(move |gui| {
                     let branch = b2.clone();
                     gui.start_remote_op(
+                        RemoteOpKind::Push,
                         "Push",
                         &format!("Pushing -u origin {}...", branch),
                         move |git| {
@@ -455,10 +472,15 @@ fn show_pull_menu(gui: &mut Gui) -> Result<()> {
                 description: "Pull from upstream".to_string(),
                 key: Some("p".to_string()),
                 action: Some(Box::new(move |gui| {
-                    gui.start_remote_op("Pull", "Pulling from upstream...", |git| {
-                        git.pull()?;
-                        Ok(())
-                    });
+                    gui.start_remote_op(
+                        RemoteOpKind::Pull,
+                        "Pull",
+                        "Pulling from upstream...",
+                        |git| {
+                            git.pull()?;
+                            Ok(())
+                        },
+                    );
                     Ok(())
                 })),
             },
@@ -467,10 +489,15 @@ fn show_pull_menu(gui: &mut Gui) -> Result<()> {
                 description: "Fetch from all remotes".to_string(),
                 key: Some("f".to_string()),
                 action: Some(Box::new(move |gui| {
-                    gui.start_remote_op("Fetch", "Fetching from all remotes...", |git| {
-                        git.fetch_all()?;
-                        Ok(())
-                    });
+                    gui.start_remote_op(
+                        RemoteOpKind::Fetch,
+                        "Fetch",
+                        "Fetching from all remotes...",
+                        |git| {
+                            git.fetch_all()?;
+                            Ok(())
+                        },
+                    );
                     Ok(())
                 })),
             },

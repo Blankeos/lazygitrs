@@ -325,6 +325,319 @@ impl GitCommands {
         }
     }
 
+    pub fn load_model_periodic_refresh_streaming(self: &Arc<Self>, tx: &mpsc::Sender<ModelPart>) {
+        // refreshInterval tracks working-tree file state.
+        {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || {
+                if let Ok(files) = git.load_files_status_only() {
+                    let _ = tx.send(ModelPart::Files(files));
+                }
+            });
+        }
+
+        // Submodule state can also change independently of lazygitrs.
+        {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || {
+                if let Ok(submodules) = git.load_submodules() {
+                    let _ = tx.send(ModelPart::Submodules(submodules));
+                }
+            });
+        }
+    }
+
+    pub fn load_model_after_fetch_streaming(
+        self: &Arc<Self>,
+        tx: &mpsc::Sender<ModelPart>,
+        commit_filter: Option<crate::git::commit::CommitFilter>,
+        previous_tag_remote_state: std::collections::HashMap<String, bool>,
+    ) {
+        macro_rules! spawn_part {
+            ($tx:expr, $self:expr, $variant:ident, $expr:expr) => {{
+                let tx = $tx.clone();
+                let git = Arc::clone($self);
+                std::thread::spawn(move || {
+                    if let Ok(data) = $expr(&git) {
+                        let _ = tx.send(ModelPart::$variant(data));
+                    }
+                });
+            }};
+        }
+
+        // Fetch can change upstream divergence / remote-facing branch state.
+        spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
+
+        // The commits panel walks all refs, so newly fetched history must appear.
+        if let Some(filter) = commit_filter {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || {
+                let unpushed = git.unpushed_commit_hashes().unwrap_or_default();
+                if let Ok(mut commits) =
+                    git.load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, 0)
+                {
+                    Self::apply_unpushed_status(&mut commits, &unpushed);
+                    let _ = tx.send(ModelPart::Commits(commits));
+                }
+            });
+        } else {
+            spawn_part!(tx, self, Commits, |g: &GitCommands| {
+                g.load_commits(DEFAULT_COMMIT_LIMIT)
+            });
+        }
+
+        // Remote-tracking branches can change.
+        spawn_part!(tx, self, Remotes, |g: &GitCommands| g.load_remotes());
+
+        // Refresh local tags without re-querying the remotes we just fetched.
+        {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || {
+                if let Ok(tags) = git.load_tags_after_remote_update(&previous_tag_remote_state) {
+                    let _ = tx.send(ModelPart::Tags(tags));
+                }
+            });
+        }
+    }
+
+    /// Refresh model state that can be affected by a successful pull.
+    ///
+    /// Unlike a full model refresh:
+    /// - stash and repo URL are unchanged and are not reloaded
+    /// - files use status-only loading, avoiding expensive numstat/hunk scans
+    ///
+    /// Other potentially pull-affected state is still refreshed.
+    pub fn load_model_after_pull_streaming(
+        self: &Arc<Self>,
+        tx: &mpsc::Sender<ModelPart>,
+        commit_filter: Option<crate::git::commit::CommitFilter>,
+        previous_tag_remote_state: std::collections::HashMap<String, bool>,
+    ) {
+        macro_rules! spawn_part {
+            ($tx:expr, $self:expr, $variant:ident, $expr:expr) => {{
+                let tx = $tx.clone();
+                let git = Arc::clone($self);
+                std::thread::spawn(move || {
+                    if let Ok(data) = $expr(&git) {
+                        let _ = tx.send(ModelPart::$variant(data));
+                    }
+                });
+            }};
+        }
+
+        // Pull can change HEAD-relative file status, but we don't need the
+        // expensive per-file numstat/hunk scans immediately. The selected diff
+        // is refreshed separately by the GUI.
+        spawn_part!(tx, self, Files, |g: &GitCommands| {
+            g.load_files_status_only()
+        });
+
+        spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
+
+        if let Some(filter) = commit_filter {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || {
+                let unpushed = git.unpushed_commit_hashes().unwrap_or_default();
+                if let Ok(mut commits) =
+                    git.load_filtered_commits_page(&filter, DEFAULT_COMMIT_LIMIT, 0)
+                {
+                    Self::apply_unpushed_status(&mut commits, &unpushed);
+                    let _ = tx.send(ModelPart::Commits(commits));
+                }
+            });
+        } else {
+            spawn_part!(tx, self, Commits, |g: &GitCommands| {
+                g.load_commits(DEFAULT_COMMIT_LIMIT)
+            });
+        }
+
+        spawn_part!(tx, self, Remotes, |g: &GitCommands| g.load_remotes());
+
+        // A pull may auto-follow tags, so keep tags correct for now.
+        // We can remove the redundant ls-remote calls separately once measured.
+        spawn_part!(tx, self, Tags, move |g: &GitCommands| {
+            g.load_tags_after_remote_update(&previous_tag_remote_state)
+        });
+
+        // Pull can move the current worktree's HEAD.
+        spawn_part!(tx, self, Worktrees, |g: &GitCommands| {
+            g.load_worktrees()
+                .or_else(|_| Ok::<_, anyhow::Error>(Vec::new()))
+        });
+
+        // A changed superproject HEAD can change gitlink state.
+        spawn_part!(tx, self, Submodules, |g: &GitCommands| {
+            g.load_submodules()
+                .or_else(|_| Ok::<_, anyhow::Error>(Vec::new()))
+        });
+
+        // Pull moving HEAD changes reflog history.
+        spawn_part!(tx, self, Reflog, |g: &GitCommands| {
+            g.load_reflog(100)
+                .or_else(|_| Ok::<_, anyhow::Error>(Vec::new()))
+        });
+
+        {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || {
+                if let Ok((added, deleted)) = git.diff_shortstat() {
+                    let _ = tx.send(ModelPart::DiffStats { added, deleted });
+                }
+            });
+        }
+
+        {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || {
+                if let Ok(head) = git.head_state() {
+                    let _ = tx.send(ModelPart::Head {
+                        hash: head.hash,
+                        branch_name: head.branch_name,
+                    });
+                }
+            });
+        }
+
+        {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || {
+                let _ = tx.send(ModelPart::Contributors(git.load_contributors(500, 10)));
+            });
+        }
+
+        {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || {
+                if let Ok(status) = git.repo_status() {
+                    let _ = tx.send(ModelPart::RepoStatus {
+                        is_rebasing: status.is_rebasing,
+                        is_merging: status.is_merging,
+                        is_cherry_picking: status.is_cherry_picking,
+                        is_bisecting: status.is_bisecting,
+                        rebase_onto_hash: status.rebase_onto_hash,
+                    });
+                }
+            });
+        }
+    }
+
+    /// Refresh model state that can be affected by a successful checkout.
+    ///
+    /// Checkout can change HEAD-relative files, branch state, commit decorations,
+    /// worktree state, submodule state, reflog, diff stats, contributors, and
+    /// repository status. It cannot change stash, remotes, tags, or the repo URL.
+    pub fn load_model_after_checkout_streaming(
+        self: &Arc<Self>,
+        tx: &mpsc::Sender<ModelPart>,
+        mut commits: Vec<crate::model::Commit>,
+    ) {
+        macro_rules! spawn_part {
+            ($tx:expr, $self:expr, $variant:ident, $expr:expr) => {{
+                let tx = $tx.clone();
+                let git = Arc::clone($self);
+                std::thread::spawn(move || {
+                    if let Ok(data) = $expr(&git) {
+                        let _ = tx.send(ModelPart::$variant(data));
+                    }
+                });
+            }};
+        }
+
+        // Checkout can change HEAD-relative file status, but we don't need the
+        // expensive per-file numstat/hunk scans immediately. The selected diff
+        // is refreshed separately by the GUI.
+        spawn_part!(tx, self, Files, |g: &GitCommands| {
+            g.load_files_status_only()
+        });
+
+        spawn_part!(tx, self, Branches, |g: &GitCommands| g.load_branches());
+
+        {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+
+            std::thread::spawn(move || {
+                // HEAD changes commit decorations, but checkout does not change the
+                // commit graph itself. Reuse the already-loaded history rather than
+                // walking every ref again.
+                if let Ok(head) = git.head_state() {
+                    GitCommands::apply_checkout_head_state(&mut commits, &head);
+
+                    let _ = tx.send(ModelPart::Head {
+                        hash: head.hash,
+                        branch_name: head.branch_name,
+                    });
+                }
+
+                let unpushed = git.unpushed_commit_hashes().unwrap_or_default();
+                GitCommands::apply_unpushed_status(&mut commits, &unpushed);
+
+                let _ = tx.send(ModelPart::Commits(commits));
+            });
+        }
+
+        // Pull can move the current worktree's HEAD.
+        spawn_part!(tx, self, Worktrees, |g: &GitCommands| {
+            g.load_worktrees()
+                .or_else(|_| Ok::<_, anyhow::Error>(Vec::new()))
+        });
+
+        // A changed superproject HEAD can change gitlink state.
+        spawn_part!(tx, self, Submodules, |g: &GitCommands| {
+            g.load_submodules()
+                .or_else(|_| Ok::<_, anyhow::Error>(Vec::new()))
+        });
+
+        // Checkout moving HEAD changes reflog history.
+        spawn_part!(tx, self, Reflog, |g: &GitCommands| {
+            g.load_reflog(100)
+                .or_else(|_| Ok::<_, anyhow::Error>(Vec::new()))
+        });
+
+        {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || {
+                if let Ok((added, deleted)) = git.diff_shortstat() {
+                    let _ = tx.send(ModelPart::DiffStats { added, deleted });
+                }
+            });
+        }
+
+        {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || {
+                let _ = tx.send(ModelPart::Contributors(git.load_contributors(500, 10)));
+            });
+        }
+
+        {
+            let tx = tx.clone();
+            let git = Arc::clone(self);
+            std::thread::spawn(move || {
+                if let Ok(status) = git.repo_status() {
+                    let _ = tx.send(ModelPart::RepoStatus {
+                        is_rebasing: status.is_rebasing,
+                        is_merging: status.is_merging,
+                        is_cherry_picking: status.is_cherry_picking,
+                        is_bisecting: status.is_bisecting,
+                        rebase_onto_hash: status.rebase_onto_hash,
+                    });
+                }
+            });
+        }
+    }
+
     /// Refresh just the working tree files.
     pub fn refresh_files(&self) -> Result<Vec<crate::model::File>> {
         self.load_files()

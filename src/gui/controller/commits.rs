@@ -1,19 +1,18 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use anyhow::Result;
-use crossterm::event::KeyEvent;
-
 use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
 use crate::git::rebase::RebaseAction;
-use crate::gui::Gui;
 use crate::gui::popup::{
     BodySoftWrap, ChecklistItem, CommitInputFocus, CommitInputKind, ListPickerItem, MenuItem,
     MessageKind, PopupState, make_textarea,
 };
+use crate::gui::{Gui, RemoteOpKind};
 use crate::model::Branch;
 use crate::os::platform::Platform;
+use anyhow::Result;
+use crossterm::event::KeyEvent;
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
     // Esc: cancel range select first, then clear active commit filter, then clear clipboard
@@ -213,15 +212,25 @@ fn reword_commit(gui: &mut Gui) -> Result<()> {
                     let message = message.to_string();
                     let hash = hash.clone();
                     if is_head {
-                        gui.start_remote_op("Reword", "Rewording commit...", move |git| {
-                            git.reword_commit(&hash, &message)?;
-                            Ok(())
-                        });
+                        gui.start_remote_op(
+                            RemoteOpKind::Other,
+                            "Reword",
+                            "Rewording commit...",
+                            move |git| {
+                                git.reword_commit(&hash, &message)?;
+                                Ok(())
+                            },
+                        );
                     } else {
-                        gui.start_remote_op("Reword", "Rewording commit...", move |git| {
-                            git.reword_commit_rebase(&hash, &message)?;
-                            Ok(())
-                        });
+                        gui.start_remote_op(
+                            RemoteOpKind::Other,
+                            "Reword",
+                            "Rewording commit...",
+                            move |git| {
+                                git.reword_commit_rebase(&hash, &message)?;
+                                Ok(())
+                            },
+                        );
                     }
                 }
                 Ok(())
@@ -748,10 +757,15 @@ fn amend_to_commit(gui: &mut Gui) -> Result<()> {
                 title: "Amend".to_string(),
                 message: "Amend staged changes to HEAD commit?".to_string(),
                 on_confirm: Box::new(|gui| {
-                    gui.start_remote_op("Amend", "Amending commit...", |git| {
-                        git.amend_commit()?;
-                        Ok(())
-                    });
+                    gui.start_remote_op(
+                        RemoteOpKind::Other,
+                        "Amend",
+                        "Amending commit...",
+                        |git| {
+                            git.amend_commit()?;
+                            Ok(())
+                        },
+                    );
                     Ok(())
                 }),
             };
@@ -766,11 +780,16 @@ fn amend_to_commit(gui: &mut Gui) -> Result<()> {
                 message: format!("Amend staged changes to commit {}?", short),
                 on_confirm: Box::new(move |gui| {
                     let hash = hash.clone();
-                    gui.start_remote_op("Amend", "Amending commit...", move |git| {
-                        git.create_fixup_commit(&hash)?;
-                        git.rebase_autosquash(&format!("{}^", hash))?;
-                        Ok(())
-                    });
+                    gui.start_remote_op(
+                        RemoteOpKind::Other,
+                        "Amend",
+                        "Amending commit...",
+                        move |git| {
+                            git.create_fixup_commit(&hash)?;
+                            git.rebase_autosquash(&format!("{}^", hash))?;
+                            Ok(())
+                        },
+                    );
                     Ok(())
                 }),
             };

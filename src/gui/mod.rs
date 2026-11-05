@@ -168,11 +168,14 @@ const DIFF_PREVIEW_CACHE_ENTRIES: usize = 24;
 const DIFF_PREVIEW_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_CACHED_DIFF_BYTES: usize = 8 * 1024 * 1024;
 /// How many diffs below/above the selection to warm in the preview cache.
+const CHECKOUT_MODEL_PART_COUNT: usize = MODEL_PART_COUNT - 4;
 const DIFF_PREFETCH_AHEAD: usize = 3;
 const DIFF_PREFETCH_BEHIND: usize = 1;
 /// At most this many prefetch loads queued or running at once.
 const DIFF_PREFETCH_INFLIGHT_MAX: usize = 2;
 const DIFF_PREFETCH_WORKERS: usize = 2;
+const FETCH_MODEL_PART_COUNT: usize = 4;
+const PERIODIC_MODEL_PART_COUNT: usize = 2;
 
 fn plain_char_key(key: KeyEvent, expected: char) -> bool {
     let modifiers = if expected.is_uppercase() {
@@ -267,6 +270,15 @@ pub(crate) enum DiffPayload {
     Parsed(crate::pager::side_by_side::ParsedDiff),
     /// No diff to show.
     Empty,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RemoteOpKind {
+    Push,
+    Pull,
+    Fetch,
+    FetchAndCheckout,
+    Other,
 }
 
 struct DiffJob {
@@ -579,6 +591,7 @@ struct CommitPageResult {
 }
 
 const COMMIT_PAGE_PREFETCH_THRESHOLD: usize = 100;
+const PULL_MODEL_PART_COUNT: usize = MODEL_PART_COUNT - 2;
 
 pub struct Gui {
     pub config: Arc<AppConfig>,
@@ -667,9 +680,9 @@ pub struct Gui {
     /// Diff source for the next AI commit message generation.
     ai_commit_source: AiCommitSource,
     /// Receiver for background remote operations (push, pull, fetch).
-    remote_op_rx: mpsc::Receiver<Result<Option<HeadState>>>,
+    remote_op_rx: mpsc::Receiver<(RemoteOpKind, Result<Option<HeadState>>)>,
     /// Sender cloned into background threads for remote operations.
-    remote_op_tx: mpsc::Sender<Result<Option<HeadState>>>,
+    remote_op_tx: mpsc::Sender<(RemoteOpKind, Result<Option<HeadState>>)>,
     /// Async light files refresh (status-only) so Space-spam doesn't freeze.
     files_refresh_rx: Option<mpsc::Receiver<Result<Vec<crate::model::File>>>>,
     files_refresh_in_progress: bool,
@@ -741,6 +754,7 @@ pub struct Gui {
     initial_load_rx: Option<mpsc::Receiver<ModelPart>>,
     /// How many model parts have arrived so far (out of MODEL_PART_COUNT).
     initial_load_received: usize,
+    initial_load_expected: usize,
     /// True while a background `load_model_streaming` refresh is in flight.
     /// Prevents stacking concurrent full refreshes on the UI thread.
     refresh_in_progress: bool,
@@ -965,6 +979,16 @@ impl Gui {
         });
     }
 
+    fn periodic_refresh_due(&self) -> bool {
+        let refresh_interval = self.config.user_config.refresher.refresh_interval;
+
+        self.config.user_config.git.auto_refresh
+            && refresh_interval > 0
+            && !self.refresh_in_progress
+            && self.initial_load_rx.is_none()
+            && self.last_refresh_at.elapsed().as_secs() >= refresh_interval
+    }
+
     fn show_notification(&mut self, notification: PopupState) {
         if self.shell_command_ui_active() || self.deferred_notification_ui_active() {
             // Auto-refresh can report the same failure repeatedly during a
@@ -1107,6 +1131,7 @@ impl Gui {
             model: Arc::new(Mutex::new(model)),
             initial_load_rx: Some(initial_load_rx),
             initial_load_received: 0,
+            initial_load_expected: MODEL_PART_COUNT,
             refresh_in_progress: false,
             context_mgr,
             layout: LayoutState::default(),
@@ -1431,7 +1456,7 @@ impl Gui {
                     self.needs_diff_refresh = true;
                 }
                 // All parts received — done loading.
-                if self.initial_load_received >= MODEL_PART_COUNT {
+                if self.initial_load_received >= self.initial_load_expected {
                     self.initial_load_rx = None;
                     let was_refresh = self.refresh_in_progress;
                     self.refresh_in_progress = false;
@@ -1725,12 +1750,7 @@ impl Gui {
                 break;
             }
 
-            // Background auto-refresh on refresher.refreshInterval (0 = disabled).
-            let refresh_interval = self.config.user_config.refresher.refresh_interval;
-            if self.config.user_config.git.auto_refresh
-                && refresh_interval > 0
-                && self.last_refresh_at.elapsed().as_secs() >= refresh_interval
-            {
+            if self.periodic_refresh_due() && !self.start_background_periodic_refresh() {
                 self.needs_refresh = true;
             }
 
@@ -2251,6 +2271,19 @@ impl Gui {
             if generation_counter.load(Ordering::Relaxed) != generation {
                 return;
             }
+
+            if !stat_cached && !message_cached {
+                if let Ok((message, stat)) = git.commit_details(&hash) {
+                    if let Ok(mut cache) = stat_cache.lock() {
+                        cache.insert(hash.clone(), stat);
+                    }
+                    if let Ok(mut cache) = message_cache.lock() {
+                        cache.insert(hash, message);
+                    }
+                }
+                return;
+            }
+
             if !stat_cached {
                 if let Ok(stat) = git.commit_stat(&hash) {
                     if let Ok(mut cache) = stat_cache.lock() {
@@ -2262,6 +2295,7 @@ impl Gui {
             if generation_counter.load(Ordering::Relaxed) != generation {
                 return;
             }
+
             if !message_cached {
                 if let Ok(message) = git.commit_message_full(&hash) {
                     if let Ok(mut cache) = message_cache.lock() {
@@ -2361,6 +2395,7 @@ impl Gui {
                                 if !msg.is_empty() {
                                     let message = msg.to_string();
                                     gui.start_remote_op(
+                                        RemoteOpKind::Other,
                                         "Commit",
                                         "Creating commit...",
                                         move |git| {
@@ -2612,14 +2647,16 @@ impl Gui {
         });
     }
 
-    /// Collect auto-fetch completions. Success triggers a full refresh so the
-    /// branches/commits panes reflect any new upstream commits. Failures
-    /// (offline, auth prompt suppressed, etc.) are intentionally silent —
-    /// surfacing them as popups every 60s would be worse than missing data.
+    /// Collect auto-fetch completions. When refs changed, reuse the targeted
+    /// fetch refresh rather than reloading the entire model. Failures
+    /// (offline, auth prompt suppressed, etc.) remain intentionally silent.
     fn receive_auto_fetch_results(&mut self) {
         while let Ok(result) = self.auto_fetch_rx.try_recv() {
             self.auto_fetch_in_flight = false;
-            if matches!(result, Ok(true)) {
+
+            if matches!(result, Ok(true)) && !self.start_background_fetch_refresh() {
+                // Another model refresh is already in flight. Queue the normal
+                // refresh rather than risk leaving stale remote state.
                 self.needs_refresh = true;
             }
         }
@@ -2632,7 +2669,7 @@ impl Gui {
         if self.shell_command_ui_active() || self.deferred_notification_ui_active() {
             return;
         }
-        if let Ok(result) = self.remote_op_rx.try_recv() {
+        if let Ok((kind, result)) = self.remote_op_rx.try_recv() {
             self.remote_op_label = None;
             match result {
                 Ok(head) => {
@@ -2646,7 +2683,30 @@ impl Gui {
                         model.head_branch_name = head.branch_name;
                         self.needs_diff_refresh = true;
                     }
-                    self.needs_refresh = true;
+                    match kind {
+                        RemoteOpKind::Push => {
+                            if self.refresh_after_push().is_err() {
+                                // Fall back to the existing full refresh if the
+                                // targeted post-push refresh fails.
+                                self.needs_refresh = true;
+                            }
+                        }
+                        RemoteOpKind::Pull => {
+                            if !self.start_background_pull_refresh() {
+                                // Another model refresh is already in flight. Queue the
+                                // normal refresh rather than risk leaving stale state.
+                                self.needs_refresh = true;
+                            }
+                        }
+                        RemoteOpKind::Fetch => {
+                            if !self.start_background_fetch_refresh() {
+                                self.needs_refresh = true;
+                            }
+                        }
+                        RemoteOpKind::FetchAndCheckout | RemoteOpKind::Other => {
+                            self.needs_refresh = true;
+                        }
+                    }
                     self.remote_op_success_at = Some(Instant::now());
                     if was_checkout {
                         // A pre-checkout stream must not overwrite confirmed HEAD
@@ -2658,7 +2718,9 @@ impl Gui {
                         self.needs_files_refresh = false;
                         // Dispatch before the next paint/input wait, not after an
                         // idle 50/200ms poll. HEAD is already visible above.
-                        self.start_background_refresh();
+                        if !self.start_background_checkout_refresh() {
+                            self.needs_refresh = true;
+                        }
                     }
                 }
                 Err(e) => {
@@ -2698,6 +2760,36 @@ impl Gui {
                 }
             }
         }
+    }
+
+    fn refresh_after_push(&mut self) -> Result<()> {
+        let branches = self.git.load_branches()?;
+        let remotes = self.git.load_remotes()?;
+        let unpushed = self.git.unpushed_commit_hashes()?;
+
+        {
+            let mut model = self.model.lock().unwrap();
+
+            model.branches = branches;
+            model.remotes = remotes;
+            GitCommands::apply_unpushed_status(&mut model.commits, &unpushed);
+
+            if !self.remote_branches_name.is_empty() {
+                let refreshed = model
+                    .remotes
+                    .iter()
+                    .find(|remote| remote.name == self.remote_branches_name)
+                    .map(|remote| remote.branches.clone());
+
+                if let Some(branches) = refreshed {
+                    model.sub_remote_branches = branches;
+                }
+            }
+        }
+
+        self.last_refresh_at = Instant::now();
+
+        Ok(())
     }
 
     /// Kick off a status-only files refresh on a background thread.
@@ -2928,7 +3020,7 @@ impl Gui {
 
     /// Run a remote operation (push/pull/fetch) on a background thread.
     /// Non-blocking: corner toast + branch-side label; input stays free (like AI commit).
-    pub fn start_remote_op<F>(&mut self, title: &str, _message: &str, op: F)
+    pub fn start_remote_op<F>(&mut self, kind: RemoteOpKind, title: &str, _message: &str, op: F)
     where
         F: FnOnce(&GitCommands) -> Result<()> + Send + 'static,
     {
@@ -2943,11 +3035,14 @@ impl Gui {
             "Fetch" => "Fetching",
             other => other,
         };
+
         self.remote_op_label = Some(label.to_string());
         self.remote_op_success_at = None;
+
         let git = Arc::clone(&self.git);
         let tx = self.remote_op_tx.clone();
         let is_checkout = self.pending_checkout_by_name.is_some();
+
         std::thread::spawn(move || {
             let result = op(&git).map(|()| {
                 if is_checkout {
@@ -2958,7 +3053,8 @@ impl Gui {
                     None
                 }
             });
-            let _ = tx.send(result);
+
+            let _ = tx.send((kind, result));
         });
     }
 
@@ -8725,6 +8821,7 @@ impl Gui {
         let (tx, rx) = mpsc::channel();
         self.initial_load_rx = Some(rx);
         self.initial_load_received = 0;
+        self.initial_load_expected = MODEL_PART_COUNT;
         self.refresh_in_progress = true;
         self.needs_refresh = false;
         self.reset_commit_pagination();
@@ -8734,6 +8831,61 @@ impl Gui {
         std::thread::spawn(move || {
             git.load_model_streaming(&tx, commit_filter);
         });
+    }
+
+    fn start_background_periodic_refresh(&mut self) -> bool {
+        if self.refresh_in_progress || self.initial_load_rx.is_some() {
+            return false;
+        }
+
+        let (tx, rx) = mpsc::channel();
+
+        self.initial_load_rx = Some(rx);
+        self.initial_load_received = 0;
+        self.initial_load_expected = PERIODIC_MODEL_PART_COUNT;
+        self.refresh_in_progress = true;
+
+        let git = Arc::clone(&self.git);
+
+        std::thread::spawn(move || {
+            git.load_model_periodic_refresh_streaming(&tx);
+        });
+
+        true
+    }
+
+    fn start_background_fetch_refresh(&mut self) -> bool {
+        if self.refresh_in_progress || self.initial_load_rx.is_some() {
+            return false;
+        }
+
+        let (tx, rx) = mpsc::channel();
+
+        self.initial_load_rx = Some(rx);
+        self.initial_load_received = 0;
+        self.initial_load_expected = FETCH_MODEL_PART_COUNT;
+        self.refresh_in_progress = true;
+        self.needs_refresh = false;
+
+        self.reset_commit_pagination();
+
+        let previous_tag_remote_state = {
+            let model = self.model.lock().unwrap();
+            model
+                .tags
+                .iter()
+                .map(|tag| (tag.name.clone(), tag.on_remote))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+
+        let git = Arc::clone(&self.git);
+        let commit_filter = self.commit_filter_for_load();
+
+        std::thread::spawn(move || {
+            git.load_model_after_fetch_streaming(&tx, commit_filter, previous_tag_remote_state);
+        });
+
+        true
     }
 
     fn commit_filter_for_load(&self) -> Option<crate::git::commit::CommitFilter> {
@@ -8863,6 +9015,76 @@ impl Gui {
         }
 
         Ok(())
+    }
+
+    /// Kick off the model refresh required after a successful checkout.
+    fn start_background_checkout_refresh(&mut self) -> bool {
+        if self.refresh_in_progress || self.initial_load_rx.is_some() {
+            return false;
+        }
+
+        let (tx, rx) = mpsc::channel();
+
+        self.initial_load_rx = Some(rx);
+        self.initial_load_received = 0;
+        self.initial_load_expected = CHECKOUT_MODEL_PART_COUNT;
+        self.refresh_in_progress = true;
+        self.needs_refresh = false;
+
+        self.reset_commit_pagination();
+        self.diff_preview_cache.retain_immutable();
+
+        let commits = {
+            let model = self.model.lock().unwrap();
+            model.commits.clone()
+        };
+
+        let git = Arc::clone(&self.git);
+
+        std::thread::spawn(move || {
+            git.load_model_after_checkout_streaming(&tx, commits);
+        });
+
+        true
+    }
+
+    /// Kick off the model refresh required after a successful pull.
+    ///
+    /// Reuses the normal streaming ModelPart path, but avoids reloading state
+    /// that pull cannot affect and avoids expensive per-file diff-stat scans.
+    fn start_background_pull_refresh(&mut self) -> bool {
+        if self.refresh_in_progress || self.initial_load_rx.is_some() {
+            return false;
+        }
+
+        let (tx, rx) = mpsc::channel();
+
+        self.initial_load_rx = Some(rx);
+        self.initial_load_received = 0;
+        self.initial_load_expected = PULL_MODEL_PART_COUNT;
+        self.refresh_in_progress = true;
+        self.needs_refresh = false;
+
+        self.reset_commit_pagination();
+        self.diff_preview_cache.retain_immutable();
+
+        let previous_tag_remote_state = {
+            let model = self.model.lock().unwrap();
+            model
+                .tags
+                .iter()
+                .map(|tag| (tag.name.clone(), tag.on_remote))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+
+        let git = Arc::clone(&self.git);
+        let commit_filter = self.commit_filter_for_load();
+
+        std::thread::spawn(move || {
+            git.load_model_after_pull_streaming(&tx, commit_filter, previous_tag_remote_state);
+        });
+
+        true
     }
 
     /// Lightweight refresh that only reloads files and diff stats.
@@ -9735,7 +9957,10 @@ mod terminal_mouse_tests {
             assert_eq!(gui.deferred_notifications.len(), 2);
             gui.remote_op_label = Some("Fetch".into());
             gui.remote_op_tx
-                .send(Err(anyhow::anyhow!("queued fetch failure")))
+                .send((
+                    RemoteOpKind::Fetch,
+                    Err(anyhow::anyhow!("queued fetch failure")),
+                ))
                 .unwrap();
             gui.receive_deferred_notifications();
             gui.receive_remote_op_results();
@@ -9924,7 +10149,10 @@ mod terminal_mouse_tests {
             })
             .unwrap();
         gui.remote_op_tx
-            .send(Err(anyhow::anyhow!("concurrent fetch failed")))
+            .send((
+                RemoteOpKind::Fetch,
+                Err(anyhow::anyhow!("concurrent fetch failed")),
+            ))
             .unwrap();
         gui.handle_key(parse_key(":").unwrap()).unwrap();
         gui.handle_paste("printf shell-result".into());
@@ -9977,7 +10205,7 @@ mod terminal_mouse_tests {
         let mut gui = tree_test_gui(&repo);
         gui.remote_op_label = Some("Fetch".into());
         gui.remote_op_tx
-            .send(Err(anyhow::anyhow!("fetch failed")))
+            .send((RemoteOpKind::Fetch, Err(anyhow::anyhow!("fetch failed"))))
             .unwrap();
         start_test_custom_command(&mut gui, "printf shell-result", true);
         gui.receive_remote_op_results();
@@ -10532,7 +10760,7 @@ mod terminal_mouse_tests {
         assert!(gui.refresh_in_progress);
         assert_eq!(gui.initial_load_received, 0);
         let parts: Vec<_> = gui.initial_load_rx.take().unwrap().into_iter().collect();
-        assert_eq!(parts.len(), MODEL_PART_COUNT);
+        assert_eq!(parts.len(), CHECKOUT_MODEL_PART_COUNT);
         assert!(parts.iter().any(|part| matches!(
             part, ModelPart::Head { branch_name, .. } if branch_name == "main"
         )));
@@ -10556,17 +10784,198 @@ mod terminal_mouse_tests {
     }
 
     #[test]
-    fn ordinary_remote_operation_keeps_normal_refresh_behavior() {
+    fn periodic_refresh_uses_targeted_model_parts() {
+        let repo = TempRepo::new("periodic-targeted-refresh");
+        let mut gui = checkout_test_gui(&repo);
+
+        assert!(gui.start_background_periodic_refresh());
+        assert!(gui.refresh_in_progress);
+        assert!(gui.initial_load_rx.is_some());
+        assert_eq!(gui.initial_load_expected, PERIODIC_MODEL_PART_COUNT);
+
+        let parts: Vec<_> = gui.initial_load_rx.take().unwrap().into_iter().collect();
+
+        assert_eq!(parts.len(), PERIODIC_MODEL_PART_COUNT);
+        assert!(parts.iter().any(|part| matches!(part, ModelPart::Files(_))));
+        assert!(
+            parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::Submodules(_)))
+        );
+    }
+
+    #[test]
+    fn periodic_refresh_does_not_requeue_while_refresh_is_running() {
+        let repo = TempRepo::new("periodic-refresh-no-requeue");
+        let mut gui = checkout_test_gui(&repo);
+
+        let mut config = crate::config::AppConfig::default();
+        config.user_config.git.auto_refresh = true;
+        config.user_config.refresher.refresh_interval = 1;
+        gui.config = Arc::new(config);
+
+        gui.last_refresh_at = Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
+
+        assert!(gui.periodic_refresh_due());
+
+        gui.refresh_in_progress = true;
+
+        assert!(!gui.periodic_refresh_due());
+    }
+
+    #[test]
+    fn checkout_uses_targeted_background_refresh() {
+        let repo = TempRepo::new("checkout-targeted-refresh");
+        let mut gui = checkout_test_gui(&repo);
+
+        request_test_checkout(&mut gui, ' ', "main");
+        wait_for_test_checkout(&mut gui);
+
+        assert!(!gui.needs_refresh);
+        assert!(gui.refresh_in_progress);
+        assert!(gui.initial_load_rx.is_some());
+        assert_eq!(gui.initial_load_expected, CHECKOUT_MODEL_PART_COUNT);
+
+        let parts: Vec<_> = gui.initial_load_rx.take().unwrap().into_iter().collect();
+
+        assert_eq!(parts.len(), CHECKOUT_MODEL_PART_COUNT);
+
+        assert!(
+            parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::Commits(_)))
+        );
+
+        assert!(!parts.iter().any(|part| matches!(part, ModelPart::Stash(_))));
+        assert!(
+            !parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::Remotes(_)))
+        );
+        assert!(!parts.iter().any(|part| matches!(part, ModelPart::Tags(_))));
+        assert!(
+            !parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::RepoUrl(_)))
+        );
+    }
+
+    #[test]
+    fn fetch_and_checkout_keeps_normal_refresh_behavior() {
         let repo = TempRepo::new("remote-op-refresh");
         let mut gui = checkout_test_gui(&repo);
         let head = repo.git(&["rev-parse", "HEAD"]);
-        gui.start_remote_op("Fetch", "", |_| Ok(()));
+
+        gui.start_remote_op(RemoteOpKind::FetchAndCheckout, "Fetch", "", |_| Ok(()));
+
         wait_for_test_checkout(&mut gui);
+
         assert_checkout_head(&gui, "feature", &head);
         assert!(gui.needs_refresh);
         assert!(!gui.refresh_in_progress);
         assert!(gui.initial_load_rx.is_none());
         assert!(matches!(gui.popup, PopupState::None));
+    }
+
+    #[test]
+    fn fetch_uses_targeted_background_refresh() {
+        let repo = TempRepo::new("fetch-targeted-refresh");
+        let mut gui = checkout_test_gui(&repo);
+
+        gui.start_remote_op(RemoteOpKind::Fetch, "Fetch", "", |_| Ok(()));
+        wait_for_test_checkout(&mut gui);
+
+        assert!(!gui.needs_refresh);
+        assert!(gui.refresh_in_progress);
+        assert!(gui.initial_load_rx.is_some());
+        assert_eq!(gui.initial_load_expected, FETCH_MODEL_PART_COUNT);
+
+        let parts: Vec<_> = gui.initial_load_rx.take().unwrap().into_iter().collect();
+
+        assert_eq!(parts.len(), FETCH_MODEL_PART_COUNT);
+
+        assert!(
+            parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::Branches(_)))
+        );
+        assert!(
+            parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::Commits(_)))
+        );
+        assert!(
+            parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::Remotes(_)))
+        );
+        assert!(parts.iter().any(|part| matches!(part, ModelPart::Tags(_))));
+        assert!(!parts.iter().any(|part| matches!(part, ModelPart::Files(_))));
+        assert!(!parts.iter().any(|part| matches!(part, ModelPart::Stash(_))));
+        assert!(
+            !parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::Head { .. }))
+        );
+        assert!(
+            !parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::DiffStats { .. }))
+        );
+    }
+
+    #[test]
+    fn auto_fetch_uses_targeted_background_refresh() {
+        let repo = TempRepo::new("auto-fetch-targeted-refresh");
+        let mut gui = checkout_test_gui(&repo);
+
+        gui.auto_fetch_in_flight = true;
+        gui.auto_fetch_tx.send(Ok(true)).unwrap();
+
+        gui.receive_auto_fetch_results();
+
+        assert!(!gui.auto_fetch_in_flight);
+        assert!(!gui.needs_refresh);
+        assert!(gui.refresh_in_progress);
+        assert!(gui.initial_load_rx.is_some());
+        assert_eq!(gui.initial_load_expected, FETCH_MODEL_PART_COUNT);
+
+        // Drain the targeted refresh so its worker threads finish before the
+        // temporary repository is dropped.
+        let parts: Vec<_> = gui.initial_load_rx.take().unwrap().into_iter().collect();
+
+        assert_eq!(parts.len(), FETCH_MODEL_PART_COUNT);
+    }
+
+    #[test]
+    fn pull_uses_targeted_background_refresh() {
+        let repo = TempRepo::new("pull-targeted-refresh");
+        let mut gui = checkout_test_gui(&repo);
+
+        gui.start_remote_op(RemoteOpKind::Pull, "Pull", "", |_| Ok(()));
+        wait_for_test_checkout(&mut gui);
+
+        // Pull should start the targeted streaming refresh instead of queueing
+        // the normal full-model refresh.
+        assert!(!gui.needs_refresh);
+        assert!(gui.refresh_in_progress);
+        assert!(gui.initial_load_rx.is_some());
+        assert_eq!(gui.initial_load_expected, PULL_MODEL_PART_COUNT);
+
+        // Drain the targeted refresh so its worker threads finish before this
+        // test drops the temporary repository.
+        let parts: Vec<_> = gui.initial_load_rx.take().unwrap().into_iter().collect();
+
+        assert_eq!(parts.len(), PULL_MODEL_PART_COUNT);
+
+        // These are deliberately omitted from post-pull refreshes because a
+        // successful pull cannot change them.
+        assert!(!parts.iter().any(|part| matches!(part, ModelPart::Stash(_))));
+        assert!(
+            !parts
+                .iter()
+                .any(|part| matches!(part, ModelPart::RepoUrl(_)))
+        );
     }
 
     #[test]
@@ -10576,7 +10985,9 @@ mod terminal_mouse_tests {
         repo.git(&["checkout", "main"]);
         gui.remote_op_label = Some("Checking out".into());
         gui.pending_checkout_by_name = Some("main".into());
-        gui.remote_op_tx.send(Ok(None)).unwrap();
+        gui.remote_op_tx
+            .send((RemoteOpKind::Other, Ok(None)))
+            .unwrap();
         gui.receive_remote_op_results();
         assert!(matches!(gui.popup, PopupState::None));
         assert!(gui.pending_checkout_by_name.is_none());

@@ -1,11 +1,10 @@
-use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent};
-
 use crate::config::KeybindingConfig;
 use crate::config::keybindings::parse_key;
-use crate::gui::Gui;
 use crate::gui::popup::{MenuItem, MessageKind, PopupState, make_textarea};
+use crate::gui::{Gui, RemoteOpKind};
 use crate::os::platform::Platform;
+use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent};
 
 pub fn handle_key(gui: &mut Gui, key: KeyEvent, keybindings: &KeybindingConfig) -> Result<()> {
     if super::commits::matches_key(key, &keybindings.commits.open_log_menu) {
@@ -209,6 +208,7 @@ fn start_async_checkout(gui: &mut Gui, name: String) {
     // displayed branch. Successful completion triggers the normal model refresh.
     gui.pending_checkout_by_name = Some(name.clone());
     gui.start_remote_op(
+        RemoteOpKind::Other,
         "Checking out",
         &format!("Checking out {}", name),
         move |git| {
@@ -601,6 +601,7 @@ fn fast_forward(gui: &mut Gui) -> Result<()> {
             let name = branch.name.clone();
             drop(model);
             gui.start_remote_op(
+                RemoteOpKind::Fetch,
                 "Fetch",
                 &format!("Fetching origin for {}...", name),
                 |git| {
@@ -626,6 +627,7 @@ fn set_upstream(gui: &mut Gui) -> Result<()> {
             on_confirm: Box::new(move |gui| {
                 let branch = name.clone();
                 gui.start_remote_op(
+                    RemoteOpKind::Push,
                     "Push",
                     &format!("Pushing -u origin {}...", branch),
                     move |git| {
