@@ -781,6 +781,11 @@ impl ColorTheme {
             return Theme::dark();
         }
 
+        // Try user themes loaded at runtime first so users can override built-in themes
+        if let Some(theme) = load_user_theme(&self.id) {
+            return theme;
+        }
+
         // Try embedded themes (generated + custom built-in)
         for dir in &[&GENERATED_THEMES_DIR, &CUSTOM_THEMES_DIR] {
             for file in dir.files() {
@@ -795,11 +800,6 @@ impl ColorTheme {
                     }
                 }
             }
-        }
-
-        // Try user themes loaded at runtime
-        if let Some(theme) = load_user_theme(&self.id) {
-            return theme;
         }
 
         Theme::dark()
@@ -823,7 +823,20 @@ pub fn load_color_themes() -> Vec<ColorTheme> {
     });
     seen_ids.insert("default".to_string());
 
-    // 2. Embedded themes (generated + custom built-in)
+    // 2. User themes from ~/.config/lazygitrs/themes/ (or lazygit/); these take precedence over embedded themes
+    if let Some(user_themes) = discover_user_themes() {
+        for (id, name, appearance) in user_themes {
+            if seen_ids.insert(id.clone()) {
+                themes.push(ColorTheme {
+                    name,
+                    id,
+                    appearance,
+                });
+            }
+        }
+    }
+
+    // 3. Embedded themes (generated + custom built-in)
     for dir in &[&GENERATED_THEMES_DIR, &CUSTOM_THEMES_DIR] {
         for file in dir.files() {
             if file.path().extension().and_then(|e| e.to_str()) != Some("json") {
@@ -839,19 +852,6 @@ pub fn load_color_themes() -> Vec<ColorTheme> {
                         });
                     }
                 }
-            }
-        }
-    }
-
-    // 3. User themes from ~/.config/lazygit/themes/
-    if let Some(user_themes) = discover_user_themes() {
-        for (id, name, appearance) in user_themes {
-            if seen_ids.insert(id.clone()) {
-                themes.push(ColorTheme {
-                    name,
-                    id,
-                    appearance,
-                });
             }
         }
     }
@@ -1028,5 +1028,25 @@ fn parse_color(s: &str) -> Option<Color> {
             Some(Color::Rgb(r, g, b))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_white_theme_loaded_and_light() {
+        // Parse the embedded file directly: `load_color_themes()` and
+        // `ColorTheme::to_theme()` also read the user's real themes dir, which would let a
+        // local `white.json` change this result.
+        let json: ThemeJson = serde_json::from_str(include_str!("../themes/white.json")).unwrap();
+        assert_eq!(json.id, "white");
+        assert_eq!(json.name, "White");
+        assert_eq!(json.resolved_appearance(), ThemeAppearance::Light);
+
+        let theme = json.to_theme();
+        assert_eq!(theme.text, Color::Rgb(0, 0, 0));
+        assert_eq!(theme.accent, Color::Rgb(0, 0, 0));
     }
 }
