@@ -823,7 +823,7 @@ pub fn load_color_themes() -> Vec<ColorTheme> {
     });
     seen_ids.insert("default".to_string());
 
-    // 2. User themes from ~/.config/lazygit/themes/ (takes precedence over embedded themes)
+    // 2. User themes from ~/.config/lazygitrs/themes/ (or lazygit/); these take precedence over embedded themes
     if let Some(user_themes) = discover_user_themes() {
         for (id, name, appearance) in user_themes {
             if seen_ids.insert(id.clone()) {
@@ -1037,14 +1037,15 @@ mod tests {
 
     #[test]
     fn test_white_theme_loaded_and_light() {
-        let themes = load_color_themes();
-        let white = themes.iter().find(|t| t.id == "white");
-        assert!(white.is_some(), "white theme should be available");
-        let white = white.unwrap();
-        assert_eq!(white.name, "White");
-        assert_eq!(white.appearance, ThemeAppearance::Light);
+        // Parse the embedded file directly: `load_color_themes()` and
+        // `ColorTheme::to_theme()` also read the user's real themes dir, which would let a
+        // local `white.json` change this result.
+        let json: ThemeJson = serde_json::from_str(include_str!("../themes/white.json")).unwrap();
+        assert_eq!(json.id, "white");
+        assert_eq!(json.name, "White");
+        assert_eq!(json.resolved_appearance(), ThemeAppearance::Light);
 
-        let theme = white.to_theme();
+        let theme = json.to_theme();
         assert_eq!(theme.text, Color::Rgb(0, 0, 0));
         assert_eq!(theme.accent, Color::Rgb(0, 0, 0));
     }

@@ -198,7 +198,7 @@ lazygitrs ships with 30+ built-in color themes (Catppuccin, Dracula, Tokyo Night
 
 **Unlike original lazygit, you can switch themes without touching any config file** — just press `?` > **Color Themes** > Enter. Your choice is saved automatically.
 
-**Custom themes:** Drop a `.json` file into `~/.config/lazygitrs/themes/` and it appears in the picker. Start by copying an existing theme from `src/generated_themes/` and tweaking the colors. The format is a flat JSON with all fields optional (unset values are derived from semantic base colors like `primary`, `success`, `error`):
+**Custom themes:** Drop a `.json` file into `~/.config/lazygitrs/themes/` and it appears in the picker. A custom theme with the same `id` as a built-in one replaces it. Start by copying an existing theme from `src/generated_themes/` and tweaking the colors. The format is a flat JSON with all fields optional (unset values are derived from semantic base colors like `primary`, `success`, `error`):
 
 ```json
 {
