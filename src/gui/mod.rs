@@ -2809,12 +2809,16 @@ impl Gui {
             Ok(Err(err)) => {
                 self.files_refresh_rx = None;
                 self.files_refresh_in_progress = false;
+                // The eager diff refresh was dropped from the stage handlers, so reload
+                // the diff from real git state even though the status refresh failed.
+                self.needs_diff_refresh = true;
                 self.show_error("Refresh failed", err);
             }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.files_refresh_rx = None;
                 self.files_refresh_in_progress = false;
+                self.needs_diff_refresh = true;
             }
         }
     }
@@ -9711,6 +9715,10 @@ mod terminal_mouse_tests {
             gui.receive_files_refresh();
             assert!(!gui.files_refresh_in_progress);
             assert!(gui.files_refresh_rx.is_none());
+            assert!(
+                gui.needs_diff_refresh,
+                "a failed status refresh must still reload the diff"
+            );
             // Repeated auto-refresh failures are coalesced while the shell is open.
             gui.show_error("Refresh failed", anyhow::anyhow!("refresh fixture failure"));
             assert_eq!(gui.deferred_notifications.len(), 1);

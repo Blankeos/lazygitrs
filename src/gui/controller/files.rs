@@ -161,7 +161,6 @@ fn toggle_stage(gui: &mut Gui) -> Result<()> {
                 }
                 drop(model);
                 gui.rebuild_file_tree_from_model();
-                gui.needs_diff_refresh = true;
 
                 if !to_stage.is_empty() {
                     gui.enqueue_stage_then_refresh(to_stage, true);
@@ -194,7 +193,6 @@ fn toggle_stage(gui: &mut Gui) -> Result<()> {
         }
         drop(model);
         gui.rebuild_file_tree_from_model();
-        gui.needs_diff_refresh = true;
 
         if should_stage {
             gui.enqueue_stage_then_refresh(vec![add_path], true);
@@ -226,7 +224,6 @@ fn toggle_stage_all(gui: &mut Gui) -> Result<()> {
     }
     drop(model);
     gui.rebuild_file_tree_from_model();
-    gui.needs_diff_refresh = true;
     gui.enqueue_stage_all_then_refresh(stage);
     Ok(())
 }
