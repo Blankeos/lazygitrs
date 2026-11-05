@@ -40,6 +40,7 @@ pub struct FrameLayout {
     /// - In Full mode (sidebar focused) it sits above the sidebar (vertical layout).
     /// - In Portrait mode it is not shown.
     pub commit_details_panel: Option<Rect>,
+    pub grab_column: Option<Rect>,
 }
 
 /// Height for the status panel (always compact: 1 content line + 2 border lines).
@@ -93,6 +94,7 @@ pub fn compute_layout_with_details(
                 status_bar,
                 portrait: false,
                 commit_details_panel: Some(vertical[0]),
+                grab_column: None,
             };
         }
         return FrameLayout {
@@ -101,6 +103,7 @@ pub fn compute_layout_with_details(
             status_bar,
             portrait: false,
             commit_details_panel: None,
+            grab_column: None,
         };
     }
 
@@ -121,6 +124,7 @@ pub fn compute_layout_with_details(
                 status_bar,
                 portrait: true,
                 commit_details_panel: None,
+                grab_column: None,
             };
         }
 
@@ -132,6 +136,7 @@ pub fn compute_layout_with_details(
                 status_bar,
                 portrait: true,
                 commit_details_panel: None,
+                grab_column: None,
             };
         }
 
@@ -186,6 +191,7 @@ pub fn compute_layout_with_details(
             status_bar,
             portrait: true,
             commit_details_panel: None,
+            grab_column: None,
         };
     }
 
@@ -210,6 +216,7 @@ pub fn compute_layout_with_details(
             status_bar,
             portrait: false,
             commit_details_panel: None,
+            grab_column: None,
         };
     }
 
@@ -221,16 +228,22 @@ pub fn compute_layout_with_details(
             status_bar,
             portrait: false,
             commit_details_panel: None,
+            grab_column: None,
         };
     }
 
     let horizontal = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(side_width), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(side_width),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
         .split(main_area);
 
     let side_area = horizontal[0];
-    let main_panel = horizontal[1];
+    let grab_area = horizontal[1];
+    let main_panel = horizontal[2];
 
     let side_panels = split_side_panels(side_area, panel_count, active_panel_index);
 
@@ -264,6 +277,7 @@ pub fn compute_layout_with_details(
             status_bar,
             portrait: false,
             commit_details_panel: Some(details_rect),
+            grab_column: Some(grab_area),
         },
         None => FrameLayout {
             side_panels,
@@ -271,6 +285,7 @@ pub fn compute_layout_with_details(
             status_bar,
             portrait: false,
             commit_details_panel: None,
+            grab_column: Some(grab_area),
         },
     }
 }
