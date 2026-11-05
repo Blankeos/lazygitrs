@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 pub use app_state::AppState;
-pub use keybindings::KeybindingConfig;
+pub use keybindings::{KeybindingConfig, matches_key};
 pub use theme::{COLOR_THEMES, ColorTheme, Theme, ThemeAppearance};
 pub use user_config::UserConfig;
 
