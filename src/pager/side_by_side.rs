@@ -2529,6 +2529,15 @@ pub fn render_diff(
             );
         }
     }
+    crate::gui::scroll::render_scrollbar(
+        frame.buffer_mut(),
+        area,
+        state.total_scroll_rows(),
+        visible_height,
+        state.scroll_offset,
+        true,
+        border_style,
+    );
     render_inline_image_regions(frame, area, inner, state, theme);
 }
 
@@ -4935,5 +4944,42 @@ mod tests {
         assert_eq!(paths.old.as_deref(), Some("assets/old name.png"));
         assert_eq!(paths.new.as_deref(), Some("assets/new name.png"));
         assert_eq!(sections[1].0, "text.txt");
+    }
+
+    #[test]
+    fn diff_border_renders_scrollbar_on_right_border() {
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut state = DiffViewState::new();
+        state.filename = "file.txt".to_string();
+        state.lines = (0..50).map(|_| diff_line(ChangeType::Equal)).collect();
+        state.scroll_offset = 0;
+
+        terminal
+            .draw(|frame| {
+                render_diff(
+                    frame,
+                    Rect::new(0, 0, 40, 10),
+                    &mut state,
+                    &Theme::dark(),
+                    true,
+                    false,
+                    false,
+                );
+            })
+            .expect("diff should render");
+
+        let buffer = terminal.backend().buffer();
+        // The right border column is at x = 39. Rows 1..=8 are the inner border cells.
+        let right_border: Vec<String> = (1..9)
+            .map(|y| buffer[(39, y)].symbol().to_string())
+            .collect();
+
+        // There should be at least one '▐' (Right Half Block) scrollbar character rendered on the right border
+        assert!(
+            right_border.iter().any(|c| c == "▐"),
+            "Expected scrollbar '▐' on right border, but got: {:?}",
+            right_border
+        );
     }
 }
