@@ -52,9 +52,58 @@ impl Default for RefresherConfig {
     }
 }
 
+pub(crate) fn expand_tilde(path_str: &str) -> std::path::PathBuf {
+    if let Some(stripped) = path_str.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(stripped);
+        }
+    } else if path_str == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return home;
+        }
+    }
+    std::path::PathBuf::from(path_str)
+}
+
 impl UserConfig {
-    pub fn load(config_dir: &Path) -> Result<Self> {
-        let config_path = config_dir.join("config.yml");
+    pub fn load(config_dir: &Path, config_override: Option<&String>) -> Result<Self> {
+        let mut config_path = if config_dir.join("config.yml").exists() {
+            config_dir.join("config.yml")
+        } else if config_dir.join("config.yaml").exists() {
+            config_dir.join("config.yaml")
+        } else {
+            config_dir.join("config.yml")
+        };
+
+        if let Some(over) = config_override {
+            let expanded_path = expand_tilde(over);
+            if expanded_path.is_absolute()
+                || over.ends_with(".yml")
+                || over.ends_with(".yaml")
+                || expanded_path.exists()
+            {
+                config_path = expanded_path;
+            } else {
+                let preset_yaml = config_dir.join("presets").join(format!("{}.yaml", over));
+                let preset_yml = config_dir.join("presets").join(format!("{}.yml", over));
+                if preset_yaml.exists() {
+                    config_path = preset_yaml;
+                } else if preset_yml.exists() {
+                    config_path = preset_yml;
+                } else {
+                    anyhow::bail!(
+                        "Config file or preset not found: '{}' (checked relative, absolute, and presets in {})",
+                        over,
+                        config_dir.display()
+                    );
+                }
+            }
+
+            if !config_path.exists() {
+                anyhow::bail!("Config file not found at: {}", config_path.display());
+            }
+        }
+
         if config_path.exists() {
             let contents = std::fs::read_to_string(&config_path)?;
             let config: UserConfig = serde_yaml::from_str(&contents)?;
@@ -628,4 +677,27 @@ pub struct CustomCommandPrompt {
     pub key: Option<String>,
     pub command: Option<String>,
     pub filter: Option<String>,
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_expand_tilde() {
+        let expanded = expand_tilde("~/test/path");
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(expanded, home.join("test/path"));
+        }
+    }
+
+    #[test]
+    fn test_load_nonexistent_override_fails() {
+        let temp_dir = std::env::temp_dir();
+        let result = UserConfig::load(
+            &temp_dir,
+            Some(&"/path/that/does/not/exist/definitely/config.yml".to_string()),
+        );
+        assert!(result.is_err());
+    }
 }

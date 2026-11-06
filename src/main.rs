@@ -39,6 +39,14 @@ struct Cli {
     #[arg(short = 'f', long = "filter", value_name = "PATH")]
     filter_path: Option<PathBuf>,
 
+    /// Print the default configuration YAML to stdout and exit
+    #[arg(long)]
+    print_default_config: bool,
+
+    /// Configuration file or preset name to use (e.g. 'popup' or ~/.config/lazygitrs/config.yml)
+    #[arg(short = 'c', long = "config")]
+    config: Option<String>,
+
     /// Launch directly in the commits panel
     #[arg(long)]
     commits: bool,
@@ -106,6 +114,13 @@ fn main() {
         return;
     }
 
+    if cli.print_default_config {
+        let config = config::user_config::UserConfig::default();
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        println!("{}", yaml);
+        std::process::exit(0);
+    }
+
     // Set up logging if debug mode
     if cli.debug {
         tracing_subscriber::fmt()
@@ -119,7 +134,13 @@ fn main() {
         .or(cli.work_tree)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    match app::App::new(repo_path, cli.debug, cli.filter_path, cli.commits) {
+    match app::App::new(
+        repo_path,
+        cli.debug,
+        cli.config,
+        cli.filter_path,
+        cli.commits,
+    ) {
         Ok(app) => {
             if let Err(e) = app.run() {
                 eprintln!("Error: {:#}", e);
@@ -144,5 +165,23 @@ mod tests {
 
         let cli_default = Cli::parse_from(["lazygitrs"]);
         assert!(!cli_default.commits);
+    }
+
+    #[test]
+    fn test_cli_config_flag() {
+        let cli = Cli::parse_from(["lazygitrs", "-c", "my-config.yml"]);
+        assert_eq!(cli.config.as_deref(), Some("my-config.yml"));
+
+        let cli_long = Cli::parse_from(["lazygitrs", "--config", "popup"]);
+        assert_eq!(cli_long.config.as_deref(), Some("popup"));
+
+        let cli_default = Cli::parse_from(["lazygitrs"]);
+        assert_eq!(cli_default.config, None);
+    }
+
+    #[test]
+    fn test_cli_print_default_config_flag() {
+        let cli = Cli::parse_from(["lazygitrs", "--print-default-config"]);
+        assert!(cli.print_default_config);
     }
 }
